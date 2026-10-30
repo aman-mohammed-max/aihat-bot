@@ -1,0 +1,89 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "aihat-bot-factory",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-30",
+  "alias": { "@aihat/core": "../../packages/core/src/index.ts" },
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "APP_ENV": "development",
+    "MODEL_ALLOWED_ORIGINS": "https://api.openai.com",
+    "HTTP_SKILL_ALLOWED_ORIGINS": "",
+    "MCP_ALLOWED_ORIGINS": "",
+    "TELEGRAM_WEBHOOK_BASE_URL": ""
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BotCoordinator"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "aihat-bot-development",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "../../migrations/sqlite"
+    }
+  ],
+  "r2_buckets": [{ "binding": "OBJECTS", "bucket_name": "aihat-bot-development" }],
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "aihat-bot-development" }],
+    "consumers": [{ "queue": "aihat-bot-development", "max_batch_size": 1, "max_retries": 5 }]
+  },
+  "env": {
+    "staging": {
+      "name": "aihat-bot-factory-staging",
+      "triggers": { "crons": ["* * * * *"] },
+      "vars": {
+        "APP_ENV": "staging",
+        "MODEL_ALLOWED_ORIGINS": "https://api.openai.com",
+        "HTTP_SKILL_ALLOWED_ORIGINS": "",
+        "MCP_ALLOWED_ORIGINS": "",
+        "TELEGRAM_WEBHOOK_BASE_URL": ""
+      },
+      "durable_objects": {
+        "bindings": [{ "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" }]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "aihat-bot-staging",
+          "database_id": "00000000-0000-0000-0000-000000000002",
+          "migrations_dir": "../../migrations/sqlite"
+        }
+      ],
+      "r2_buckets": [{ "binding": "OBJECTS", "bucket_name": "aihat-bot-staging" }],
+      "queues": {
+        "producers": [{ "binding": "JOBS", "queue": "aihat-bot-staging" }],
+        "consumers": [{ "queue": "aihat-bot-staging", "max_batch_size": 1, "max_retries": 5 }]
+      }
+    },
+    "production": {
+      "name": "aihat-bot-factory-production",
+      "triggers": { "crons": ["* * * * *"] },
+      "vars": {
+        "APP_ENV": "production",
+        "MODEL_ALLOWED_ORIGINS": "https://api.openai.com",
+        "HTTP_SKILL_ALLOWED_ORIGINS": "",
+        "MCP_ALLOWED_ORIGINS": "",
+        "TELEGRAM_WEBHOOK_BASE_URL": ""
+      },
+      "durable_objects": {
+        "bindings": [{ "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" }]
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "aihat-bot-production",
+          "database_id": "00000000-0000-0000-0000-000000000003",
+          "migrations_dir": "../../migrations/sqlite"
+        }
+      ],
+      "r2_buckets": [{ "binding": "OBJECTS", "bucket_name": "aihat-bot-production" }],
+      "queues": {
+        "producers": [{ "binding": "JOBS", "queue": "aihat-bot-production" }],
+        "consumers": [{ "queue": "aihat-bot-production", "max_batch_size": 1, "max_retries": 5 }]
+      }
+    }
+  }
+}

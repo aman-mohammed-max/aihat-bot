@@ -1,0 +1,33 @@
+{
+  "name": "aihat-bot-factory",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "typecheck": "bun run typecheck:cloudflare && tsc --noEmit",
+    "typecheck:cloudflare": "bun run --cwd apps/cloudflare-runtime typecheck",
+    "check": "bun run typecheck && biome lint packages apps tests",
+    "format": "biome format --write packages apps tests package.json tsconfig.json biome.json",
+    "format:check": "biome format packages apps tests package.json tsconfig.json biome.json",
+    "lint": "biome lint packages apps tests",
+    "test": "bun test",
+    "build:bun": "bun build packages/core/src/index.ts apps/bun-runtime/src/index.ts apps/bun-runtime/src/migrate.ts apps/bun-runtime/src/sqlite-store.ts apps/bun-runtime/src/file-object-store.ts apps/bun-runtime/src/capabilities.ts apps/bun-runtime/src/bootstrap.ts --target=bun --outdir dist",
+    "build:cloudflare": "bun run --cwd apps/cloudflare-runtime build",
+    "build": "bun run build:bun && bun run build:cloudflare",
+    "dev:bun": "bun --watch apps/bun-runtime/src/index.ts",
+    "start:bun": "bun apps/bun-runtime/src/index.ts",
+    "migrate:bun": "bun apps/bun-runtime/src/migrate.ts",
+    "bootstrap:bun": "bun apps/bun-runtime/src/bootstrap.ts",
+    "dev:cloudflare": "bun run --cwd apps/cloudflare-runtime dev"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.4",
+    "@types/bun": "1.4.4",
+    "@types/node": "26.6.6",
+    "typescript": "^7.0.0",
+    "wrangler": "4.156.0"
+  }
+}

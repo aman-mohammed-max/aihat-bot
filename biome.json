@@ -1,0 +1,26 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.4/schema.json",
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended"
+    }
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": ["**", "!!apps/cloudflare-runtime/worker-configuration.d.ts"]
+  }
+}

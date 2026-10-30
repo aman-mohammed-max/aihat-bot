@@ -1,0 +1,19 @@
+{
+  "name": "@aihat/bun-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "migrate": "bun src/migrate.ts",
+    "bootstrap": "bun src/bootstrap.ts"
+  },
+  "exports": {
+    ".": "./src/sqlite-store.ts",
+    "./objects": "./src/file-object-store.ts"
+  },
+  "dependencies": {
+    "@aihat/core": "workspace:*"
+  }
+}

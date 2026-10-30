@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["./worker-configuration.d.ts", "node"],
+    "paths": {
+      "@aihat/core": ["../../packages/core/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "worker-configuration.d.ts"]
+}

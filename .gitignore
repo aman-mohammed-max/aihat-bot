@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+!.env.example
+coverage/
+.wrangler/
+apps/cloudflare-runtime/worker-configuration.d.ts
+*.log

@@ -1,0 +1,132 @@
+import { createHash } from "node:crypto";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Database } from "bun:sqlite";
+import { AppError } from "@aihat/core";
+
+interface Migration {
+  readonly version: number;
+  readonly name: string;
+  readonly sql: string;
+}
+
+const migrations: readonly Migration[] = [
+  {
+    version: 1,
+    name: "initial",
+    sql: readFileSync(findMigration("0001_initial.sql"), "utf8"),
+  },
+  {
+    version: 2,
+    name: "creation_approvals",
+    sql: readFileSync(findMigration("0002_creation_approvals.sql"), "utf8"),
+  },
+  {
+    version: 3,
+    name: "skill_rate_limits",
+    sql: readFileSync(findMigration("0003_skill_rate_limits.sql"), "utf8"),
+  },
+  {
+    version: 4,
+    name: "mcp_discovered_tools",
+    sql: readFileSync(findMigration("0004_mcp_discovered_tools.sql"), "utf8"),
+  },
+  {
+    version: 5,
+    name: "telegram_webhooks",
+    sql: readFileSync(findMigration("0005_telegram_webhooks.sql"), "utf8"),
+  },
+  {
+    version: 6,
+    name: "telegram_bot_identity",
+    sql: readFileSync(findMigration("0006_telegram_bot_identity.sql"), "utf8"),
+  },
+  {
+    version: 7,
+    name: "telegram_sender_access",
+    sql: readFileSync(findMigration("0007_telegram_sender_access.sql"), "utf8"),
+  },
+];
+
+export function configureSqlite(db: Database): void {
+  db.exec("PRAGMA foreign_keys = ON;");
+  db.exec("PRAGMA busy_timeout = 5000;");
+  db.exec("PRAGMA journal_mode = WAL;");
+  db.exec("PRAGMA synchronous = NORMAL;");
+}
+
+export function applyMigrations(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      checksum TEXT NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+  `);
+
+  const existing = db
+    .query<{ version: number; checksum: string }, []>("SELECT version, checksum FROM schema_migrations")
+    .all();
+  const applied = new Map(existing.map(({ version, checksum }) => [version, checksum]));
+
+  for (const migration of migrations) {
+    const checksum = createHash("sha256").update(migration.sql).digest("hex");
+    const priorChecksum = applied.get(migration.version);
+    if (priorChecksum) {
+      if (priorChecksum !== checksum) {
+        throw new AppError("INTERNAL_ERROR", `Applied migration ${migration.version} was modified.`, 500);
+      }
+      continue;
+    }
+
+    const apply = db.transaction(() => {
+      db.exec(migration.sql);
+      db.query("INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)").run(
+        migration.version,
+        migration.name,
+        checksum,
+        new Date().toISOString(),
+      );
+    });
+    apply.immediate();
+  }
+}
+
+export function openSqliteDatabase(path: string): Database {
+  if (!path.trim()) throw new AppError("VALIDATION_ERROR", "DATABASE_PATH must not be empty.", 400);
+  if (path.startsWith("file:")) {
+    throw new AppError("VALIDATION_ERROR", "DATABASE_PATH must be a filesystem path or :memory:.", 400);
+  }
+  if (path !== ":memory:") {
+    const absolutePath = resolve(path);
+    mkdirSync(dirname(absolutePath), { recursive: true, mode: 0o700 });
+    const descriptor = openSync(absolutePath, "a", 0o600);
+    closeSync(descriptor);
+    chmodSync(absolutePath, 0o600);
+  }
+  const db = new Database(path, { create: true, readwrite: true });
+  try {
+    configureSqlite(db);
+    applyMigrations(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
+function findMigration(filename: string): string {
+  const configured = process.env.MIGRATIONS_PATH;
+  const candidates =
+    configured && filename === "0001_initial.sql"
+      ? [resolve(configured)]
+      : [
+          resolve(process.cwd(), "migrations/sqlite", filename),
+          resolve(fileURLToPath(new URL(`../../../migrations/sqlite/${filename}`, import.meta.url))),
+        ];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) throw new AppError("DEPENDENCY_UNAVAILABLE", `SQLite migration '${filename}' was not found.`, 500);
+  return found;
+}

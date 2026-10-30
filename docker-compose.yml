@@ -1,0 +1,30 @@
+services:
+  aihat-bot-factory:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aihat-bot-factory:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_PATH: /data/aihat.sqlite
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - aihat_data:/data
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  aihat_data:
