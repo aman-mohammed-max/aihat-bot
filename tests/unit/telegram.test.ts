@@ -90,6 +90,11 @@ describe("Telegram webhook integration", () => {
         respond: async (request) => {
           engineCalls.push(request.conversationId);
           expect(request.actorId).toMatch(/^telegram_[a-f0-9]{64}$/);
+          expect(request.actorContext).toEqual({
+            platform: "telegram",
+            telegramDeploymentId: expect.any(String),
+            telegramUserId: 54321,
+          });
           expect(request.messages).toEqual([{ role: "user", content: "Hello from Telegram" }]);
           return { message: { role: "assistant", content: "Welcome." } };
         },
@@ -185,6 +190,23 @@ describe("Telegram webhook integration", () => {
       );
       expect(await allowResponse?.json()).toMatchObject({ allowedUserIds: [54321], pendingUserIds: [] });
 
+      const toolGrantsEndpoint = `${apiUrl}/users/54321/tool-grants`;
+      const setToolGrants = await management(
+        new Request(toolGrantsEndpoint, {
+          method: "PUT",
+          headers: {
+            authorization: `Bearer ${tokenMaterial.token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ toolRefs: ["skill:weather.lookup", "mcp:mcp_server_test:lookup"] }),
+        }),
+      );
+      expect(setToolGrants?.status).toBe(200);
+      expect(await setToolGrants?.json()).toMatchObject({
+        telegramUserId: 54321,
+        toolRefs: ["mcp:mcp_server_test:lookup", "skill:weather.lookup"],
+      });
+
       const accepted = await webhooks(
         new Request(endpoint, {
           method: "POST",
@@ -219,6 +241,15 @@ describe("Telegram webhook integration", () => {
       expect(duplicate?.status).toBe(200);
       expect(engineCalls).toHaveLength(1);
       expect(sentMessages).toHaveLength(1);
+
+      await repositories.replaceTelegramAllowedUsers({
+        deploymentId: deployment.id,
+        telegramUserIds: [],
+        now: new Date().toISOString(),
+      });
+      expect(await repositories.listTelegramToolGrants({ deploymentId: deployment.id, telegramUserId: 54321 })).toEqual(
+        [],
+      );
 
       const removeResponse = await management(
         new Request(apiUrl, {

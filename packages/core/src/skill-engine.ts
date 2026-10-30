@@ -1,5 +1,5 @@
 import { AppError, unsupportedCapability } from "./errors.js";
-import type { SecretStore, SkillRateLimiter, SkillRepository } from "./ports.js";
+import type { SecretStore, SkillRateLimiter, SkillRepository, TelegramRepository } from "./ports.js";
 import type { InstalledSkill, ModelToolDefinition, SkillDefinition } from "./types.js";
 import type { AgentToolRegistry, ToolContext } from "./tools.js";
 
@@ -28,6 +28,7 @@ export interface SkillEngineOptions {
   readonly rateLimiter: SkillRateLimiter;
   readonly secrets: SecretStore;
   readonly allowedHttpOrigins: ReadonlySet<string>;
+  readonly telegramGrants?: Pick<TelegramRepository, "isTelegramToolAllowed">;
   readonly nativeHandlers?: ReadonlyMap<string, NativeSkillHandler>;
   readonly fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }
@@ -39,6 +40,7 @@ export class SkillEngine implements AgentToolRegistry {
   readonly #secrets: SecretStore;
   readonly #allowedOrigins: ReadonlySet<string>;
   readonly #nativeHandlers: ReadonlyMap<string, NativeSkillHandler>;
+  readonly #telegramGrants: SkillEngineOptions["telegramGrants"];
   readonly #fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
   constructor(options: SkillEngineOptions) {
@@ -47,6 +49,7 @@ export class SkillEngine implements AgentToolRegistry {
     this.#secrets = options.secrets;
     this.#allowedOrigins = normalizeAllowedOrigins(options.allowedHttpOrigins);
     this.#nativeHandlers = options.nativeHandlers ?? new Map();
+    this.#telegramGrants = options.telegramGrants;
     this.#fetch = options.fetch ?? fetch;
   }
 
@@ -55,7 +58,7 @@ export class SkillEngine implements AgentToolRegistry {
     const result: ModelToolDefinition[] = [];
     const names = new Set<string>();
     for (const skill of installed) {
-      if (!canUse(skill, context) || skill.definition.executionType === "prompt") continue;
+      if (!(await this.#canActorUse(skill, context)) || skill.definition.executionType === "prompt") continue;
       if (!isSupported(skill.definition, this.#nativeHandlers)) continue;
       if (skill.definition.executionType === "http" && !this.#isHttpAllowed(skill)) continue;
       const name = await toolName(skill.definition.id);
@@ -68,13 +71,15 @@ export class SkillEngine implements AgentToolRegistry {
 
   async promptInstructions(context: ToolContext): Promise<readonly string[]> {
     const installed = await this.#skills.listInstalled(context.tenantId, context.botId);
-    return installed
-      .filter((item) => item.definition.executionType === "prompt" && canUse(item, context))
-      .map((item) => item.definition.configuration.instructions)
-      .filter(
-        (instruction): instruction is string =>
-          typeof instruction === "string" && instruction.length > 0 && instruction.length <= 12_000,
-      );
+    const instructions: string[] = [];
+    for (const item of installed) {
+      if (item.definition.executionType !== "prompt" || !(await this.#canActorUse(item, context))) continue;
+      const instruction = item.definition.configuration.instructions;
+      if (typeof instruction === "string" && instruction.length > 0 && instruction.length <= 12_000) {
+        instructions.push(instruction);
+      }
+    }
+    return instructions;
   }
 
   async execute(context: ToolContext, name: string, input: unknown): Promise<unknown> {
@@ -86,7 +91,7 @@ export class SkillEngine implements AgentToolRegistry {
         break;
       }
     }
-    if (!skill || !canUse(skill, context) || skill.definition.executionType === "prompt") {
+    if (!skill || !(await this.#canActorUse(skill, context)) || skill.definition.executionType === "prompt") {
       throw new AppError("FORBIDDEN", "The requested skill is not installed or authorized for this actor.", 403);
     }
     if (!isSupported(skill.definition, this.#nativeHandlers)) {
@@ -319,6 +324,24 @@ export class SkillEngine implements AgentToolRegistry {
   #isHttpAllowed(skill: InstalledSkill): boolean {
     const config = this.#httpConfiguration(skill);
     return this.#allowedOrigins.has(new URL(config.endpoint).origin);
+  }
+
+  async #canActorUse(skill: InstalledSkill, context: ToolContext): Promise<boolean> {
+    if (!canUse(skill, context)) return false;
+    if (context.platform !== "telegram") return true;
+    if (
+      !this.#telegramGrants ||
+      !context.telegramDeploymentId ||
+      !Number.isSafeInteger(context.telegramUserId) ||
+      (context.telegramUserId ?? 0) < 1
+    ) {
+      return false;
+    }
+    return this.#telegramGrants.isTelegramToolAllowed({
+      deploymentId: context.telegramDeploymentId,
+      telegramUserId: context.telegramUserId as number,
+      toolRef: `skill:${skill.definition.id}`,
+    });
   }
 }
 

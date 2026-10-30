@@ -98,6 +98,7 @@ export default {
     const mcpManager = new McpManager({
       repository: d1.mcp,
       secrets: secretStore,
+      telegramGrants: d1,
       allowedOrigins: new Set(
         env.MCP_ALLOWED_ORIGINS.split(",")
           .map((origin) => origin.trim())
@@ -121,6 +122,7 @@ export default {
           skills: d1.skills,
           rateLimiter: d1.skillRateLimiter,
           secrets: secretStore,
+          telegramGrants: d1,
           allowedHttpOrigins: new Set(
             env.HTTP_SKILL_ALLOWED_ORIGINS.split(",")
               .map((origin) => origin.trim())
@@ -195,6 +197,7 @@ export default {
     const mcpManager = new McpManager({
       repository: d1.mcp,
       secrets: secretStore,
+      telegramGrants: d1,
       allowedOrigins: new Set(
         env.MCP_ALLOWED_ORIGINS.split(",")
           .map((origin) => origin.trim())
@@ -209,6 +212,7 @@ export default {
           skills: d1.skills,
           rateLimiter: d1.skillRateLimiter,
           secrets: secretStore,
+          telegramGrants: d1,
           allowedHttpOrigins: new Set(
             env.HTTP_SKILL_ALLOWED_ORIGINS.split(",")
               .map((origin) => origin.trim())

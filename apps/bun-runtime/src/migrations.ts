@@ -47,6 +47,11 @@ const migrations: readonly Migration[] = [
     name: "telegram_sender_access",
     sql: readFileSync(findMigration("0007_telegram_sender_access.sql"), "utf8"),
   },
+  {
+    version: 8,
+    name: "telegram_tool_grants",
+    sql: readFileSync(findMigration("0008_telegram_tool_grants.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {

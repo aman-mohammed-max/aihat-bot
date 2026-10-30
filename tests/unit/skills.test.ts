@@ -11,6 +11,7 @@ import type {
   BotId,
   InstalledSkill,
   SkillDefinition,
+  TelegramDeploymentId,
   TenantId,
   UserId,
 } from "../../packages/core/src/types.js";
@@ -80,6 +81,46 @@ function rateLimiter(consume: SkillRateLimiter["consume"] = async () => true): S
 const secrets: SecretStore = { resolve: async () => "test-secret" };
 
 describe("skill engine", () => {
+  test("requires a per-user grant before exposing or executing a Telegram skill", async () => {
+    let allowed = false;
+    const deploymentId = "dep_123e4567-e89b-12d3-a456-426614174000" as TelegramDeploymentId;
+    const engine = new SkillEngine({
+      skills: skillRepository([installation()]),
+      rateLimiter: rateLimiter(),
+      secrets,
+      allowedHttpOrigins: new Set(["https://weather.example.test"]),
+      telegramGrants: {
+        isTelegramToolAllowed: async (input) =>
+          allowed &&
+          input.deploymentId === deploymentId &&
+          input.telegramUserId === 789 &&
+          input.toolRef === "skill:weather.lookup",
+      },
+      fetch: async () => Response.json({ forecast: "sunny" }),
+    });
+    const telegramContext = {
+      ...context,
+      platform: "telegram" as const,
+      telegramDeploymentId: deploymentId,
+      telegramUserId: 789,
+    };
+    const [apiTool] = await engine.available(context);
+    if (!apiTool) throw new Error("Expected owner API access to the installed skill.");
+    expect(await engine.available(telegramContext)).toEqual([]);
+    await expect(engine.execute(telegramContext, apiTool.name, { city: "Oslo" })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    allowed = true;
+    expect(await engine.available(telegramContext)).toEqual([apiTool]);
+    await expect(engine.execute(telegramContext, apiTool.name, { city: "Oslo" })).resolves.toEqual({
+      forecast: "sunny",
+    });
+    allowed = false;
+    await expect(engine.execute(telegramContext, apiTool.name, { city: "Oslo" })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+  });
+
   test("advertises only enabled, fully granted skills on deployment-approved origins", async () => {
     const engine = new SkillEngine({
       skills: skillRepository([

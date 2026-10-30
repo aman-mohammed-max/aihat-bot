@@ -113,6 +113,21 @@ export interface TelegramRepository {
     readonly telegramUserIds: readonly number[];
     readonly now: string;
   }): Promise<void>;
+  listTelegramToolGrants(input: {
+    readonly deploymentId: TelegramDeploymentId;
+    readonly telegramUserId: number;
+  }): Promise<readonly string[]>;
+  replaceTelegramToolGrants(input: {
+    readonly deploymentId: TelegramDeploymentId;
+    readonly telegramUserId: number;
+    readonly toolRefs: readonly string[];
+    readonly now: string;
+  }): Promise<void>;
+  isTelegramToolAllowed(input: {
+    readonly deploymentId: TelegramDeploymentId;
+    readonly telegramUserId: number;
+    readonly toolRef: string;
+  }): Promise<boolean>;
   getOrCreateTelegramConversation(input: {
     readonly tenantId: TenantId;
     readonly botId: BotId;

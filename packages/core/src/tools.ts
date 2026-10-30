@@ -1,7 +1,7 @@
 import { AppError } from "./errors.js";
-import type { ModelToolDefinition, TenantId, BotId, UserId } from "./types.js";
+import type { AgentActorContext, ModelToolDefinition, TenantId, BotId, UserId } from "./types.js";
 
-export interface ToolContext {
+export interface ToolContext extends AgentActorContext {
   readonly tenantId: TenantId;
   readonly botId: BotId;
   readonly actorId: UserId;

@@ -6,6 +6,7 @@ import type { BotId, TelegramDeploymentId } from "./types.js";
 import type { TelegramManager } from "./telegram.js";
 
 const TELEGRAM_ROUTE = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/telegram$/;
+const TELEGRAM_TOOL_GRANTS_ROUTE = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/telegram\/users\/(\d+)\/tool-grants$/;
 const WEBHOOK_ROUTE = /^\/webhooks\/telegram\/(dep_[a-f0-9-]{36})$/;
 
 export function createTelegramManagementApiHandler(
@@ -15,13 +16,61 @@ export function createTelegramManagementApiHandler(
   telegram: TelegramManager,
 ): (request: Request) => Promise<Response | undefined> {
   return async (request) => {
-    const match = TELEGRAM_ROUTE.exec(new URL(request.url).pathname);
-    if (!match) return undefined;
-    const botId = match[1] as BotId;
+    const pathname = new URL(request.url).pathname;
+    const match = TELEGRAM_ROUTE.exec(pathname);
+    const toolGrantMatch = TELEGRAM_TOOL_GRANTS_ROUTE.exec(pathname);
+    if (!match && !toolGrantMatch) return undefined;
+    const botId = (match?.[1] ?? toolGrantMatch?.[1]) as BotId;
     try {
       const principal = await authenticator.authenticate(request);
       const bot = await bots.get(principal.tenantId, botId);
       if (!bot || bot.ownerId !== principal.ownerId) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+
+      if (toolGrantMatch) {
+        if (request.method === "GET") requireApiScope(principal, "bots:read");
+        else if (request.method === "PUT") requireApiScope(principal, "bots:write");
+        else return methodNotAllowed("GET, PUT");
+        const telegramUserId = Number(toolGrantMatch[2]);
+        if (!Number.isSafeInteger(telegramUserId) || telegramUserId < 1) {
+          throw new AppError("VALIDATION_ERROR", "Telegram user ID is invalid.", 400);
+        }
+        const deployment = await deployments.getOwnedTelegramDeployment({
+          tenantId: principal.tenantId,
+          ownerId: principal.ownerId,
+          botId,
+        });
+        if (!deployment) throw new AppError("NOT_FOUND", "Telegram deployment was not found.", 404);
+        if (!(await deployments.isTelegramSenderAllowed({ deploymentId: deployment.id, telegramUserId }))) {
+          throw new AppError("FORBIDDEN", "Telegram tool grants require an approved sender.", 403);
+        }
+        if (request.method === "GET") {
+          const toolRefs = await deployments.listTelegramToolGrants({ deploymentId: deployment.id, telegramUserId });
+          return Response.json({ botId, telegramUserId, toolRefs }, { headers: { "cache-control": "no-store" } });
+        }
+        if (request.method === "PUT") {
+          const body = await readJsonBody(request, 65_536);
+          if (
+            Object.keys(body).length !== 1 ||
+            !Array.isArray(body.toolRefs) ||
+            body.toolRefs.some((value) => typeof value !== "string")
+          ) {
+            throw new AppError(
+              "VALIDATION_ERROR",
+              "Provide only a toolRefs array of skill or MCP tool references.",
+              400,
+            );
+          }
+          await deployments.replaceTelegramToolGrants({
+            deploymentId: deployment.id,
+            telegramUserId,
+            toolRefs: body.toolRefs as string[],
+            now: new Date().toISOString(),
+          });
+          const toolRefs = await deployments.listTelegramToolGrants({ deploymentId: deployment.id, telegramUserId });
+          return Response.json({ botId, telegramUserId, toolRefs }, { headers: { "cache-control": "no-store" } });
+        }
+        return methodNotAllowed("GET, PUT");
+      }
 
       if (request.method === "GET") {
         requireApiScope(principal, "bots:read");
@@ -134,17 +183,17 @@ export function createTelegramWebhookHandler(
   };
 }
 
-async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
+async function readJsonBody(request: Request, maxBytes = 8192): Promise<Record<string, unknown>> {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     throw new AppError("VALIDATION_ERROR", "Request body must use application/json.", 415);
   }
   const length = Number(request.headers.get("content-length"));
-  if (Number.isFinite(length) && length > 8192)
+  if (Number.isFinite(length) && length > maxBytes)
     throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
   let value: unknown;
   try {
     const raw = await request.text();
-    if (new TextEncoder().encode(raw).byteLength > 8192)
+    if (new TextEncoder().encode(raw).byteLength > maxBytes)
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     value = JSON.parse(raw);
   } catch (cause) {

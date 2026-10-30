@@ -42,6 +42,7 @@ export function createAgentApiHandler(
         bot,
         conversationId,
         actorId: principal.ownerId,
+        actorContext: { platform: "api" },
         messages: [{ role: "user", content: body.message }],
       });
       return Response.json(

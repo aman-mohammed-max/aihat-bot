@@ -202,6 +202,7 @@ export class ScheduledTaskRunner {
             bot,
             conversationId,
             actorId: task.ownerId,
+            actorContext: { platform: "scheduled" },
             messages: [{ role: "user", content: task.prompt }],
           });
           resultText = result.message.content.slice(0, 100_000);

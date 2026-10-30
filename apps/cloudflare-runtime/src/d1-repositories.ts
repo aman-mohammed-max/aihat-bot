@@ -913,10 +913,18 @@ export class CloudflareD1Repositories
       .first<{ id: string }>();
     if (!deployment) throw new AppError("NOT_FOUND", "Telegram deployment was not found.", 404);
     const statements = [
-      this.db.prepare("DELETE FROM telegram_allowed_users WHERE deployment_id = ?").bind(input.deploymentId),
+      input.telegramUserIds.length === 0
+        ? this.db.prepare("DELETE FROM telegram_allowed_users WHERE deployment_id = ?").bind(input.deploymentId)
+        : this.db
+            .prepare(
+              `DELETE FROM telegram_allowed_users WHERE deployment_id = ? AND telegram_user_id NOT IN (${input.telegramUserIds.map(() => "?").join(", ")})`,
+            )
+            .bind(input.deploymentId, ...input.telegramUserIds),
       ...input.telegramUserIds.map((telegramUserId) =>
         this.db
-          .prepare("INSERT INTO telegram_allowed_users (deployment_id, telegram_user_id, created_at) VALUES (?, ?, ?)")
+          .prepare(
+            "INSERT INTO telegram_allowed_users (deployment_id, telegram_user_id, created_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+          )
           .bind(input.deploymentId, telegramUserId, input.now),
       ),
       this.db
@@ -933,6 +941,78 @@ export class CloudflareD1Repositories
     } catch {
       throw new AppError("CONFLICT", "Telegram sender access could not be updated.", 409);
     }
+  }
+
+  async listTelegramToolGrants(input: {
+    deploymentId: TelegramDeploymentId;
+    telegramUserId: number;
+  }): Promise<readonly string[]> {
+    validateTelegramUserId(input.telegramUserId);
+    const result = await this.db
+      .prepare(`
+        SELECT g.tool_ref FROM telegram_tool_grants AS g
+        JOIN telegram_allowed_users AS a
+          ON a.deployment_id = g.deployment_id AND a.telegram_user_id = g.telegram_user_id
+        WHERE g.deployment_id = ? AND g.telegram_user_id = ? ORDER BY g.tool_ref
+      `)
+      .bind(input.deploymentId, input.telegramUserId)
+      .all<{ tool_ref: string }>();
+    return result.results.map(({ tool_ref }) => tool_ref);
+  }
+
+  async replaceTelegramToolGrants(input: {
+    deploymentId: TelegramDeploymentId;
+    telegramUserId: number;
+    toolRefs: readonly string[];
+    now: string;
+  }): Promise<void> {
+    validateTelegramUserId(input.telegramUserId);
+    validateTelegramToolRefs(input.toolRefs);
+    const allowed = await this.db
+      .prepare(`
+        SELECT 1 AS allowed FROM bot_deployments AS d
+        JOIN telegram_allowed_users AS a ON a.deployment_id = d.id
+        WHERE d.id = ? AND d.interface = 'telegram' AND d.status = 'active' AND a.telegram_user_id = ?
+      `)
+      .bind(input.deploymentId, input.telegramUserId)
+      .first<{ allowed: number }>();
+    if (!allowed) throw new AppError("FORBIDDEN", "Telegram tool grants require an approved sender.", 403);
+    const statements = [
+      this.db
+        .prepare("DELETE FROM telegram_tool_grants WHERE deployment_id = ? AND telegram_user_id = ?")
+        .bind(input.deploymentId, input.telegramUserId),
+      ...input.toolRefs.map((toolRef) =>
+        this.db
+          .prepare(
+            "INSERT INTO telegram_tool_grants (deployment_id, telegram_user_id, tool_ref, created_at) VALUES (?, ?, ?, ?)",
+          )
+          .bind(input.deploymentId, input.telegramUserId, toolRef, input.now),
+      ),
+    ];
+    try {
+      await this.db.batch(statements);
+    } catch {
+      throw new AppError("CONFLICT", "Telegram tool grants could not be updated.", 409);
+    }
+  }
+
+  async isTelegramToolAllowed(input: {
+    deploymentId: TelegramDeploymentId;
+    telegramUserId: number;
+    toolRef: string;
+  }): Promise<boolean> {
+    validateTelegramUserId(input.telegramUserId);
+    const row = await this.db
+      .prepare(`
+        SELECT 1 AS allowed FROM telegram_tool_grants AS g
+        JOIN telegram_allowed_users AS a
+          ON a.deployment_id = g.deployment_id AND a.telegram_user_id = g.telegram_user_id
+        JOIN bot_deployments AS d ON d.id = g.deployment_id AND d.interface = 'telegram'
+        WHERE g.deployment_id = ? AND g.telegram_user_id = ? AND g.tool_ref = ? AND d.status = 'active'
+      `)
+      .bind(input.deploymentId, input.telegramUserId, input.toolRef)
+      .first<{ allowed: number }>();
+    return row !== null;
   }
 
   async getOrCreateTelegramConversation(input: {
@@ -2048,6 +2128,20 @@ function validateTelegramUserIds(values: readonly number[]): void {
     throw new AppError("VALIDATION_ERROR", "Telegram allowlist must contain up to 100 unique user IDs.", 400);
   }
   for (const value of values) validateTelegramUserId(value);
+}
+
+function validateTelegramToolRefs(values: readonly string[]): void {
+  if (values.length > 100 || new Set(values).size !== values.length) {
+    throw new AppError("VALIDATION_ERROR", "Telegram tool grants must contain up to 100 unique references.", 400);
+  }
+  for (const value of values) {
+    const skill = /^skill:([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/.exec(value);
+    const mcp = /^mcp:(mcp_[A-Za-z0-9_-]{1,100}):(.{1,128})$/.exec(value);
+    if (!skill && !mcp) throw new AppError("VALIDATION_ERROR", "Telegram tool grant reference is invalid.", 400);
+    if ([...value].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) {
+      throw new AppError("VALIDATION_ERROR", "Telegram tool grant reference is invalid.", 400);
+    }
+  }
 }
 
 function parseScopes(scopesJson: string): readonly string[] {

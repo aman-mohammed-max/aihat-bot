@@ -6,6 +6,12 @@ export type TelegramDeploymentId = string & { readonly __brand: "TelegramDeploym
 export type ScheduledTaskId = string & { readonly __brand: "ScheduledTaskId" };
 export type JobId = string & { readonly __brand: "JobId" };
 
+export interface AgentActorContext {
+  readonly platform?: "api" | "telegram" | "scheduled";
+  readonly telegramDeploymentId?: TelegramDeploymentId;
+  readonly telegramUserId?: number;
+}
+
 export type BotVisibility = "private" | "shared" | "public" | "invitation";
 export type BotStatus = "draft" | "published" | "disabled";
 
@@ -82,6 +88,7 @@ export interface AgentRequest {
   readonly conversationId: ConversationId;
   readonly messages: readonly ConversationMessage[];
   readonly actorId: UserId;
+  readonly actorContext?: AgentActorContext;
 }
 
 export interface AgentResponse {

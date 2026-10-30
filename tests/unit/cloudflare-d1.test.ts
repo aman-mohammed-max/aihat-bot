@@ -433,6 +433,47 @@ describe("Cloudflare D1 repositories", () => {
       });
       expect(await repos.getTelegramAccessPolicy(deploymentId)).toEqual({ allowedUserIds: [22], pendingUserIds: [] });
       expect(await repos.isTelegramSenderAllowed({ deploymentId, telegramUserId: 22 })).toBe(true);
+      await repos.replaceTelegramToolGrants({
+        deploymentId,
+        telegramUserId: 22,
+        toolRefs: ["skill:weather.lookup", "mcp:mcp_server_test:lookup"],
+        now: "2026-10-30T00:02:00.000Z",
+      });
+      expect(await repos.listTelegramToolGrants({ deploymentId, telegramUserId: 22 })).toEqual([
+        "mcp:mcp_server_test:lookup",
+        "skill:weather.lookup",
+      ]);
+      expect(
+        await repos.isTelegramToolAllowed({
+          deploymentId,
+          telegramUserId: 22,
+          toolRef: "skill:weather.lookup",
+        }),
+      ).toBe(true);
+      await repos.replaceTelegramAllowedUsers({
+        deploymentId,
+        telegramUserIds: [22, 23],
+        now: "2026-10-30T00:03:00.000Z",
+      });
+      expect(await repos.listTelegramToolGrants({ deploymentId, telegramUserId: 22 })).toHaveLength(2);
+      await repos.replaceTelegramAllowedUsers({
+        deploymentId,
+        telegramUserIds: [23],
+        now: "2026-10-30T00:04:00.000Z",
+      });
+      expect(await repos.listTelegramToolGrants({ deploymentId, telegramUserId: 22 })).toEqual([]);
+      expect(
+        await repos.isTelegramToolAllowed({
+          deploymentId,
+          telegramUserId: 22,
+          toolRef: "skill:weather.lookup",
+        }),
+      ).toBe(false);
+      await repos.replaceTelegramAllowedUsers({
+        deploymentId,
+        telegramUserIds: [22],
+        now: "2026-10-30T00:05:00.000Z",
+      });
       for (let index = 1; index <= 101; index += 1) {
         await repos.recordTelegramAccessRequest({
           deploymentId,
@@ -556,6 +597,7 @@ function createDatabase(): Database {
     "0005_telegram_webhooks.sql",
     "0006_telegram_bot_identity.sql",
     "0007_telegram_sender_access.sql",
+    "0008_telegram_tool_grants.sql",
   ]) {
     const migration = readFileSync(new URL(`../../migrations/sqlite/${migrationName}`, import.meta.url), "utf8");
     db.exec(migration);

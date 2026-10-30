@@ -33,7 +33,12 @@ export class AgentOrchestrator implements AgentEngine {
       throw new AppError("VALIDATION_ERROR", "An agent turn must contain one or more new user messages only.", 400);
     }
     const provider = this.#providers.get(request.bot.model.providerId);
-    const context = { tenantId: request.bot.tenantId, botId: request.bot.id, actorId: request.actorId };
+    const context = {
+      tenantId: request.bot.tenantId,
+      botId: request.bot.id,
+      actorId: request.actorId,
+      ...(request.actorContext ?? {}),
+    };
     const availableTools = await this.#tools.available(context);
     const skillInstructions = (await this.#tools.promptInstructions?.(context)) ?? [];
     const capabilities = provider.capabilities(request.bot.model);

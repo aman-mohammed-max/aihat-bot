@@ -46,6 +46,7 @@ const secretStore = {
 const mcpManager = new McpManager({
   repository: repositories.mcp,
   secrets: secretStore,
+  telegramGrants: repositories,
   allowedOrigins: new Set(
     (process.env.MCP_ALLOWED_ORIGINS ?? "")
       .split(",")
@@ -61,6 +62,7 @@ const agentEngine = createOpenAICompatibleAgentEngine({
       skills: repositories.skills,
       rateLimiter: repositories.skillRateLimiter,
       secrets: secretStore,
+      telegramGrants: repositories,
       allowedHttpOrigins: new Set(
         (process.env.HTTP_SKILL_ALLOWED_ORIGINS ?? "")
           .split(",")

@@ -33,7 +33,7 @@ Core platform foundation with Telegram text webhook support; broader product fea
 - Added tenant-scoped D1 repositories for bots, idempotent draft creation, publication, factory sessions with optimistic revisions, atomic conversation turns, and encrypted secret records.
 - Added a stable per-tenant/bot SQLite-backed Durable Object scheduler. Its one-shot alarms enqueue opaque task references; no prompt text or credentials enter the object or Queue message.
 - Added Cloudflare R2 and Bun file object-store adapters behind the same shared `ObjectStore` interface, each enforcing tenant-scoped identifiers, content types, and a 25 MiB limit.
-- Added runtime capability responses to make missing features explicit. Telegram is available when `TELEGRAM_WEBHOOK_BASE_URL` is configured. Both runtimes support API-token authentication, prompt skills, allowlisted HTTP skills, and allowlisted MCP Streamable HTTP; end-user login, MCP OAuth, and native/custom-code execution remain unavailable. Cloudflare also reports Queue processing as unavailable.
+- Added runtime capability responses to make missing features explicit. Telegram is available when `TELEGRAM_WEBHOOK_BASE_URL` is configured. Both runtimes support API-token authentication, prompt skills, allowlisted HTTP skills, and allowlisted MCP Streamable HTTP; end-user login, MCP OAuth, and native/custom-code execution remain unavailable.
 - Added shared opaque API-token authentication: 256-bit random tokens, SHA-256-only persistence, active membership checks, scoped authorization helpers, expiry, and revocation in Bun SQLite and D1.
 - Added shared `GET /v1/whoami`, `POST /v1/tokens`, and `DELETE /v1/tokens/{tokenId}` routes. Token creation requires `tokens:manage`, validates scopes and expiry, and returns plaintext only once with `Cache-Control: no-store`.
 - Added shared authenticated factory-session APIs for start/read/pause/resume/answer/draft/publish and approval issuance. Sensitive approvals are opaque, short-lived, one-use, and bound to one tenant, owner, session, and action.
@@ -52,6 +52,7 @@ Core platform foundation with Telegram text webhook support; broader product fea
 - Added text-message delivery through the shared agent engine, pseudonymous sender IDs, conversation reuse by chat/thread/sender, outbound message chunking, and persisted duplicate-update reservations in Bun SQLite and D1 through migration `0005_telegram_webhooks.sql`.
 - Added a cross-deployment unique Telegram bot identity constraint in migration `0006_telegram_bot_identity.sql`, preventing one Telegram bot token from silently replacing another deployment's webhook.
 - Added default-closed Telegram sender authorization in migration `0007_telegram_sender_access.sql`. First-seen sender IDs are recorded as pending; bot owners inspect and approve up to 100 numeric Telegram user IDs through the management API before those users can reach the agent.
+- Added per-sender Telegram skill and MCP tool grants in migration `0008_telegram_tool_grants.sql`. Owners manage grants through a bot-scoped API; both bot-level permission and per-user permission are checked at tool discovery and execution, and removing a sender from the allowlist removes their grants.
 - Added Telegram integration tests for token handling, webhook registration, invalid-secret rejection before token resolution, message delivery, duplicate updates, and storage isolation/recovery.
 - Added tenant-scoped durable scheduled-task APIs for one-time and timezone-aware daily schedules, with recipient validation against the Telegram owner allowlist.
 - Added persisted schedule/job adapters in Bun SQLite and D1, stable job IDs, job claims with expiring leases, persisted model results, bounded retry backoff, pause/resume, and task completion/failure state.
@@ -74,7 +75,7 @@ Core platform foundation with Telegram text webhook support; broader product fea
 - Implement retry policy, durable/idempotent tool execution, concrete secret redaction, and runtime persistence adapters.
 - Add end-user login, broader permission evaluation, approval audit records, tenant membership management, API rate limiting, and webhook security boundaries in both runtimes.
 - Expose bot version history and add explicit authorization/approval audit adapters.
-- Add Telegram media handling, per-sender tool grants, and delivery guarantees beyond at-least-once Telegram sends.
+- Add Telegram media handling and delivery guarantees beyond at-least-once Telegram sends.
 - Implement the dashboard and complete deployment/troubleshooting documentation.
 
 ## Known issues and constraints
@@ -87,22 +88,22 @@ Core platform foundation with Telegram text webhook support; broader product fea
 - Cloudflare alarms and Queue consumers execute scheduled tasks through D1-backed jobs. Telegram's send API cannot deduplicate outbound notifications, so a crash after Telegram accepts a message but before D1 records completion can produce a duplicate; retries are at-least-once.
 - Encrypted-secret operations require deployment-injected keyrings. R2 and Bun object storage currently buffer files up to 25 MiB.
 - MCP currently supports static bearer credentials over Streamable HTTP. OAuth, SSE-only transports, reconnect scheduling, and permissions beyond the explicit `mcp:invoke` grant are unavailable.
-- Telegram currently processes text updates only. Only owner-approved sender IDs can invoke the agent, but installed skill/MCP grants remain bot-wide among those approved users. Do not connect owner-sensitive tools until per-sender tool grants are implemented.
+- Telegram currently processes text updates only. Only owner-approved sender IDs can invoke the agent, and each sender needs an explicit grant for every installed skill or enabled MCP tool in addition to the bot-level grant.
 - Telegram bot tokens are submitted over HTTPS through the owner-scoped management API and encrypted at rest; `TELEGRAME_BOT_TOKEN` and `TELEGRAM_BOT_TOKEN` environment variables are not consumed by the runtime.
 - Security controls required for public use are not yet implemented; this repository is not production-ready.
 
 ## Validation
 
 - Unit tests executed: `bun test`.
-- Tests passed: 33.
-- Assertions: 308.
+- Tests passed: 40.
+- Assertions: 357.
 - Tests failed: none.
 - `git diff --check`: passed.
 - Full `bun run check`: passed, including Wrangler type generation, both TypeScript configurations, and Biome lint.
 - Formatting: `bun run format` and `bun run format:check` passed.
 - Bun and Cloudflare build checks: `bun run build` passed; Wrangler reported development D1, R2, Queue, and Durable Object bindings.
 - Migration smoke check: applied the file-backed SQLite migration twice; verified database mode 0600 and parent directory mode 0700.
-- Wrangler 4.156.0: local D1 migrations through `0007_telegram_sender_access.sql` applied successfully.
+- Wrangler 4.156.0: local D1 migrations through `0008_telegram_tool_grants.sql` applied successfully.
 - Wrangler 4.156.0: development, staging, and production `deploy --dry-run` checks passed.
 - Docker Compose configuration and the multi-stage image build passed. The container ran as the non-root user with a temporary UID-owned SQLite mount; `/health` and `/ready` returned HTTP 200.
 - Local Cloudflare Worker smoke check: `/health` and `/ready` both returned HTTP 200; readiness instantiated the Durable Object and queried D1.

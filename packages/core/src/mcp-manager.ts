@@ -2,7 +2,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import type { FetchLike, JsonSchemaType } from "@modelcontextprotocol/client";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
 import { AppError } from "./errors.js";
-import type { McpRepository, SecretStore } from "./ports.js";
+import type { McpRepository, SecretStore, TelegramRepository } from "./ports.js";
 import type { McpDiscoveredTool, McpRemoteTool, McpServerConnection, TenantId } from "./types.js";
 import type { AgentToolRegistry, ToolContext } from "./tools.js";
 
@@ -18,6 +18,7 @@ export class McpManager implements AgentToolRegistry {
   readonly #allowedOrigins: ReadonlySet<string>;
   readonly #fetch: FetchLike;
   readonly #timeoutMs: number;
+  readonly #telegramGrants: Pick<TelegramRepository, "isTelegramToolAllowed"> | undefined;
 
   constructor(input: {
     readonly repository: McpRepository;
@@ -25,12 +26,14 @@ export class McpManager implements AgentToolRegistry {
     readonly allowedOrigins: ReadonlySet<string>;
     readonly fetch?: FetchLike;
     readonly timeoutMs?: number;
+    readonly telegramGrants?: Pick<TelegramRepository, "isTelegramToolAllowed">;
   }) {
     this.#repository = input.repository;
     this.#secrets = input.secrets;
     this.#allowedOrigins = normalizeAllowedOrigins(input.allowedOrigins);
     this.#fetch = input.fetch ?? fetch;
     this.#timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#telegramGrants = input.telegramGrants;
     if (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs < 100 || this.#timeoutMs > 120_000) {
       throw new AppError("VALIDATION_ERROR", "MCP timeout must be between 100 and 120000 milliseconds.", 400);
     }
@@ -139,7 +142,7 @@ export class McpManager implements AgentToolRegistry {
     for (const server of servers) {
       if (server.status !== "connected") continue;
       for (const tool of await this.#repository.listTools(context.tenantId, context.botId, server.id)) {
-        if (!isAuthorized(tool)) continue;
+        if (!isAuthorized(tool) || !(await this.#canActorUse(context, server.id, tool.name))) continue;
         tools.push({
           name: exposedToolName(server.id, tool.name),
           description: tool.description
@@ -161,7 +164,7 @@ export class McpManager implements AgentToolRegistry {
       const tools = await this.#repository.listTools(context.tenantId, context.botId, server.id);
       const tool = tools.find((candidate) => exposedToolName(server.id, candidate.name) === name);
       if (!tool) continue;
-      if (!isAuthorized(tool))
+      if (!isAuthorized(tool) || !(await this.#canActorUse(context, server.id, tool.name)))
         throw new AppError("FORBIDDEN", "The requested MCP tool is not enabled for this bot.", 403);
       let validatedInput: unknown;
       try {
@@ -208,6 +211,23 @@ export class McpManager implements AgentToolRegistry {
 
   async promptInstructions(_context: ToolContext): Promise<readonly string[]> {
     return [];
+  }
+
+  async #canActorUse(context: ToolContext, serverId: string, toolName: string): Promise<boolean> {
+    if (context.platform !== "telegram") return true;
+    if (
+      !this.#telegramGrants ||
+      !context.telegramDeploymentId ||
+      !Number.isSafeInteger(context.telegramUserId) ||
+      (context.telegramUserId ?? 0) < 1
+    ) {
+      return false;
+    }
+    return this.#telegramGrants.isTelegramToolAllowed({
+      deploymentId: context.telegramDeploymentId,
+      telegramUserId: context.telegramUserId as number,
+      toolRef: `mcp:${serverId}:${toolName}`,
+    });
   }
 
   async #requiredServer(tenantId: TenantId, botId: ToolContext["botId"], serverId: string) {

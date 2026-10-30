@@ -11,6 +11,7 @@ import type {
   BotId,
   UserId,
   BotDefinition,
+  TelegramDeploymentId,
 } from "../../packages/core/src/types.js";
 
 const tenantId = "tenant_test" as TenantId;
@@ -64,6 +65,7 @@ describe("MCP manager", () => {
 
   test("discovers disabled tools, requires an explicit grant, validates and executes input", async () => {
     const state = memoryRepository();
+    let telegramSenderGranted = false;
     const requests: { method: string; authorization: string | null }[] = [];
     const fetchMock: TestFetch = async (input, init) => {
       const request = input instanceof Request ? input : new Request(input, init);
@@ -95,6 +97,13 @@ describe("MCP manager", () => {
       repository: state.repository,
       secrets: { resolve: async () => "secret-token" },
       allowedOrigins: new Set(["https://mcp.example.com"]),
+      telegramGrants: {
+        isTelegramToolAllowed: async (input) =>
+          telegramSenderGranted &&
+          input.deploymentId === ("dep_123e4567-e89b-12d3-a456-426614174000" as TelegramDeploymentId) &&
+          input.telegramUserId === 789 &&
+          input.toolRef === "mcp:mcp_server_test:lookup",
+      },
       fetch: fetchMock,
     });
     await manager.addServer({ id: "mcp_server_test", tenantId, botId, name: "Test", endpoint, installedBy: ownerId });
@@ -134,6 +143,21 @@ describe("MCP manager", () => {
     await expect(
       manager.execute({ tenantId, botId, actorId: ownerId }, exposedName, { key: "item-1" }),
     ).resolves.toEqual({ value: "found" });
+    const telegramContext = {
+      tenantId,
+      botId,
+      actorId: ownerId,
+      platform: "telegram" as const,
+      telegramDeploymentId: "dep_123e4567-e89b-12d3-a456-426614174000" as TelegramDeploymentId,
+      telegramUserId: 789,
+    };
+    expect(await manager.available(telegramContext)).toEqual([]);
+    await expect(manager.execute(telegramContext, exposedName, { key: "item-1" })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    telegramSenderGranted = true;
+    expect(await manager.available(telegramContext)).toHaveLength(1);
+    await expect(manager.execute(telegramContext, exposedName, { key: "item-1" })).resolves.toEqual({ value: "found" });
     expect(requests.every(({ authorization }) => authorization === null)).toBe(true);
   });
 

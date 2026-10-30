@@ -286,6 +286,11 @@ export class TelegramManager {
       bot,
       conversationId,
       actorId,
+      actorContext: {
+        platform: "telegram",
+        telegramDeploymentId: deployment.id,
+        telegramUserId: message.from.id,
+      },
       messages: [{ role: "user", content: message.text.slice(0, 10_000) }],
     });
     return result.message.content.slice(0, 100_000);
