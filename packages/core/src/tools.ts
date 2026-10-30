@@ -1,10 +1,26 @@
 import { AppError } from "./errors.js";
-import type { AgentActorContext, ModelToolDefinition, TenantId, BotId, UserId } from "./types.js";
+import type { AgentActorContext, AgentImageAttachment, ModelToolDefinition, TenantId, BotId, UserId } from "./types.js";
+
+const toolResultAttachments = new WeakMap<object, readonly AgentImageAttachment[]>();
+
+/** Mark trusted tool output for delivery beside the assistant message without serializing URLs into model context. */
+export function withToolAttachments<T extends object>(result: T, attachments: readonly AgentImageAttachment[]): T {
+  const bounded = attachments.slice(0, 4).map((attachment) => Object.freeze({ ...attachment }));
+  toolResultAttachments.set(result, Object.freeze(bounded));
+  return result;
+}
+
+export function getToolAttachments(result: unknown): readonly AgentImageAttachment[] {
+  return result !== null && typeof result === "object" ? (toolResultAttachments.get(result) ?? []) : [];
+}
 
 export interface ToolContext extends AgentActorContext {
   readonly tenantId: TenantId;
   readonly botId: BotId;
   readonly actorId: UserId;
+  readonly signal?: AbortSignal;
+  /** Stable for one model-issued tool call and reused when an API request or webhook is retried. */
+  readonly executionKey?: string;
 }
 
 export interface ToolPermissionChecker {
@@ -121,7 +137,18 @@ export class ToolRegistry implements AgentToolRegistry {
     }
 
     const controller = new AbortController();
+    const abortFromContext = () => controller.abort(context.signal?.reason);
+    context.signal?.addEventListener("abort", abortFromContext, { once: true });
+    if (context.signal?.aborted) abortFromContext();
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let rejectCancelled: (() => void) | undefined;
+    const cancelled = context.signal
+      ? new Promise<never>((_, reject) => {
+          rejectCancelled = () => reject(new AppError("DEPENDENCY_UNAVAILABLE", "Tool execution was cancelled.", 504));
+          if (context.signal?.aborted) rejectCancelled();
+          else context.signal?.addEventListener("abort", rejectCancelled, { once: true });
+        })
+      : new Promise<never>(() => undefined);
     try {
       const timeout = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(() => {
@@ -129,12 +156,14 @@ export class ToolRegistry implements AgentToolRegistry {
           reject(new AppError("DEPENDENCY_UNAVAILABLE", "Tool execution timed out.", 504));
         }, tool.timeoutMs);
       });
-      return await Promise.race([tool.execute(context, parsed, controller.signal), timeout]);
+      return await Promise.race([tool.execute(context, parsed, controller.signal), timeout, cancelled]);
     } catch (cause) {
       if (cause instanceof AppError) throw cause;
       throw new AppError("DEPENDENCY_UNAVAILABLE", "Tool execution failed.", 502, { cause });
     } finally {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
+      context.signal?.removeEventListener("abort", abortFromContext);
+      if (rejectCancelled) context.signal?.removeEventListener("abort", rejectCancelled);
     }
   }
 

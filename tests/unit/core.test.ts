@@ -8,7 +8,8 @@ import { EncryptedSecretStore } from "../../packages/core/src/encrypted-secrets.
 import { openSqliteDatabase } from "../../apps/bun-runtime/src/migrations.js";
 import { BunSqliteRepositories } from "../../apps/bun-runtime/src/sqlite-store.js";
 import { ModelProviderRegistry, OpenAICompatibleProvider } from "../../packages/core/src/model.js";
-import { ToolRegistry } from "../../packages/core/src/tools.js";
+import { hasVerifiedStructuredOutputOrigin } from "../../packages/core/src/agent-runtime.js";
+import { ToolRegistry, withToolAttachments } from "../../packages/core/src/tools.js";
 import type { EncryptedSecretRecord } from "../../packages/core/src/ports.js";
 import type {
   BotDefinition,
@@ -151,6 +152,325 @@ describe("shared agent engine", () => {
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(executed).toBe(false);
   });
+
+  test("keeps a retried request's tool slot stable when model arguments change", async () => {
+    const observed: { executionKey: string | undefined; input: unknown }[] = [];
+    let providerCalls = 0;
+    const tools = {
+      available: async () => [{ name: "side_effect", description: "Run an action", inputSchema: { type: "object" } }],
+      execute: async (context: { executionKey?: string }, _name: string, input: unknown) => {
+        observed.push({ executionKey: context.executionKey, input });
+        return { accepted: true };
+      },
+    };
+    const providers = new ModelProviderRegistry();
+    providers.register({
+      id: "mock",
+      capabilities: () => ({ toolCalling: true, streaming: false, structuredOutput: false }),
+      complete: async (): Promise<ModelTurn> => {
+        providerCalls += 1;
+        if (providerCalls % 2 === 1) {
+          return {
+            message: { role: "assistant", content: "" },
+            toolCalls: [{ id: `call-${providerCalls}`, name: "side_effect", arguments: { attempt: providerCalls } }],
+          };
+        }
+        return { message: { role: "assistant", content: "Done." }, toolCalls: [] };
+      },
+    });
+    const agent = new AgentOrchestrator({
+      providers,
+      tools,
+      conversations: { load: async () => [], append: async () => {} },
+    });
+    const request = {
+      bot,
+      conversationId: "conversation-retry" as ConversationId,
+      executionId: "stable-idempotency-key",
+      messages: [{ role: "user" as const, content: "Run the action" }],
+      actorId,
+    };
+
+    await agent.respond(request);
+    await agent.respond({ ...request, conversationId: "conversation-retry-2" as ConversationId });
+
+    expect(observed).toHaveLength(2);
+    expect(observed[0]?.input).not.toEqual(observed[1]?.input);
+    expect(observed[0]?.executionKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(observed[1]?.executionKey).toBe(observed[0]?.executionKey);
+  });
+
+  test("returns generated image attachments without persisting provider URLs into conversation tool output", async () => {
+    const imageUrl = "https://images.example.test/generated.png?signature=private";
+    const stored: ConversationMessage[] = [];
+    let round = 0;
+    const tools = {
+      available: async () => [{ name: "generate_image", description: "Generate", inputSchema: { type: "object" } }],
+      execute: async () => withToolAttachments({ status: "generated" }, [{ kind: "image" as const, url: imageUrl }]),
+    };
+    const providers = new ModelProviderRegistry();
+    providers.register({
+      id: "mock",
+      capabilities: () => ({ toolCalling: true, streaming: false, structuredOutput: false }),
+      complete: async (): Promise<ModelTurn> => {
+        round += 1;
+        return round === 1
+          ? {
+              message: { role: "assistant", content: "" },
+              toolCalls: [{ id: "call-image", name: "generate_image", arguments: { prompt: "A paper kite" } }],
+            }
+          : { message: { role: "assistant", content: "Here is your picture." }, toolCalls: [] };
+      },
+    });
+    const agent = new AgentOrchestrator({
+      providers,
+      tools,
+      conversations: {
+        load: async () => [],
+        append: async (_tenant, _conversation, messages) => void stored.push(...messages),
+      },
+    });
+
+    const result = await agent.respond({
+      bot,
+      conversationId: "conversation-images" as ConversationId,
+      messages: [{ role: "user", content: "Draw a paper kite" }],
+      actorId,
+    });
+
+    expect(result.attachments).toEqual([{ kind: "image", url: imageUrl }]);
+    expect(stored.find((message) => message.role === "tool")?.content).not.toContain("images.example.test");
+  });
+
+  test("forwards verified model deltas and request cancellation through the shared agent engine", async () => {
+    const controller = new AbortController();
+    const deltas: string[] = [];
+    const stored: ConversationMessage[] = [];
+    const conversations = {
+      load: async () => [],
+      append: async (_tenant: TenantId, _conversation: ConversationId, turn: readonly ConversationMessage[]) => {
+        stored.push(...turn);
+      },
+    };
+    const providers = new ModelProviderRegistry();
+    providers.register({
+      id: "mock",
+      capabilities: () => ({ toolCalling: false, streaming: true, structuredOutput: false }),
+      complete: async ({ signal, onTextDelta }) => {
+        expect(signal).toBe(controller.signal);
+        onTextDelta?.("Hello");
+        onTextDelta?.(" there");
+        return { message: { role: "assistant", content: "Hello there" }, toolCalls: [] };
+      },
+    });
+    const agent = new AgentOrchestrator({
+      providers,
+      tools: new ToolRegistry({ isAllowed: async () => false }),
+      conversations,
+    });
+    const result = await agent.respond(
+      {
+        bot,
+        conversationId: "conversation-a" as ConversationId,
+        messages: [{ role: "user", content: "Say hello" }],
+        actorId,
+        signal: controller.signal,
+      },
+      { onTextDelta: (delta) => deltas.push(delta) },
+    );
+    expect(deltas.join("")).toBe(result.message.content);
+    expect(stored.at(-1)?.content).toBe("Hello there");
+
+    const unsupportedProviders = new ModelProviderRegistry();
+    let providerCalled = false;
+    unsupportedProviders.register({
+      id: "mock",
+      capabilities: () => ({ toolCalling: false, streaming: false, structuredOutput: false }),
+      complete: async () => {
+        providerCalled = true;
+        return { message: { role: "assistant", content: "Should not run" }, toolCalls: [] };
+      },
+    });
+    const unsupportedAgent = new AgentOrchestrator({
+      providers: unsupportedProviders,
+      tools: new ToolRegistry({ isAllowed: async () => false }),
+      conversations,
+    });
+    await expect(
+      unsupportedAgent.respond(
+        {
+          bot,
+          conversationId: "conversation-a" as ConversationId,
+          messages: [{ role: "user", content: "Hi" }],
+          actorId,
+        },
+        { onTextDelta: () => undefined },
+      ),
+    ).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
+    expect(providerCalled).toBe(false);
+  });
+
+  test("forwards image input only to an enabled provider and omits image bytes from stored history", async () => {
+    const stored: ConversationMessage[] = [];
+    const conversations = {
+      load: async () => stored,
+      append: async (_tenant: TenantId, _conversation: ConversationId, turn: readonly ConversationMessage[]) => {
+        stored.push(...turn);
+      },
+    };
+    const providers = new ModelProviderRegistry();
+    providers.register({
+      id: "mock",
+      capabilities: () => ({ toolCalling: false, imageInput: true, streaming: false, structuredOutput: false }),
+      complete: async ({ messages }) => {
+        expect(messages.at(-1)?.images?.[0]?.dataUrl).toBe("data:image/png;base64,aGVsbG8=");
+        return { message: { role: "assistant", content: "An image." }, toolCalls: [] };
+      },
+    });
+    const agent = new AgentOrchestrator({
+      providers,
+      tools: new ToolRegistry({ isAllowed: async () => false }),
+      conversations,
+    });
+    await agent.respond({
+      bot,
+      conversationId: "conversation-a" as ConversationId,
+      messages: [
+        {
+          role: "user",
+          content: "Describe this",
+          images: [{ dataUrl: "data:image/png;base64,aGVsbG8=" }],
+        },
+      ],
+      actorId,
+    });
+    expect(stored[0]).toEqual({ role: "user", content: "Describe this" });
+
+    const noVisionProviders = new ModelProviderRegistry();
+    noVisionProviders.register({
+      id: "mock",
+      capabilities: () => ({ toolCalling: false, streaming: false, structuredOutput: false }),
+      complete: async () => {
+        throw new Error("Image input must be rejected before provider execution.");
+      },
+    });
+    const noVisionAgent = new AgentOrchestrator({
+      providers: noVisionProviders,
+      tools: new ToolRegistry({ isAllowed: async () => false }),
+      conversations,
+    });
+    await expect(
+      noVisionAgent.respond({
+        bot,
+        conversationId: "conversation-a" as ConversationId,
+        messages: [{ role: "user", content: "Describe this", images: [{ dataUrl: "data:image/png;base64,aGVsbG8=" }] }],
+        actorId,
+      }),
+    ).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY" });
+  });
+});
+
+describe("Bun SQLite workflow executions", () => {
+  test("reclaims expired leases and stores encrypted state by opaque secret reference", async () => {
+    const db = openSqliteDatabase(":memory:");
+    try {
+      seedTenant(db, "tenant-a", "user-a");
+      const repositories = new BunSqliteRepositories(db);
+      const botId = await repositories.createDraft({
+        tenantId,
+        ownerId: actorId,
+        idempotencyKey: "workflow-sqlite-bot",
+        answers: {
+          name: "Workflow test bot",
+          description: "",
+          purpose: "test",
+          audience: "test",
+          personality: "helpful",
+          providerId: "openai-compatible",
+          endpoint: "https://api.openai.com/v1",
+          model: "gpt-test",
+          credentialRef: `secret_${"a".repeat(32)}`,
+          skills: [],
+          mcpConnections: [],
+          integrations: [],
+          memoryEnabled: false,
+          scheduledTasks: [],
+          privacySettings: [],
+          visibility: "private",
+          interfaces: ["api"],
+        },
+      });
+      const createSecret = async (letter: string) => {
+        const reference = `secret_${letter.repeat(32)}`;
+        await repositories.secretRecords.create({
+          tenantId,
+          reference,
+          keyId: "test-key",
+          nonce: "nonce",
+          ciphertext: "ciphertext",
+          version: 1,
+          createdAt: "2026-10-30T00:00:00.000Z",
+        });
+        return reference;
+      };
+      const firstRef = await createSecret("b");
+      const secondRef = await createSecret("c");
+      const key = "f".repeat(64);
+      const first = await repositories.workflowExecutions.acquire({
+        tenantId,
+        botId,
+        skillId: "workflow.sqlite",
+        executionKey: key,
+        initialStateRef: firstRef,
+        leaseToken: "first-lease",
+        now: "2026-10-30T00:00:00.000Z",
+        leaseUntil: "2026-10-30T00:00:10.000Z",
+        expiresAt: "2026-10-30T00:01:00.000Z",
+      });
+      expect(first.state).toBe("acquired");
+      const resumed = await repositories.workflowExecutions.acquire({
+        tenantId,
+        botId,
+        skillId: "workflow.sqlite",
+        executionKey: key,
+        initialStateRef: secondRef,
+        leaseToken: "replacement-lease",
+        now: "2026-10-30T00:00:11.000Z",
+        leaseUntil: "2026-10-30T00:00:21.000Z",
+        expiresAt: "2026-10-30T00:01:11.000Z",
+      });
+      expect(resumed).toMatchObject({
+        state: "acquired",
+        execution: { stateRef: firstRef, status: "running", version: 2, leaseToken: "replacement-lease" },
+      });
+      const columns = db
+        .query<{ name: string }, []>("PRAGMA table_info(workflow_executions)")
+        .all()
+        .map((row) => row.name);
+      expect(columns).toContain("state_ref");
+      expect(columns).not.toContain("state_json");
+      expect(
+        await repositories.workflowExecutions.checkpoint({
+          tenantId,
+          botId,
+          skillId: "workflow.sqlite",
+          executionKey: key,
+          leaseToken: "replacement-lease",
+          expectedVersion: 2,
+          stateRef: secondRef,
+          nextStep: 1,
+          now: "2026-10-30T00:00:12.000Z",
+          leaseUntil: "2026-10-30T00:00:22.000Z",
+          expiresAt: "2026-10-30T00:01:12.000Z",
+        }),
+      ).toBe(true);
+      expect(await repositories.workflowExecutions.purgeExpired(tenantId, "2026-10-31T00:00:00.000Z", 10)).toEqual([
+        secondRef,
+      ]);
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe("OpenAI-compatible provider boundary", () => {
@@ -179,6 +499,243 @@ describe("OpenAI-compatible provider boundary", () => {
     expect(captured.url).toBe("https://api.example.test/v1/chat/completions");
     expect(result.message.content).toBe("hello");
     expect(result.usage).toEqual({ inputTokens: 2, outputTokens: 3 });
+  });
+
+  test("sends strict structured output only to a verified, egress-approved origin", async () => {
+    const schema = {
+      type: "object",
+      properties: { answer: { type: "string" }, score: { type: "integer", enum: [1, 2, 3] } },
+      required: ["answer", "score"],
+      additionalProperties: false,
+    };
+    let requestBody: Record<string, unknown> | undefined;
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test", "https://other.example.test"]),
+      structuredOutputOrigins: new Set(["https://api.example.test"]),
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async (_input, init) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ choices: [{ message: { role: "assistant", content: '{"answer":"ok","score":2}' } }] });
+      },
+    });
+    const config = { providerId: "compatible", model: "sample", credentialRef: "secret-ref" };
+    expect(provider.capabilities(config).structuredOutput).toBe(true);
+    expect(provider.capabilities({ ...config, endpoint: "https://other.example.test/v1" }).structuredOutput).toBe(
+      false,
+    );
+    expect(
+      hasVerifiedStructuredOutputOrigin(
+        new Set(["https://api.example.test", "https://other.example.test"]),
+        new Set(["https://api.example.test"]),
+      ),
+    ).toBe(true);
+    expect(
+      hasVerifiedStructuredOutputOrigin(new Set(["https://api.example.test"]), new Set(["https://other.example.test"])),
+    ).toBe(false);
+
+    const result = await provider.complete({
+      tenantId,
+      config,
+      messages: [{ role: "user", content: "Answer in the required format." }],
+      responseSchema: schema,
+    });
+    expect(requestBody?.response_format).toEqual({
+      type: "json_schema",
+      json_schema: { name: "agent_response", strict: true, schema },
+    });
+    expect(result.structuredOutput).toEqual({ answer: "ok", score: 2 });
+    expect(result.message.content).toBe('{"answer":"ok","score":2}');
+  });
+
+  test("rejects unverified structured output before secret resolution or network access", async () => {
+    let secretLookups = 0;
+    let fetches = 0;
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      secrets: {
+        resolve: async () => {
+          secretLookups += 1;
+          return "secret";
+        },
+      },
+      fetch: async () => {
+        fetches += 1;
+        return Response.json({});
+      },
+    });
+    await expect(
+      provider.complete({
+        tenantId,
+        config: { providerId: "compatible", model: "sample", credentialRef: "secret-ref" },
+        messages: [{ role: "user", content: "hello" }],
+        responseSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
+      }),
+    ).rejects.toMatchObject({ code: "UNSUPPORTED_CAPABILITY", status: 501 });
+    expect(secretLookups).toBe(0);
+    expect(fetches).toBe(0);
+  });
+
+  test("rejects provider JSON that fails the requested response schema", async () => {
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      structuredOutputOrigins: new Set(["https://api.example.test"]),
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async () =>
+        Response.json({ choices: [{ message: { role: "assistant", content: '{"unexpected":true}' } }] }),
+    });
+    await expect(
+      provider.complete({
+        tenantId,
+        config: { providerId: "compatible", model: "sample", credentialRef: "secret-ref" },
+        messages: [{ role: "user", content: "hello" }],
+        responseSchema: {
+          type: "object",
+          properties: { answer: { type: "string" } },
+          required: ["answer"],
+          additionalProperties: false,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_UNAVAILABLE", status: 502 });
+  });
+
+  test("bounds the size of structured model output", async () => {
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      structuredOutputOrigins: new Set(["https://api.example.test"]),
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async () =>
+        Response.json({
+          choices: [{ message: { role: "assistant", content: JSON.stringify({ answer: "x".repeat(65_536) }) } }],
+        }),
+    });
+    await expect(
+      provider.complete({
+        tenantId,
+        config: { providerId: "compatible", model: "sample", credentialRef: "secret-ref" },
+        messages: [{ role: "user", content: "hello" }],
+        responseSchema: {
+          type: "object",
+          properties: { answer: { type: "string" } },
+          required: ["answer"],
+          additionalProperties: false,
+        },
+      }),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_UNAVAILABLE", status: 502 });
+  });
+
+  test("streams OpenAI-compatible SSE text and fragmented tool calls only from verified origins", async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const deltas: string[] = [];
+    const rawEvents = [
+      'data: {"choices":[{"delta":{"role":"assistant"}}]}\r\n\r\n',
+      'data: {"choices":[{"delta":{"content":"Hel"}}]}\n\n',
+      'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n',
+      `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", function: { name: "lookup", arguments: '{"city":' } }] } }] })}\n\n`,
+      `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "Weather", arguments: '"Oslo"}' } }] } }] })}\n\n`,
+      'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    const encoded = new TextEncoder().encode(rawEvents);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let offset = 0; offset < encoded.length; offset += 17) {
+          controller.enqueue(encoded.slice(offset, offset + 17));
+        }
+        controller.close();
+      },
+    });
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test", "https://other.example.test"]),
+      streamingOrigins: new Set(["https://api.example.test"]),
+      toolCalling: true,
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async (_input, init) => {
+        requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8" } });
+      },
+    });
+    const config = { providerId: "compatible", model: "sample", credentialRef: "secret-ref" };
+    expect(provider.capabilities(config).streaming).toBe(true);
+    expect(provider.capabilities({ ...config, endpoint: "https://other.example.test/v1" }).streaming).toBe(false);
+    const result = await provider.complete({
+      tenantId,
+      config,
+      messages: [{ role: "user", content: "Hi" }],
+      onTextDelta: (delta) => deltas.push(delta),
+    });
+    expect(requestBody?.stream).toBe(true);
+    expect(deltas).toEqual(["Hel", "lo"]);
+    expect(result.message.content).toBe("Hello");
+    expect(result.toolCalls).toEqual([{ id: "call-1", name: "lookupWeather", arguments: { city: "Oslo" } }]);
+    expect(result.usage).toEqual({ inputTokens: 4, outputTokens: 2 });
+  });
+
+  test("rejects incomplete SSE responses without forwarding provider error details", async () => {
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      streamingOrigins: new Set(["https://api.example.test"]),
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async () =>
+        new Response('data: {"choices":[{"delta":{"content":"partial"}}]}\n\nprovider-internal-secret', {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    });
+    try {
+      await provider.complete({
+        tenantId,
+        config: { providerId: "compatible", model: "sample", credentialRef: "secret-ref" },
+        messages: [{ role: "user", content: "Hi" }],
+        onTextDelta: () => undefined,
+      });
+      throw new Error("expected an incomplete stream failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AppError);
+      expect((error as AppError).status).toBe(502);
+      expect((error as Error).message).not.toContain("provider-internal-secret");
+    }
+  });
+
+  test("serializes image inputs using the OpenAI-compatible image content part", async () => {
+    let payload: Record<string, unknown> | undefined;
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      imageInput: true,
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async (_input, init) => {
+        payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ choices: [{ message: { role: "assistant", content: "A cat." } }] });
+      },
+    });
+    await provider.complete({
+      tenantId,
+      config: { providerId: "compatible", model: "vision-model", credentialRef: "secret-ref" },
+      messages: [
+        {
+          role: "user",
+          content: "Describe this",
+          images: [{ dataUrl: "data:image/png;base64,aGVsbG8=", detail: "auto" }],
+        },
+      ],
+    });
+    const messages = payload?.messages as readonly { content?: unknown }[];
+    expect(messages[0]?.content).toEqual([
+      { type: "text", text: "Describe this" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "auto" } },
+    ]);
   });
 
   test("refuses an unapproved origin before resolving a tenant secret or making a request", async () => {
@@ -353,6 +910,34 @@ describe("encrypted credential storage", () => {
         delete: async (tenant, reference) => {
           records.delete(`${tenant}:${reference}`);
         },
+        listPage: async (after, limit) =>
+          [...records.values()]
+            .filter(
+              (record) =>
+                !after ||
+                record.tenantId > after.tenantId ||
+                (record.tenantId === after.tenantId && record.reference > after.reference),
+            )
+            .sort((left, right) =>
+              left.tenantId === right.tenantId
+                ? left.reference.localeCompare(right.reference)
+                : left.tenantId.localeCompare(right.tenantId),
+            )
+            .slice(0, limit),
+        replaceIfUnchanged: async (record, expected) => {
+          const key = `${record.tenantId}:${record.reference}`;
+          const current = records.get(key);
+          if (
+            !current ||
+            current.keyId !== expected.keyId ||
+            current.nonce !== expected.nonce ||
+            current.ciphertext !== expected.ciphertext
+          ) {
+            return false;
+          }
+          records.set(key, record);
+          return true;
+        },
       },
       {
         activeKey: async () => ({ id: "test-key-1", material: key }),
@@ -371,6 +956,85 @@ describe("encrypted credential storage", () => {
     if (!record) throw new Error("expected encrypted secret record");
     records.set(`${tenantId}:${reference}`, { ...record, ciphertext: `${record.ciphertext.slice(0, -2)}AA` });
     await expect(secretStore.resolve(tenantId, reference)).rejects.toMatchObject({ code: "DEPENDENCY_UNAVAILABLE" });
+  });
+
+  test("rotates old key envelopes in pages without exposing plaintext or overwriting concurrent writes", async () => {
+    const records = new Map<string, EncryptedSecretRecord>();
+    const keys = new Map([
+      ["old-key", new Uint8Array(32).fill(11)],
+      ["new-key", new Uint8Array(32).fill(29)],
+    ]);
+    const repository = {
+      get: async (tenant: TenantId, reference: string) => records.get(`${tenant}:${reference}`),
+      create: async (record: EncryptedSecretRecord) => {
+        records.set(`${record.tenantId}:${record.reference}`, record);
+      },
+      delete: async (tenant: TenantId, reference: string) => {
+        records.delete(`${tenant}:${reference}`);
+      },
+      listPage: async (after: { tenantId: TenantId; reference: string } | undefined, limit: number) =>
+        [...records.values()]
+          .filter(
+            (record) =>
+              !after ||
+              record.tenantId > after.tenantId ||
+              (record.tenantId === after.tenantId && record.reference > after.reference),
+          )
+          .sort((left, right) =>
+            left.tenantId === right.tenantId
+              ? left.reference.localeCompare(right.reference)
+              : left.tenantId.localeCompare(right.tenantId),
+          )
+          .slice(0, limit),
+      replaceIfUnchanged: async (
+        record: EncryptedSecretRecord,
+        expected: { keyId: string; nonce: string; ciphertext: string },
+      ) => {
+        const key = `${record.tenantId}:${record.reference}`;
+        const current = records.get(key);
+        if (
+          !current ||
+          current.keyId !== expected.keyId ||
+          current.nonce !== expected.nonce ||
+          current.ciphertext !== expected.ciphertext
+        ) {
+          return false;
+        }
+        records.set(key, record);
+        return true;
+      },
+    };
+    let activeId = "old-key";
+    const keyring = {
+      activeKey: async () => ({ id: activeId, material: keys.get(activeId) as Uint8Array }),
+      getKey: async (id: string) => keys.get(id),
+    };
+    const oldStore = new EncryptedSecretStore(repository, keyring);
+    const references = await Promise.all([
+      oldStore.put(tenantId, "provider-secret-one"),
+      oldStore.put(tenantId, "provider-secret-two"),
+    ]);
+    activeId = "new-key";
+    const rotatingStore = new EncryptedSecretStore(repository, keyring);
+
+    const preview = await rotatingStore.rotatePage({ limit: 1, dryRun: true });
+    expect(preview).toMatchObject({ activeKeyId: "new-key", scanned: 1, needingRotation: 1, rotated: 0 });
+    expect([...records.values()].every((record) => record.keyId === "old-key")).toBe(true);
+
+    let after = undefined as typeof preview.nextCursor;
+    let rotated = 0;
+    do {
+      const page = await rotatingStore.rotatePage({ after, limit: 1 });
+      rotated += page.rotated;
+      after = page.nextCursor;
+    } while (after);
+    expect(rotated).toBe(2);
+    expect([...records.values()].every((record) => record.keyId === "new-key")).toBe(true);
+    expect(await Promise.all(references.map((reference) => rotatingStore.resolve(tenantId, reference)))).toEqual([
+      "provider-secret-one",
+      "provider-secret-two",
+    ]);
+    expect(await rotatingStore.rotatePage({ dryRun: true })).toMatchObject({ needingRotation: 0, rotated: 0 });
   });
 });
 
@@ -504,6 +1168,14 @@ describe("SQLite and D1 schema", () => {
         patch: { description: "A revised meal planning assistant." },
       });
       expect(editedBot).toMatchObject({ version: 2, description: "A revised meal planning assistant." });
+      const versions = await repos.listVersions({ tenantId, ownerId: actorId, botId, limit: 100 });
+      expect(versions.map(({ version, current }) => ({ version, current }))).toEqual([
+        { version: 2, current: true },
+        { version: 1, current: false },
+      ]);
+      expect(versions[0]).toMatchObject({ name: editedBot.name, description: editedBot.description });
+      expect(versions[0]?.model).toMatchObject({ hasCredential: true });
+      expect(JSON.stringify(versions)).not.toContain(secretRef);
       expect(await repos.listOwned(tenantId, actorId)).toContainEqual(editedBot);
       expect(await repos.listOwned("tenant-b" as TenantId, "user-b" as UserId)).toEqual([]);
       await expect(
@@ -620,6 +1292,9 @@ function answerFor(step: CreationStep): unknown {
       return "example-model";
     case "credentialRef":
       return `secret_${"a".repeat(32)}`;
+    case "imageModel":
+    case "searchModel":
+      return "";
     case "skills":
       return ["meal-planner"];
     case "mcpConnections":

@@ -3,6 +3,8 @@ import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { CloudflareD1Repositories } from "../../apps/cloudflare-runtime/src/d1-repositories.js";
 import { createApiTokenMaterial } from "../../packages/core/src/api-auth.js";
+import { EncryptedSecretStore } from "../../packages/core/src/encrypted-secrets.js";
+import { createSecretRotationApiHandler } from "../../packages/core/src/secret-rotation-http-api.js";
 import type { EncryptedSecretRecord } from "../../packages/core/src/ports.js";
 import type {
   BotId,
@@ -21,6 +23,406 @@ const tenantId = "tenant-cloudflare" as TenantId;
 const userId = "user-cloudflare" as UserId;
 
 describe("Cloudflare D1 repositories", () => {
+  test("operator rotation endpoint previews by default, requires its bearer secret, and applies one page", async () => {
+    const db = createDatabase();
+    const repos = new CloudflareD1Repositories(new SqliteD1(db) as unknown as D1Database);
+    const previousKey = new Uint8Array(32).fill(13);
+    const activeKey = new Uint8Array(32).fill(29);
+    const oldKeyring = {
+      activeKey: async () => ({ id: "previous", material: previousKey }),
+      getKey: async (id: string) => (id === "previous" ? previousKey : undefined),
+    };
+    const currentKeyring = {
+      activeKey: async () => ({ id: "current", material: activeKey }),
+      getKey: async (id: string) => (id === "previous" ? previousKey : id === "current" ? activeKey : undefined),
+    };
+    const reference = await new EncryptedSecretStore(repos.secretRecords, oldKeyring).put(tenantId, "rotation-value");
+    const token = "operator-rotation-token-".padEnd(48, "x");
+    const handler = createSecretRotationApiHandler({
+      records: repos.secretRecords,
+      keyring: currentKeyring,
+      authorizationToken: token,
+    });
+    const endpoint = `https://factory.example.test${"/_operator/secrets/rotation"}`;
+    try {
+      const denied = await handler(
+        new Request(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer invalid" },
+          body: "{}",
+        }),
+      );
+      expect(denied?.status).toBe(401);
+
+      const preview = await handler(
+        new Request(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: "{}",
+        }),
+      );
+      expect(preview?.status).toBe(200);
+      expect(await preview?.json()).toMatchObject({ mode: "dry_run", scanned: 1, needingRotation: 1, rotated: 0 });
+      expect((await repos.secretRecords.get(tenantId, reference))?.keyId).toBe("previous");
+
+      const applied = await handler(
+        new Request(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: JSON.stringify({ mode: "apply", limit: 10 }),
+        }),
+      );
+      expect(applied?.status).toBe(200);
+      expect(await applied?.json()).toMatchObject({ mode: "apply", scanned: 1, needingRotation: 1, rotated: 1 });
+      expect((await repos.secretRecords.get(tenantId, reference))?.keyId).toBe("current");
+      expect(await new EncryptedSecretStore(repos.secretRecords, currentKeyring).resolve(tenantId, reference)).toBe(
+        "rotation-value",
+      );
+      expect(applied?.headers.get("cache-control")).toBe("no-store");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("leases workflow executions, compare-and-swaps checkpoints, and purges expired encrypted-state references", async () => {
+    const db = createDatabase();
+    const repos = new CloudflareD1Repositories(new SqliteD1(db) as unknown as D1Database);
+    const now = "2026-10-30T12:00:00.000Z";
+    try {
+      const botId = await repos.createDraft({
+        tenantId,
+        ownerId: userId,
+        idempotencyKey: "workflow-d1-bot",
+        answers: creationAnswers(),
+      });
+      const references = ["a", "b", "c"].map((letter) => `secret_${letter.repeat(32)}`);
+      for (const reference of references) {
+        await repos.secretRecords.create({
+          tenantId,
+          reference,
+          keyId: "test-key",
+          nonce: "nonce",
+          ciphertext: "ciphertext",
+          version: 1,
+          createdAt: now,
+        });
+      }
+      const key = "e".repeat(64);
+      const first = await repos.workflowExecutions.acquire({
+        tenantId,
+        botId,
+        skillId: "workflow.example",
+        executionKey: key,
+        initialStateRef: references[0] as string,
+        leaseToken: "lease-one",
+        now,
+        leaseUntil: "2026-10-30T12:00:10.000Z",
+        expiresAt: "2026-10-30T12:01:00.000Z",
+      });
+      expect(first.state).toBe("acquired");
+      if (first.state !== "acquired") throw new Error("Workflow lease was not acquired.");
+      expect(first.execution.version).toBe(1);
+      expect(
+        await repos.workflowExecutions.checkpoint({
+          tenantId,
+          botId,
+          skillId: "workflow.example",
+          executionKey: key,
+          leaseToken: "lease-one",
+          expectedVersion: 1,
+          stateRef: references[1] as string,
+          nextStep: 1,
+          now: "2026-10-30T12:00:01.000Z",
+          leaseUntil: "2026-10-30T12:00:11.000Z",
+          expiresAt: "2026-10-30T12:01:01.000Z",
+        }),
+      ).toBe(true);
+      expect(
+        await repos.workflowExecutions.checkpoint({
+          tenantId,
+          botId,
+          skillId: "workflow.example",
+          executionKey: key,
+          leaseToken: "lease-one",
+          expectedVersion: 1,
+          stateRef: references[2] as string,
+          nextStep: 2,
+          now: "2026-10-30T12:00:02.000Z",
+          leaseUntil: "2026-10-30T12:00:12.000Z",
+          expiresAt: "2026-10-30T12:01:02.000Z",
+        }),
+      ).toBe(false);
+      await repos.workflowExecutions.release({
+        tenantId,
+        botId,
+        skillId: "workflow.example",
+        executionKey: key,
+        leaseToken: "lease-one",
+        now: "2026-10-30T12:00:03.000Z",
+      });
+      const resumed = await repos.workflowExecutions.acquire({
+        tenantId,
+        botId,
+        skillId: "workflow.example",
+        executionKey: key,
+        initialStateRef: references[2] as string,
+        leaseToken: "lease-two",
+        now: "2026-10-30T12:00:04.000Z",
+        leaseUntil: "2026-10-30T12:00:14.000Z",
+        expiresAt: "2026-10-30T12:01:04.000Z",
+      });
+      expect(resumed).toMatchObject({
+        state: "acquired",
+        execution: { stateRef: references[1], nextStep: 1, version: 3 },
+      });
+      expect(
+        await repos.workflowExecutions.complete({
+          tenantId,
+          botId,
+          skillId: "workflow.example",
+          executionKey: key,
+          leaseToken: "lease-two",
+          expectedVersion: 3,
+          stateRef: references[2] as string,
+          nextStep: 2,
+          now: "2026-10-30T12:00:05.000Z",
+          expiresAt: "2026-10-30T12:00:30.000Z",
+        }),
+      ).toBe(true);
+      expect(
+        await repos.workflowExecutions.acquire({
+          tenantId,
+          botId,
+          skillId: "workflow.example",
+          executionKey: key,
+          initialStateRef: references[0] as string,
+          leaseToken: "lease-three",
+          now: "2026-10-30T12:00:06.000Z",
+          leaseUntil: "2026-10-30T12:00:16.000Z",
+          expiresAt: "2026-10-30T12:00:31.000Z",
+        }),
+      ).toMatchObject({ state: "completed", execution: { stateRef: references[2], status: "succeeded" } });
+      expect(await repos.workflowExecutions.purgeExpired(tenantId, "2026-10-31T00:00:00.000Z", 10)).toEqual([
+        references[2] as string,
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("persists master-bot routing and replays a cached response exactly once", async () => {
+    const db = createDatabase();
+    const repos = new CloudflareD1Repositories(new SqliteD1(db) as unknown as D1Database);
+    const now = "2026-10-30T12:00:00.000Z";
+    try {
+      const masterSession = {
+        telegramUserId: 712345678,
+        chatId: 712345678,
+        tenantId,
+        ownerId: userId,
+        sessionId: `factory_${"a".repeat(36)}`,
+        updatedAt: now,
+      };
+      await repos.masterBot.saveSession(masterSession);
+      expect(await repos.masterBot.getSession(masterSession.telegramUserId)).toEqual(masterSession);
+
+      const reservation = {
+        updateId: 72,
+        now,
+        leaseUntil: "2026-10-30T12:02:00.000Z",
+      };
+      expect(await repos.masterBot.reserveUpdate(reservation)).toEqual({ state: "acquired" });
+      const reply = { chat_id: masterSession.chatId, text: "Continue in the Mini App." };
+      await repos.masterBot.saveUpdateReply({ ...reservation, reply });
+      expect(await repos.masterBot.reserveUpdate(reservation)).toEqual({ state: "busy" });
+      expect(await repos.masterBot.reserveUpdate({ ...reservation, now: "2026-10-30T12:03:00.000Z" })).toEqual({
+        state: "ready",
+        reply,
+      });
+      await repos.masterBot.completeUpdate({ updateId: 72, now: "2026-10-30T12:03:01.000Z" });
+      expect(await repos.masterBot.reserveUpdate(reservation)).toEqual({ state: "completed" });
+      await repos.masterBot.deleteSession(masterSession.telegramUserId);
+      expect(await repos.masterBot.getSession(masterSession.telegramUserId)).toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+
+  test("provisions one Telegram owner workspace and consumes initData only once", async () => {
+    const db = createDatabase();
+    const repos = new CloudflareD1Repositories(new SqliteD1(db) as unknown as D1Database);
+    const input = {
+      telegramUserId: 712345678,
+      ownerId: "usr_telegram-auth-test" as UserId,
+      tenantId: "ten_telegram-auth-test" as TenantId,
+      workspaceName: "Taylor's workspace",
+      now: "2026-10-30T12:00:00.000Z",
+    };
+    try {
+      const account = await repos.telegramAuth.getOrCreateOwner(input);
+      expect(await repos.telegramAuth.getOrCreateOwner(input)).toEqual(account);
+      expect(account).toEqual({ ownerId: input.ownerId, tenantId: input.tenantId });
+      expect(
+        await repos.telegramAuth.claimInitData({
+          dataHash: "c".repeat(64),
+          expiresAt: "2026-10-30T12:05:00.000Z",
+          now: input.now,
+        }),
+      ).toBe(true);
+      expect(
+        await repos.telegramAuth.claimInitData({
+          dataHash: "c".repeat(64),
+          expiresAt: "2026-10-30T12:05:00.000Z",
+          now: input.now,
+        }),
+      ).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("enforces public quotas and single-use shared bot invitations", async () => {
+    const db = createDatabase();
+    const repos = new CloudflareD1Repositories(new SqliteD1(db) as unknown as D1Database);
+    const inviteeId = `usr_${"c".repeat(32)}` as UserId;
+    const inviteeTenantId = `ten_${"c".repeat(32)}` as TenantId;
+    try {
+      await repos.telegramAuth.getOrCreateOwner({
+        telegramUserId: 712345679,
+        ownerId: inviteeId,
+        tenantId: inviteeTenantId,
+        workspaceName: "Invitation test workspace",
+        now: "2026-10-30T12:00:00.000Z",
+      });
+
+      const publicBotId = await repos.createDraft({
+        tenantId,
+        ownerId: userId,
+        idempotencyKey: "public-access-d1-bot",
+        answers: creationAnswers(),
+      });
+      await repos.publish({
+        tenantId,
+        ownerId: userId,
+        botId: publicBotId,
+        idempotencyKey: "public-access-d1-publish",
+      });
+      const publicListings = await repos.listPublicBots({ limit: 10 });
+      expect(publicListings).toHaveLength(1);
+      expect(publicListings[0]).toMatchObject({
+        botId: publicBotId,
+        title: "Cloudflare D1 Test Bot",
+        dailyUsageLimit: 100,
+        rateLimitPerMinute: 10,
+      });
+
+      await repos.setPublicBotAccessPolicy({
+        tenantId,
+        ownerId: userId,
+        botId: publicBotId,
+        dailyUsageLimit: 2,
+        rateLimitPerMinute: 1,
+        now: "2026-10-30T12:00:00.000Z",
+      });
+      expect(
+        await repos.consumeBotUse({
+          botId: publicBotId,
+          userId: inviteeId,
+          accessMode: "public",
+          now: "2026-10-30T12:00:00.000Z",
+        }),
+      ).toBe("allowed");
+      expect(
+        await repos.consumeBotUse({
+          botId: publicBotId,
+          userId: inviteeId,
+          accessMode: "public",
+          now: "2026-10-30T12:00:30.000Z",
+        }),
+      ).toBe("rate_limited");
+      expect(
+        await repos.consumeBotUse({
+          botId: publicBotId,
+          userId: inviteeId,
+          accessMode: "public",
+          now: "2026-10-30T12:01:00.000Z",
+        }),
+      ).toBe("allowed");
+      expect(
+        await repos.consumeBotUse({
+          botId: publicBotId,
+          userId: inviteeId,
+          accessMode: "public",
+          now: "2026-10-30T12:02:00.000Z",
+        }),
+      ).toBe("quota_exceeded");
+
+      const sharedBotId = await repos.createDraft({
+        tenantId,
+        ownerId: userId,
+        idempotencyKey: "shared-access-d1-bot",
+        answers: { ...creationAnswers(), visibility: "shared" },
+      });
+      await repos.publish({
+        tenantId,
+        ownerId: userId,
+        botId: sharedBotId,
+        idempotencyKey: "shared-access-d1-publish",
+      });
+      const grant = await repos.createOwnedAccessGrant({
+        tenantId,
+        ownerId: userId,
+        botId: sharedBotId,
+        invitationTokenHash: "a".repeat(64),
+        now: "2026-10-30T12:00:00.000Z",
+      });
+      expect(grant).toMatchObject({ invitationAvailable: true, status: "active" });
+      const accepted = await repos.acceptBotInvitation({
+        invitationTokenHash: "a".repeat(64),
+        userId: inviteeId,
+        now: "2026-10-30T12:00:01.000Z",
+      });
+      expect(accepted).toMatchObject({ id: grant.id, userId: inviteeId, invitationAvailable: false });
+      expect(
+        await repos.getSharedBot({ botId: sharedBotId, userId: inviteeId, now: "2026-10-30T12:00:02.000Z" }),
+      ).toMatchObject({ id: sharedBotId, visibility: "shared" });
+      expect(
+        await repos.consumeBotUse({
+          botId: sharedBotId,
+          userId: inviteeId,
+          accessMode: "shared",
+          now: "2026-10-30T12:00:03.000Z",
+        }),
+      ).toBe("allowed");
+      expect(
+        await repos.acceptBotInvitation({
+          invitationTokenHash: "a".repeat(64),
+          userId: inviteeId,
+          now: "2026-10-30T12:00:04.000Z",
+        }),
+      ).toBeUndefined();
+      expect(
+        await repos.revokeOwnedAccessGrant({ tenantId, ownerId: userId, botId: sharedBotId, grantId: grant.id }),
+      ).toBe(true);
+      expect(
+        await repos.getSharedBot({ botId: sharedBotId, userId: inviteeId, now: "2026-10-30T12:00:05.000Z" }),
+      ).toBeUndefined();
+
+      const audit = await repos.listOwnedAuditLogs({ tenantId, ownerId: userId, limit: 100 });
+      const accessDecisions = audit.filter((event) => event.action === "bot.access.decision");
+      expect(accessDecisions).toHaveLength(5);
+      expect(accessDecisions.map((event) => event.metadata.outcome)).toEqual([
+        "quota_exceeded",
+        "allowed",
+        "rate_limited",
+        "allowed",
+        "allowed",
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
   test("persist, claim, retry, and complete scheduled jobs", async () => {
     const db = createDatabase();
     const repos = new CloudflareD1Repositories(new SqliteD1(db) as unknown as D1Database);
@@ -122,6 +524,11 @@ describe("Cloudflare D1 repositories", () => {
         patch: { description: "A revised assistant." },
       });
       expect(editedBot).toMatchObject({ version: 2, description: "A revised assistant." });
+      const versions = await repos.listVersions({ tenantId, ownerId: userId, botId, limit: 50 });
+      expect(versions.map(({ version, current }) => ({ version, current }))).toEqual([
+        { version: 2, current: true },
+        { version: 1, current: false },
+      ]);
       expect(await repos.listOwned(tenantId, userId)).toContainEqual(editedBot);
       await expect(
         repos.updateOwned({ tenantId, ownerId: userId, botId, expectedVersion: 1, patch: { name: "Stale edit" } }),
@@ -329,6 +736,7 @@ describe("Cloudflare D1 repositories", () => {
         tenantId,
         ownerId: userId,
         scopes: ["factory:read"],
+        tenantRole: "owner",
       });
       await repos.apiTokens.revoke(tenantId, userId, "token-cloudflare", "2026-10-30T02:00:00.000Z");
       expect(await repos.apiTokens.findActive(token.tokenHash, "2026-10-30T03:00:00.000Z")).toBeUndefined();
@@ -557,6 +965,7 @@ describe("Cloudflare D1 repositories", () => {
         deploymentId,
         updateId: 17,
         responseText: "Stored reply",
+        attachmentRefs: [{ kind: "image", secretRef: `secret_${"f".repeat(32)}` }],
         leaseUntil: "2026-10-30T00:00:10.000Z",
         now: "2026-10-30T00:00:06.000Z",
       });
@@ -567,7 +976,11 @@ describe("Cloudflare D1 repositories", () => {
           now: "2026-10-30T00:00:11.000Z",
           leaseUntil: "2026-10-30T00:02:11.000Z",
         }),
-      ).toEqual({ state: "ready", responseText: "Stored reply" });
+      ).toEqual({
+        state: "ready",
+        responseText: "Stored reply",
+        attachmentRefs: [{ kind: "image", secretRef: `secret_${"f".repeat(32)}` }],
+      });
       await repos.completeTelegramUpdate({
         deploymentId,
         updateId: 17,
@@ -579,6 +992,18 @@ describe("Cloudflare D1 repositories", () => {
           updateId: 17,
           now: "2026-10-30T00:01:00.000Z",
           leaseUntil: "2026-10-30T00:03:00.000Z",
+        }),
+      ).toEqual({
+        state: "completed",
+        attachmentRefs: [{ kind: "image", secretRef: `secret_${"f".repeat(32)}` }],
+      });
+      await repos.clearTelegramUpdateAttachments({ deploymentId, updateId: 17 });
+      expect(
+        await repos.reserveTelegramUpdate({
+          deploymentId,
+          updateId: 17,
+          now: "2026-10-30T00:01:01.000Z",
+          leaseUntil: "2026-10-30T00:03:01.000Z",
         }),
       ).toEqual({ state: "completed" });
     } finally {
@@ -598,6 +1023,18 @@ function createDatabase(): Database {
     "0006_telegram_bot_identity.sql",
     "0007_telegram_sender_access.sql",
     "0008_telegram_tool_grants.sql",
+    "0009_telegram_webapp_auth.sql",
+    "0010_usage_reporting.sql",
+    "0011_master_bot.sql",
+    "0012_encrypted_memory.sql",
+    "0013_public_bot_access.sql",
+    "0014_api_rate_limits.sql",
+    "0015_bot_version_labels.sql",
+    "0016_bot_credential_approvals.sql",
+    "0017_workflow_executions.sql",
+    "0018_telegram_response_attachments.sql",
+    "0019_tool_executions.sql",
+    "0020_tenant_membership_status.sql",
   ]) {
     const migration = readFileSync(new URL(`../../migrations/sqlite/${migrationName}`, import.meta.url), "utf8");
     db.exec(migration);

@@ -1,8 +1,29 @@
 import { AppError } from "./errors.js";
-import type { SecretKeyring, SecretRecordRepository, SecretStore, SecretWriter } from "./ports.js";
+import type {
+  EncryptedSecretRecord,
+  SecretKeyring,
+  SecretRecordRepository,
+  SecretStore,
+  SecretWriter,
+} from "./ports.js";
 import type { TenantId } from "./types.js";
 
 const MAX_SECRET_BYTES = 64 * 1024;
+const MAX_ROTATION_PAGE_SIZE = 250;
+
+export interface SecretRotationCursor {
+  readonly tenantId: TenantId;
+  readonly reference: string;
+}
+
+export interface SecretRotationPageResult {
+  readonly activeKeyId: string;
+  readonly scanned: number;
+  readonly needingRotation: number;
+  readonly rotated: number;
+  readonly concurrentlyChanged: number;
+  readonly nextCursor?: SecretRotationCursor;
+}
 
 /** AES-GCM envelope encryption. The repository stores ciphertext only; key material remains in a runtime secret binding. */
 export class EncryptedSecretStore implements SecretStore, SecretWriter {
@@ -56,6 +77,78 @@ export class EncryptedSecretStore implements SecretStore, SecretWriter {
     if (!record || record.tenantId !== tenantId || record.reference !== reference || record.version !== 1) {
       throw new AppError("NOT_FOUND", "Credential reference was not found.", 404);
     }
+    return this.#decrypt(record, signal);
+  }
+
+  /** Re-encrypts one bounded page. A dry run counts records without decrypting or writing them. */
+  async rotatePage(
+    input: {
+      readonly after?: SecretRotationCursor | undefined;
+      readonly limit?: number;
+      readonly dryRun?: boolean;
+    } = {},
+  ): Promise<SecretRotationPageResult> {
+    const limit = input.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_ROTATION_PAGE_SIZE) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        `Secret rotation page size must be from 1 to ${MAX_ROTATION_PAGE_SIZE}.`,
+        400,
+      );
+    }
+    const active = await this.#keyring.activeKey();
+    const records = await this.#records.listPage(input.after, limit);
+    let needingRotation = 0;
+    let rotated = 0;
+    let concurrentlyChanged = 0;
+    for (const record of records) {
+      if (record.keyId === active.id) continue;
+      needingRotation += 1;
+      if (input.dryRun) continue;
+
+      const plaintext = await this.#decrypt(record);
+      const nonce = crypto.getRandomValues(new Uint8Array(12));
+      const key = await this.#importKey(active.id, active.material);
+      const ciphertext = await crypto.subtle.encrypt(
+        {
+          name: "AES-GCM",
+          iv: toArrayBuffer(nonce),
+          additionalData: toArrayBuffer(aad(record.tenantId, record.reference)),
+          tagLength: 128,
+        },
+        key,
+        toArrayBuffer(new TextEncoder().encode(plaintext)),
+      );
+      const replaced = await this.#records.replaceIfUnchanged(
+        {
+          ...record,
+          keyId: active.id,
+          nonce: encodeBase64(nonce),
+          ciphertext: encodeBase64(new Uint8Array(ciphertext)),
+        },
+        { keyId: record.keyId, nonce: record.nonce, ciphertext: record.ciphertext },
+      );
+      if (replaced) rotated += 1;
+      else concurrentlyChanged += 1;
+    }
+    const last = records.at(-1);
+    return {
+      activeKeyId: active.id,
+      scanned: records.length,
+      needingRotation,
+      rotated,
+      concurrentlyChanged,
+      ...(records.length === limit && last
+        ? { nextCursor: { tenantId: last.tenantId, reference: last.reference } }
+        : {}),
+    };
+  }
+
+  async #decrypt(record: EncryptedSecretRecord, signal?: AbortSignal): Promise<string> {
+    assertNotAborted(signal);
+    if (record.version !== 1) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Stored credential envelope version is unsupported.", 503);
+    }
     const material = await this.#keyring.getKey(record.keyId);
     if (!material) throw new AppError("DEPENDENCY_UNAVAILABLE", "Credential encryption key is unavailable.", 503);
     const key = await this.#importKey(record.keyId, material);
@@ -65,7 +158,7 @@ export class EncryptedSecretStore implements SecretStore, SecretWriter {
         {
           name: "AES-GCM",
           iv: toArrayBuffer(decodeBase64(record.nonce)),
-          additionalData: toArrayBuffer(aad(tenantId, reference)),
+          additionalData: toArrayBuffer(aad(record.tenantId, record.reference)),
           tagLength: 128,
         },
         key,

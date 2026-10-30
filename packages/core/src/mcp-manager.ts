@@ -2,7 +2,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import type { FetchLike, JsonSchemaType } from "@modelcontextprotocol/client";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
 import { AppError } from "./errors.js";
-import type { McpRepository, SecretStore, TelegramRepository } from "./ports.js";
+import type { AuditLogRepository, McpRepository, SecretStore, TelegramRepository } from "./ports.js";
 import type { McpDiscoveredTool, McpRemoteTool, McpServerConnection, TenantId } from "./types.js";
 import type { AgentToolRegistry, ToolContext } from "./tools.js";
 
@@ -19,6 +19,7 @@ export class McpManager implements AgentToolRegistry {
   readonly #fetch: FetchLike;
   readonly #timeoutMs: number;
   readonly #telegramGrants: Pick<TelegramRepository, "isTelegramToolAllowed"> | undefined;
+  readonly #authorizationAudit: Pick<AuditLogRepository, "recordPermissionDecision"> | undefined;
 
   constructor(input: {
     readonly repository: McpRepository;
@@ -27,6 +28,7 @@ export class McpManager implements AgentToolRegistry {
     readonly fetch?: FetchLike;
     readonly timeoutMs?: number;
     readonly telegramGrants?: Pick<TelegramRepository, "isTelegramToolAllowed">;
+    readonly authorizationAudit?: Pick<AuditLogRepository, "recordPermissionDecision">;
   }) {
     this.#repository = input.repository;
     this.#secrets = input.secrets;
@@ -34,6 +36,7 @@ export class McpManager implements AgentToolRegistry {
     this.#fetch = input.fetch ?? fetch;
     this.#timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#telegramGrants = input.telegramGrants;
+    this.#authorizationAudit = input.authorizationAudit;
     if (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs < 100 || this.#timeoutMs > 120_000) {
       throw new AppError("VALIDATION_ERROR", "MCP timeout must be between 100 and 120000 milliseconds.", 400);
     }
@@ -142,7 +145,7 @@ export class McpManager implements AgentToolRegistry {
     for (const server of servers) {
       if (server.status !== "connected") continue;
       for (const tool of await this.#repository.listTools(context.tenantId, context.botId, server.id)) {
-        if (!isAuthorized(tool) || !(await this.#canActorUse(context, server.id, tool.name))) continue;
+        if (!(await this.#isAuthorizedForActor(context, server.id, tool))) continue;
         tools.push({
           name: exposedToolName(server.id, tool.name),
           description: tool.description
@@ -164,7 +167,7 @@ export class McpManager implements AgentToolRegistry {
       const tools = await this.#repository.listTools(context.tenantId, context.botId, server.id);
       const tool = tools.find((candidate) => exposedToolName(server.id, candidate.name) === name);
       if (!tool) continue;
-      if (!isAuthorized(tool) || !(await this.#canActorUse(context, server.id, tool.name)))
+      if (!(await this.#isAuthorizedForActor(context, server.id, tool)))
         throw new AppError("FORBIDDEN", "The requested MCP tool is not enabled for this bot.", 403);
       let validatedInput: unknown;
       try {
@@ -173,29 +176,37 @@ export class McpManager implements AgentToolRegistry {
         throw new AppError("VALIDATION_ERROR", "MCP tool input did not match the discovered schema.", 400);
       }
       try {
-        return await this.#withClient(server, async (client) => {
-          const result = await client.callTool({
-            name: tool.name,
-            arguments: validatedInput as Record<string, unknown>,
-          });
-          if (result.isError) throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP tool execution failed.", 502);
-          if (tool.outputSchema && result.structuredContent === undefined) {
-            throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP tool omitted its declared structured output.", 502);
-          }
-          if (result.structuredContent !== undefined) {
-            if (tool.outputSchema) {
-              try {
-                validateMcpSchemaValue(result.structuredContent, tool.outputSchema, "output");
-              } catch {
-                throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP tool returned data outside its output schema.", 502);
-              }
+        return await this.#withClient(
+          server,
+          async (client) => {
+            const result = await client.callTool({
+              name: tool.name,
+              arguments: validatedInput as Record<string, unknown>,
+            });
+            if (result.isError) throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP tool execution failed.", 502);
+            if (tool.outputSchema && result.structuredContent === undefined) {
+              throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP tool omitted its declared structured output.", 502);
             }
-            return result.structuredContent;
-          }
-          return result.content;
-        });
+            if (result.structuredContent !== undefined) {
+              if (tool.outputSchema) {
+                try {
+                  validateMcpSchemaValue(result.structuredContent, tool.outputSchema, "output");
+                } catch {
+                  throw new AppError(
+                    "DEPENDENCY_UNAVAILABLE",
+                    "MCP tool returned data outside its output schema.",
+                    502,
+                  );
+                }
+              }
+              return result.structuredContent;
+            }
+            return result.content;
+          },
+          context.signal,
+        );
       } catch (cause) {
-        if (!(cause instanceof AppError) || cause.code === "DEPENDENCY_UNAVAILABLE") {
+        if (!context.signal?.aborted && (!(cause instanceof AppError) || cause.code === "DEPENDENCY_UNAVAILABLE")) {
           await this.#repository.setServerStatus({
             tenantId: context.tenantId,
             botId: context.botId,
@@ -230,6 +241,19 @@ export class McpManager implements AgentToolRegistry {
     });
   }
 
+  async #isAuthorizedForActor(context: ToolContext, serverId: string, tool: McpDiscoveredTool): Promise<boolean> {
+    const allowed = isAuthorized(tool) && (await this.#canActorUse(context, serverId, tool.name));
+    await this.#authorizationAudit?.recordPermissionDecision({
+      tenantId: context.tenantId,
+      botId: context.botId,
+      category: "mcp",
+      permission: `mcp:${serverId}:${tool.name}`,
+      outcome: allowed ? "allowed" : "denied",
+      createdAt: new Date().toISOString(),
+    });
+    return allowed;
+  }
+
   async #requiredServer(tenantId: TenantId, botId: ToolContext["botId"], serverId: string) {
     const server = await this.#repository.getServer(tenantId, botId, serverId);
     if (!server) throw new AppError("NOT_FOUND", "MCP server was not found for this bot.", 404);
@@ -256,14 +280,24 @@ export class McpManager implements AgentToolRegistry {
     return endpoint;
   }
 
-  async #withClient<T>(server: McpServerConnection, operation: (client: Client) => Promise<T>): Promise<T> {
+  async #withClient<T>(
+    server: McpServerConnection,
+    operation: (client: Client) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    if (signal?.aborted) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP request was cancelled.", 504);
+    }
     // Revalidate before secret lookup and every network request.
     const endpoint = this.#validateEndpoint(server.endpoint);
     const headers = new Headers();
     if (server.credentialRef) {
-      const credential = await this.#secrets.resolve(server.tenantId, server.credentialRef);
+      const credential = await this.#secrets.resolve(server.tenantId, server.credentialRef, signal);
       validateCredential(credential);
       headers.set("authorization", `Bearer ${credential}`);
+    }
+    if (signal?.aborted) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP request was cancelled.", 504);
     }
     const transport = new StreamableHTTPClientTransport(endpoint, {
       fetch: this.#fetch,
@@ -272,6 +306,7 @@ export class McpManager implements AgentToolRegistry {
     });
     const client = new Client({ name: "aihat-bot-factory", version: "0.1.0" });
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let abortListener: (() => void) | undefined;
     try {
       const timeout = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(
@@ -279,15 +314,24 @@ export class McpManager implements AgentToolRegistry {
           this.#timeoutMs,
         );
       });
+      const aborted = signal
+        ? new Promise<never>((_, reject) => {
+            abortListener = () => reject(new AppError("DEPENDENCY_UNAVAILABLE", "MCP request was cancelled.", 504));
+            if (signal.aborted) abortListener();
+            else signal.addEventListener("abort", abortListener, { once: true });
+          })
+        : new Promise<never>(() => undefined);
       return await Promise.race([
         (async () => {
           await client.connect(transport);
           return operation(client);
         })(),
         timeout,
+        aborted,
       ]);
     } finally {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
+      if (signal && abortListener) signal.removeEventListener("abort", abortListener);
       await client.close().catch(() => undefined);
       await transport.close().catch(() => undefined);
     }

@@ -6,11 +6,19 @@ import {
   ApiTokenAuthenticator,
   BotFactory,
   CreationApprovalService,
+  FactoryAssistant,
+  ProviderCapabilityTools,
   EncryptedSecretStore,
+  createSecretRotationApiHandler,
+  createGlobalSkillCatalogAdminHandler,
+  BotCredentialApprovalService,
   EnvironmentSecretKeyring,
   createAgentApiHandler,
+  createBotAccessApiHandler,
   createFactoryApiHandler,
   createOpenAICompatibleAgentEngine,
+  hasVerifiedStructuredOutputOrigin,
+  hasVerifiedStreamingOrigin,
   createManagementApiHandler,
   createBotManagementApiHandler,
   createSkillsApiHandler,
@@ -18,12 +26,28 @@ import {
   TelegramManager,
   createTelegramManagementApiHandler,
   createTelegramWebhookHandler,
+  createTelegramWebAppAuthHandler,
+  createConversationHistoryApiHandler,
+  createUsageApiHandler,
+  createAuditLogApiHandler,
+  createTenantMembersApiHandler,
+  createWorkspacesApiHandler,
+  createUsageTrackingAgentEngine,
+  createMemoryApiHandler,
+  createMemoryAwareAgentEngine,
+  createEncryptedMemoryService,
   ScheduledTaskService,
   ScheduledTaskRunner,
   createScheduledTasksApiHandler,
   CombinedToolRegistry,
+  DurableToolRegistry,
   McpManager,
   SkillEngine,
+  TelegramMasterBot,
+  createTelegramMasterWebhookHandler,
+  sanitizeLogFields,
+  sanitizeLogText,
+  type Logger,
 } from "@aihat/core";
 
 export { BotCoordinator };
@@ -40,10 +64,15 @@ export const runtimeCapabilities = {
     objectStorage: true,
     encryptedSecrets: true,
     authentication: true,
+    longTermMemory: true,
     promptSkills: true,
     httpSkills: true,
+    workflowSkills: true,
     nativeSkills: false,
+    modelStreaming: false,
+    modelStructuredOutput: false,
     telegram: true,
+    telegramMasterBot: false,
     mcp: true,
     mcpOAuth: false,
     arbitraryCodeExecution: false,
@@ -66,13 +95,46 @@ export function objectStore(env: Env): CloudflareR2ObjectStore {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const miniAppResponse = await serveMiniApp(request, env.ASSETS);
+    if (miniAppResponse) return miniAppResponse;
     const d1 = repositories(env);
-    const authenticator = new ApiTokenAuthenticator(d1.apiTokens);
+    const globalSkillCatalogResponse = await createGlobalSkillCatalogAdminHandler({
+      skills: d1.skills,
+      authorizationToken: env.SKILL_CATALOG_ADMIN_TOKEN ?? "",
+    })(request);
+    if (globalSkillCatalogResponse) return globalSkillCatalogResponse;
+    const secretRotationResponse = await createSecretRotationApiHandler({
+      records: d1.secretRecords,
+      keyring: new EnvironmentSecretKeyring({
+        SECRET_ACTIVE_KEY_ID: env.SECRET_ACTIVE_KEY_ID,
+        SECRET_KEYRING_JSON: env.SECRET_KEYRING_JSON,
+      }),
+      authorizationToken: env.SECRET_ROTATION_AUTH_TOKEN ?? "",
+    })(request);
+    if (secretRotationResponse) return secretRotationResponse;
+    const authenticator = new ApiTokenAuthenticator(d1.apiTokens, { authorizationAudit: d1 });
+    const telegramMasterBotToken = env.TELEGRAM_MASTER_BOT_TOKEN ?? env.TELEGRAME_BOT_TOKEN ?? "";
+    const telegramWebAppAuth = createTelegramWebAppAuthHandler({
+      botToken: telegramMasterBotToken,
+      accounts: d1.telegramAuth,
+      tokens: d1.apiTokens,
+    });
+    const telegramAuthResponse = await telegramWebAppAuth(request);
+    if (telegramAuthResponse) return telegramAuthResponse;
     const apiResponse = await createManagementApiHandler(authenticator, d1.apiTokens)(request);
     if (apiResponse) return apiResponse;
-    const botManagementResponse = await createBotManagementApiHandler(authenticator, d1, d1)(request);
-    if (botManagementResponse) return botManagementResponse;
+    const tenantMembersResponse = await createTenantMembersApiHandler(authenticator, d1.tenantMembers)(request);
+    if (tenantMembersResponse) return tenantMembersResponse;
+    const workspacesResponse = await createWorkspacesApiHandler(authenticator, d1.apiTokens, d1.tenantMembers)(request);
+    if (workspacesResponse) return workspacesResponse;
+    const conversationHistoryResponse = await createConversationHistoryApiHandler(authenticator, d1)(request);
+    if (conversationHistoryResponse) return conversationHistoryResponse;
+    const usageResponse = await createUsageApiHandler(authenticator, d1)(request);
+    if (usageResponse) return usageResponse;
+    const auditLogResponse = await createAuditLogApiHandler(authenticator, d1)(request);
+    if (auditLogResponse) return auditLogResponse;
     const approvals = new CreationApprovalService(d1.creationApprovals);
+    const botFactory = new BotFactory({ sessions: d1.sessions, approvals, drafts: d1 });
     let encryptedSecrets: EncryptedSecretStore | undefined;
     const secretStore = {
       resolve: (tenantId: Parameters<EncryptedSecretStore["resolve"]>[0], reference: string, signal?: AbortSignal) => {
@@ -93,65 +155,135 @@ export default {
       );
       return encryptedSecrets;
     };
+    const botManagementResponse = await createBotManagementApiHandler(
+      authenticator,
+      d1,
+      d1,
+      new BotCredentialApprovalService(d1.botCredentialApprovals),
+      secretStore,
+    )(request);
+    if (botManagementResponse) return botManagementResponse;
+    const memoryService = createEncryptedMemoryService(d1, secretStore);
+    const memoryResponse = await createMemoryApiHandler(authenticator, memoryService)(request);
+    if (memoryResponse) return memoryResponse;
     const skillsResponse = await createSkillsApiHandler(authenticator, d1, d1.skills, secretStore)(request);
     if (skillsResponse) return skillsResponse;
     const mcpManager = new McpManager({
       repository: d1.mcp,
       secrets: secretStore,
       telegramGrants: d1,
+      authorizationAudit: d1,
       allowedOrigins: new Set(
         env.MCP_ALLOWED_ORIGINS.split(",")
           .map((origin) => origin.trim())
           .filter(Boolean),
       ),
     });
+    const modelAllowedOrigins = new Set(
+      env.MODEL_ALLOWED_ORIGINS.split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    );
     const mcpResponse = await createMcpApiHandler(authenticator, d1, mcpManager)(request);
     if (mcpResponse) return mcpResponse;
-    const factoryResponse = await createFactoryApiHandler(
-      authenticator,
-      new BotFactory({ sessions: d1.sessions, approvals, drafts: d1 }),
-      approvals,
-      secretStore,
-    )(request);
+    const factoryAssistant =
+      env.FACTORY_LLM_ENDPOINT?.trim() && env.FACTORY_LLM_TOKEN?.trim() && env.FACTORY_LLM_MODEL?.trim()
+        ? new FactoryAssistant({
+            endpoint: env.FACTORY_LLM_ENDPOINT,
+            token: env.FACTORY_LLM_TOKEN,
+            model: env.FACTORY_LLM_MODEL,
+          })
+        : undefined;
+    const factoryResponse = await createFactoryApiHandler(authenticator, botFactory, approvals, secretStore, {
+      modelDiscoveryOrigins: modelAllowedOrigins,
+      ...(factoryAssistant ? { assistant: factoryAssistant } : {}),
+    })(request);
     if (factoryResponse) return factoryResponse;
-    const agentEngine = createOpenAICompatibleAgentEngine({
+    const baseAgentEngine = createOpenAICompatibleAgentEngine({
       conversations: d1,
       secrets: secretStore,
-      tools: new CombinedToolRegistry([
-        new SkillEngine({
-          skills: d1.skills,
-          rateLimiter: d1.skillRateLimiter,
-          secrets: secretStore,
-          telegramGrants: d1,
-          allowedHttpOrigins: new Set(
-            env.HTTP_SKILL_ALLOWED_ORIGINS.split(",")
-              .map((origin) => origin.trim())
-              .filter(Boolean),
-          ),
-        }),
-        mcpManager,
-      ]),
+      tools: new DurableToolRegistry({
+        registry: new CombinedToolRegistry([
+          new ProviderCapabilityTools({ bots: d1, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),
+          new SkillEngine({
+            skills: d1.skills,
+            rateLimiter: d1.skillRateLimiter,
+            workflowExecutions: d1.workflowExecutions,
+            secrets: secretStore,
+            secretWriter: secretStore,
+            telegramGrants: d1,
+            authorizationAudit: d1,
+            allowedHttpOrigins: new Set(
+              env.HTTP_SKILL_ALLOWED_ORIGINS.split(",")
+                .map((origin) => origin.trim())
+                .filter(Boolean),
+            ),
+          }),
+          mcpManager,
+        ]),
+        executions: d1.toolExecutions,
+        secrets: secretStore,
+        secretWriter: secretStore,
+      }),
       toolCalling: true,
-      allowedOrigins: new Set(
-        env.MODEL_ALLOWED_ORIGINS.split(",")
+      imageInput: String(env.MODEL_IMAGE_INPUT) === "true",
+      streamingOrigins: new Set(
+        (env.MODEL_STREAMING_ORIGINS ?? "")
+          .split(",")
           .map((origin) => origin.trim())
           .filter(Boolean),
       ),
+      structuredOutputOrigins: new Set(
+        (env.MODEL_STRUCTURED_OUTPUT_ORIGINS ?? "")
+          .split(",")
+          .map((origin) => origin.trim())
+          .filter(Boolean),
+      ),
+      allowedOrigins: modelAllowedOrigins,
     });
+    const runtimeLogger = createRuntimeLogger();
+    const agentEngine = createUsageTrackingAgentEngine(
+      createMemoryAwareAgentEngine(baseAgentEngine, memoryService, runtimeLogger),
+      d1,
+      runtimeLogger,
+    );
     const telegram = new TelegramManager({
       repository: d1,
       bots: d1,
       secrets: secretStore,
       engine: agentEngine,
+      objects: objectStore(env),
       webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
     });
     const scheduledTaskService = new ScheduledTaskService(d1, d1, telegram, scheduler(env));
+    const masterBot =
+      telegramMasterBotToken && env.TELEGRAM_MASTER_WEBHOOK_SECRET && env.TELEGRAM_WEBHOOK_BASE_URL
+        ? new TelegramMasterBot({
+            token: telegramMasterBotToken,
+            webhookSecret: env.TELEGRAM_MASTER_WEBHOOK_SECRET,
+            webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL,
+            accounts: d1.telegramAuth,
+            sessions: d1.masterBot,
+            factory: botFactory,
+            bots: d1,
+          })
+        : undefined;
+    const masterWebhookResponse = await createTelegramMasterWebhookHandler(masterBot)(request);
+    if (masterWebhookResponse) return masterWebhookResponse;
     const webhookResponse = await createTelegramWebhookHandler(telegram)(request);
     if (webhookResponse) return webhookResponse;
     const telegramResponse = await createTelegramManagementApiHandler(authenticator, d1, d1, telegram)(request);
     if (telegramResponse) return telegramResponse;
     const scheduledTasksResponse = await createScheduledTasksApiHandler(authenticator, scheduledTaskService)(request);
     if (scheduledTasksResponse) return scheduledTasksResponse;
+    const botAccessResponse = await createBotAccessApiHandler({
+      authenticator,
+      access: d1,
+      bots: d1,
+      conversations: d1,
+      engine: agentEngine,
+    })(request);
+    if (botAccessResponse) return botAccessResponse;
     const agentResponse = await createAgentApiHandler(authenticator, d1, d1, agentEngine)(request);
     if (agentResponse) return agentResponse;
     if (url.pathname === "/health" && request.method === "GET") {
@@ -160,7 +292,38 @@ export default {
     if (url.pathname === "/capabilities" && request.method === "GET") {
       return Response.json({
         ...runtimeCapabilities,
-        features: { ...runtimeCapabilities.features, telegram: Boolean(env.TELEGRAM_WEBHOOK_BASE_URL) },
+        features: {
+          ...runtimeCapabilities.features,
+          telegram: Boolean(env.TELEGRAM_WEBHOOK_BASE_URL),
+          telegramMiniAppAuth: Boolean(telegramMasterBotToken),
+          telegramMasterBot: Boolean(masterBot),
+          modelStreaming: hasVerifiedStreamingOrigin(
+            new Set(
+              env.MODEL_ALLOWED_ORIGINS.split(",")
+                .map((origin) => origin.trim())
+                .filter(Boolean),
+            ),
+            new Set(
+              (env.MODEL_STREAMING_ORIGINS ?? "")
+                .split(",")
+                .map((origin) => origin.trim())
+                .filter(Boolean),
+            ),
+          ),
+          modelStructuredOutput: hasVerifiedStructuredOutputOrigin(
+            new Set(
+              env.MODEL_ALLOWED_ORIGINS.split(",")
+                .map((origin) => origin.trim())
+                .filter(Boolean),
+            ),
+            new Set(
+              (env.MODEL_STRUCTURED_OUTPUT_ORIGINS ?? "")
+                .split(",")
+                .map((origin) => origin.trim())
+                .filter(Boolean),
+            ),
+          ),
+        },
       });
     }
     if (url.pathname === "/ready" && request.method === "GET") {
@@ -194,45 +357,71 @@ export default {
       delete: (tenantId: Parameters<EncryptedSecretStore["delete"]>[0], reference: string) =>
         secrets.delete(tenantId, reference),
     };
+    const memoryService = createEncryptedMemoryService(d1, secretStore);
     const mcpManager = new McpManager({
       repository: d1.mcp,
       secrets: secretStore,
       telegramGrants: d1,
+      authorizationAudit: d1,
       allowedOrigins: new Set(
         env.MCP_ALLOWED_ORIGINS.split(",")
           .map((origin) => origin.trim())
           .filter(Boolean),
       ),
     });
-    const engine = createOpenAICompatibleAgentEngine({
+    const modelAllowedOrigins = new Set(
+      env.MODEL_ALLOWED_ORIGINS.split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean),
+    );
+    const baseEngine = createOpenAICompatibleAgentEngine({
       conversations: d1,
       secrets: secretStore,
-      tools: new CombinedToolRegistry([
-        new SkillEngine({
-          skills: d1.skills,
-          rateLimiter: d1.skillRateLimiter,
-          secrets: secretStore,
-          telegramGrants: d1,
-          allowedHttpOrigins: new Set(
-            env.HTTP_SKILL_ALLOWED_ORIGINS.split(",")
-              .map((origin) => origin.trim())
-              .filter(Boolean),
-          ),
-        }),
-        mcpManager,
-      ]),
+      tools: new DurableToolRegistry({
+        registry: new CombinedToolRegistry([
+          new ProviderCapabilityTools({ bots: d1, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),
+          new SkillEngine({
+            skills: d1.skills,
+            rateLimiter: d1.skillRateLimiter,
+            workflowExecutions: d1.workflowExecutions,
+            secrets: secretStore,
+            secretWriter: secretStore,
+            telegramGrants: d1,
+            authorizationAudit: d1,
+            allowedHttpOrigins: new Set(
+              env.HTTP_SKILL_ALLOWED_ORIGINS.split(",")
+                .map((origin) => origin.trim())
+                .filter(Boolean),
+            ),
+          }),
+          mcpManager,
+        ]),
+        executions: d1.toolExecutions,
+        secrets: secretStore,
+        secretWriter: secretStore,
+      }),
       toolCalling: true,
-      allowedOrigins: new Set(
-        env.MODEL_ALLOWED_ORIGINS.split(",")
+      imageInput: String(env.MODEL_IMAGE_INPUT) === "true",
+      structuredOutputOrigins: new Set(
+        (env.MODEL_STRUCTURED_OUTPUT_ORIGINS ?? "")
+          .split(",")
           .map((origin) => origin.trim())
           .filter(Boolean),
       ),
+      allowedOrigins: modelAllowedOrigins,
     });
+    const runtimeLogger = createRuntimeLogger();
+    const engine = createUsageTrackingAgentEngine(
+      createMemoryAwareAgentEngine(baseEngine, memoryService, runtimeLogger),
+      d1,
+      runtimeLogger,
+    );
     const telegram = new TelegramManager({
       repository: d1,
       bots: d1,
       secrets: secretStore,
       engine,
+      objects: objectStore(env),
       webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
     });
     const runner = new ScheduledTaskRunner(d1, d1, d1, engine, telegram, scheduler(env));
@@ -265,6 +454,41 @@ export default {
     await Promise.all(dueJobIds.map((jobId) => env.JOBS.send({ type: "scheduled_task", payloadRef: jobId })));
   },
 };
+
+function createRuntimeLogger(): Logger {
+  const write = (level: "info" | "warn" | "error", event: string, fields?: Readonly<Record<string, unknown>>) => {
+    const record = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level,
+      ...sanitizeLogFields(fields ?? {}),
+      event: sanitizeLogText(event),
+    });
+    if (level === "info") console.info(record);
+    else if (level === "warn") console.warn(record);
+    else console.error(record);
+  };
+  return {
+    info: (event, fields) => write("info", event, fields),
+    warn: (event, fields) => write("warn", event, fields),
+    error: (event, fields) => write("error", event, fields),
+  };
+}
+
+async function serveMiniApp(request: Request, assets: Fetcher): Promise<Response | undefined> {
+  const url = new URL(request.url);
+  if (url.pathname === "/miniapp") return Response.redirect(new URL("/miniapp/", url), 308);
+  if (url.pathname === "/miniapp/" && (request.method === "GET" || request.method === "HEAD")) {
+    return assets.fetch(new Request(new URL("/", url), request));
+  }
+  const asset = /^\/miniapp\/assets\/([A-Za-z0-9_-]+\.(?:js|css))$/.exec(url.pathname);
+  if (asset && (request.method === "GET" || request.method === "HEAD")) {
+    const fileName = asset[1];
+    if (!fileName) return new Response(null, { status: 404 });
+    return assets.fetch(new Request(new URL(`/assets/${fileName}`, url), request));
+  }
+  if (url.pathname.startsWith("/miniapp/")) return new Response("Not found.", { status: 404 });
+  return undefined;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

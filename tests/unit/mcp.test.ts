@@ -67,6 +67,7 @@ describe("MCP manager", () => {
     const state = memoryRepository();
     let telegramSenderGranted = false;
     const requests: { method: string; authorization: string | null }[] = [];
+    const permissionDecisions: { outcome: string; permission: string }[] = [];
     const fetchMock: TestFetch = async (input, init) => {
       const request = input instanceof Request ? input : new Request(input, init);
       requests.push({ method: request.method, authorization: request.headers.get("authorization") });
@@ -103,6 +104,11 @@ describe("MCP manager", () => {
           input.deploymentId === ("dep_123e4567-e89b-12d3-a456-426614174000" as TelegramDeploymentId) &&
           input.telegramUserId === 789 &&
           input.toolRef === "mcp:mcp_server_test:lookup",
+      },
+      authorizationAudit: {
+        recordPermissionDecision: async (input) => {
+          permissionDecisions.push({ outcome: input.outcome, permission: input.permission });
+        },
       },
       fetch: fetchMock,
     });
@@ -159,6 +165,9 @@ describe("MCP manager", () => {
     expect(await manager.available(telegramContext)).toHaveLength(1);
     await expect(manager.execute(telegramContext, exposedName, { key: "item-1" })).resolves.toEqual({ value: "found" });
     expect(requests.every(({ authorization }) => authorization === null)).toBe(true);
+    expect(permissionDecisions.some(({ outcome }) => outcome === "denied")).toBe(true);
+    expect(permissionDecisions.some(({ outcome }) => outcome === "allowed")).toBe(true);
+    expect(permissionDecisions.every(({ permission }) => permission === "mcp:mcp_server_test:lookup")).toBe(true);
   });
 
   test("uses a server bearer secret and marks protocol failures unhealthy", async () => {
@@ -243,7 +252,13 @@ describe("MCP manager", () => {
       fetch: fetchMock,
     });
     const handler = createMcpApiHandler(
-      new ApiTokenAuthenticator({ findActive: async () => principal, create: async () => {}, revoke: async () => {} }),
+      new ApiTokenAuthenticator({
+        findActive: async () => principal,
+        create: async () => {},
+        revoke: async () => {},
+        consumeApiRequest: async () => true,
+        recordApiMutation: async () => {},
+      }),
       { get: async () => bot, saveDraft: async () => {} },
       manager,
     );

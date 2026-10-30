@@ -4,12 +4,20 @@ import {
   createApiTokenMaterial,
   createTelegramManagementApiHandler,
   createTelegramWebhookHandler,
+  readTelegramUpdate,
+  telegramApi,
   TelegramManager,
 } from "../../packages/core/src/index.js";
-import type { AgentEngine } from "../../packages/core/src/ports.js";
+import type { AgentEngine, ObjectStore, StoredObject } from "../../packages/core/src/ports.js";
 import { openSqliteDatabase } from "../../apps/bun-runtime/src/migrations.js";
 import { BunSqliteRepositories } from "../../apps/bun-runtime/src/sqlite-store.js";
-import type { CreationAnswers, TelegramDeploymentId, TenantId, UserId } from "../../packages/core/src/types.js";
+import type {
+  ConversationMessage,
+  CreationAnswers,
+  TelegramDeploymentId,
+  TenantId,
+  UserId,
+} from "../../packages/core/src/types.js";
 
 const tenantId = "tenant-telegram" as TenantId;
 const ownerId = "user-telegram" as UserId;
@@ -48,18 +56,110 @@ describe("Telegram webhook integration", () => {
     };
     const calls: string[] = [];
     const sentMessages: Record<string, unknown>[] = [];
+    const sentPhotos: Record<string, unknown>[] = [];
+    const chatActions: Record<string, unknown>[] = [];
+    let telegramDeploymentId: TelegramDeploymentId | undefined;
+    const storedObjects = new Map<string, StoredObject>();
+    let attachmentBytes = Uint8Array.from(
+      atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/wioAAAAASUVORK5CYII="),
+      (char) => char.charCodeAt(0),
+    );
+    const objects: ObjectStore = {
+      put: async (input) => {
+        const record: StoredObject = {
+          ...input,
+          size: input.bytes.byteLength,
+          etag: "test-etag",
+          createdAt: new Date().toISOString(),
+        };
+        storedObjects.set(input.objectId, record);
+        return {
+          tenantId: input.tenantId,
+          objectId: input.objectId,
+          contentType: input.contentType,
+          size: input.bytes.byteLength,
+          etag: record.etag,
+          createdAt: record.createdAt,
+        };
+      },
+      get: async (tenant, objectId) => {
+        const record = storedObjects.get(objectId);
+        return record?.tenantId === tenant ? record : undefined;
+      },
+      putStream: async (input) => {
+        const reader = input.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            size += value.byteLength;
+          }
+        } finally {
+          reader.releaseLock();
+        }
+        const bytes = new Uint8Array(size);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return objects.put({ ...input, bytes });
+      },
+      getStream: async (tenant, objectId) => {
+        const record = await objects.get(tenant, objectId);
+        if (!record) return undefined;
+        const buffer = record.bytes.slice().buffer as ArrayBuffer;
+        return { ...record, body: new Blob([buffer]).stream() };
+      },
+      delete: async (_tenant, objectId) => void storedObjects.delete(objectId),
+    };
     let webhookRegistration: Record<string, unknown> | undefined;
     const fetchMock = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const request = input instanceof Request ? input : new Request(input, init);
-      const method = new URL(request.url).pathname.split("/").at(-1);
+      const requestUrl = new URL(request.url);
+      const method = requestUrl.pathname.split("/").at(-1);
       calls.push(method ?? "");
+      if (requestUrl.pathname.startsWith("/file/bot")) {
+        return new Response(attachmentBytes, { headers: { "content-type": "application/octet-stream" } });
+      }
       if (method === "getMe") return Response.json({ ok: true, result: { id: 7654321, is_bot: true } });
+      if (method === "getFile") {
+        const body = (await request.json()) as { file_id: string };
+        return Response.json({
+          ok: true,
+          result: { file_path: body.file_id === "photo-file" ? "photos/test.png" : "documents/report.csv" },
+        });
+      }
       if (method === "setWebhook") {
         webhookRegistration = (await request.json()) as Record<string, unknown>;
         return Response.json({ ok: true, result: true });
       }
       if (method === "sendMessage") {
         sentMessages.push((await request.json()) as Record<string, unknown>);
+        return Response.json({ ok: true, result: true });
+      }
+      if (method === "sendPhoto") {
+        const payload = (await request.json()) as Record<string, unknown>;
+        sentPhotos.push(payload);
+        if (!telegramDeploymentId) throw new Error("Telegram deployment ID was not initialized");
+        const stored = db
+          .query<{ response_attachments_json: string }, [string, number]>(
+            "SELECT response_attachments_json FROM telegram_updates WHERE deployment_id = ? AND update_id = ?",
+          )
+          .get(telegramDeploymentId, 9045);
+        expect(stored?.response_attachments_json).not.toContain("images.example.test");
+        const references = JSON.parse(stored?.response_attachments_json ?? "[]") as { secretRef: string }[];
+        expect(references).toHaveLength(1);
+        expect(secrets.get(references[0]?.secretRef ?? "")).toBe(
+          "https://images.example.test/generated.png?signature=private",
+        );
+        return Response.json({ ok: true, result: true });
+      }
+      if (method === "sendChatAction") {
+        chatActions.push((await request.json()) as Record<string, unknown>);
         return Response.json({ ok: true, result: true });
       }
       if (method === "deleteWebhook") return Response.json({ ok: true, result: true });
@@ -86,16 +186,28 @@ describe("Telegram webhook integration", () => {
         createdAt: new Date().toISOString(),
       });
       const engineCalls: string[] = [];
+      const agentMessages: (readonly ConversationMessage[])[] = [];
       const engine: AgentEngine = {
         respond: async (request) => {
           engineCalls.push(request.conversationId);
+          agentMessages.push(request.messages);
           expect(request.actorId).toMatch(/^telegram_[a-f0-9]{64}$/);
           expect(request.actorContext).toEqual({
             platform: "telegram",
             telegramDeploymentId: expect.any(String),
             telegramUserId: 54321,
           });
-          expect(request.messages).toEqual([{ role: "user", content: "Hello from Telegram" }]);
+          if (engineCalls.length === 1) {
+            expect(request.messages).toEqual([{ role: "user", content: "Hello from Telegram" }]);
+          }
+          if (request.messages[0]?.content === "Generate image") {
+            return {
+              message: { role: "assistant", content: "Here is your image." },
+              attachments: [
+                { kind: "image", url: "https://images.example.test/generated.png?signature=private", alt: "A kite" },
+              ],
+            };
+          }
           return { message: { role: "assistant", content: "Welcome." } };
         },
       };
@@ -104,6 +216,7 @@ describe("Telegram webhook integration", () => {
         bots: repositories,
         secrets: secretStore,
         engine,
+        objects,
         webhookBaseUrl: "https://public.example.test",
         fetch: fetchMock,
       });
@@ -133,6 +246,7 @@ describe("Telegram webhook integration", () => {
       const deployment = await repositories.getOwnedTelegramDeployment({ tenantId, ownerId, botId });
       expect(deployment).toMatchObject({ status: "active", externalId: "7654321" });
       if (!deployment) throw new Error("Telegram deployment was not saved");
+      telegramDeploymentId = deployment.id;
       expect(secrets.get(deployment.credentialRef)).toBe("7654321:telegram-secret-value");
       expect(webhookRegistration).toMatchObject({
         url: `https://public.example.test/webhooks/telegram/${deployment.id}`,
@@ -242,6 +356,109 @@ describe("Telegram webhook integration", () => {
       expect(engineCalls).toHaveLength(1);
       expect(sentMessages).toHaveLength(1);
 
+      const photoResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9043,
+            message: {
+              caption: "What is this?",
+              photo: [{ file_id: "photo-file", file_size: 68 }],
+              message_thread_id: 88,
+              chat: { id: -10012345 },
+              from: { id: 54321, is_bot: false },
+            },
+          }),
+        }),
+      );
+      expect(photoResponse?.status).toBe(200);
+      expect(agentMessages.at(-1)).toEqual([
+        {
+          role: "user",
+          content: "What is this?",
+          images: [{ dataUrl: expect.stringMatching(/^data:image\/png;base64,/), detail: "auto" }],
+        },
+      ]);
+      expect(chatActions[1]).toMatchObject({ chat_id: -10012345, message_thread_id: 88, action: "typing" });
+      expect(sentMessages.at(-1)).toMatchObject({ chat_id: -10012345, message_thread_id: 88, text: "Welcome." });
+      expect(storedObjects.size).toBe(0);
+
+      attachmentBytes = new TextEncoder().encode("item,quantity\nnotebook,2");
+      const documentResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9044,
+            message: {
+              caption: "Summarize this.",
+              document: {
+                file_id: "csv-file",
+                file_name: "report.csv",
+                mime_type: "text/csv",
+                file_size: 24,
+              },
+              chat: { id: -10012345 },
+              from: { id: 54321, is_bot: false },
+            },
+          }),
+        }),
+      );
+      expect(documentResponse?.status).toBe(200);
+      expect(agentMessages.at(-1)).toEqual([
+        { role: "user", content: "Summarize this.\n\n[Attached text file: report.csv]\nitem,quantity\nnotebook,2" },
+      ]);
+      expect(storedObjects.size).toBe(0);
+      expect(calls.filter((name) => name === "sendChatAction")).toHaveLength(3);
+
+      const imageResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9045,
+            message: { text: "Generate image", chat: { id: -10012345 }, from: { id: 54321, is_bot: false } },
+          }),
+        }),
+      );
+      expect(imageResponse?.status).toBe(200);
+      expect(sentPhotos).toEqual([
+        { chat_id: -10012345, photo: "https://images.example.test/generated.png?signature=private" },
+      ]);
+      expect(secrets.values()).not.toContain("https://images.example.test/generated.png?signature=private");
+      expect(
+        db
+          .query<{ state: string; response_attachments_json: string }, [string, number]>(
+            "SELECT state, response_attachments_json FROM telegram_updates WHERE deployment_id = ? AND update_id = ?",
+          )
+          .get(deployment.id, 9045),
+      ).toEqual({ state: "completed", response_attachments_json: "[]" });
+      const duplicateImage = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9045,
+            message: { text: "Generate image", chat: { id: -10012345 }, from: { id: 54321, is_bot: false } },
+          }),
+        }),
+      );
+      expect(duplicateImage?.status).toBe(200);
+      expect(sentPhotos).toHaveLength(1);
+
       await repositories.replaceTelegramAllowedUsers({
         deploymentId: deployment.id,
         telegramUserIds: [],
@@ -264,6 +481,49 @@ describe("Telegram webhook integration", () => {
     } finally {
       db.close();
     }
+  });
+});
+
+describe("Telegram media and API boundaries", () => {
+  test("validates file metadata and retries only a short Telegram rate limit", async () => {
+    const update = await readTelegramUpdate(
+      new Request("https://local.test/webhook", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          update_id: 1,
+          message: {
+            chat: { id: 2 },
+            from: { id: 3 },
+            document: { file_id: "doc-1", file_name: "notes.md", mime_type: "text/markdown", file_size: 10 },
+          },
+        }),
+      }),
+    );
+    expect(update.message?.document).toMatchObject({ file_id: "doc-1", file_name: "notes.md", file_size: 10 });
+    await expect(
+      readTelegramUpdate(
+        new Request("https://local.test/webhook", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            update_id: 2,
+            message: { chat: { id: 2 }, document: { file_id: "doc-1", file_size: -1 } },
+          }),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+
+    let attempts = 0;
+    const result = await telegramApi<boolean>("token", "sendMessage", { chat_id: 1, text: "hello" }, async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return Response.json({ ok: false, error_code: 429, parameters: { retry_after: 0 } }, { status: 429 });
+      }
+      return Response.json({ ok: true, result: true });
+    });
+    expect(result).toBe(true);
+    expect(attempts).toBe(2);
   });
 });
 

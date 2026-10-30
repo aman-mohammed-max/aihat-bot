@@ -1,4 +1,4 @@
-import { requireApiScope } from "./api-auth.js";
+import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
 import type { BotRepository, TelegramRepository } from "./ports.js";
@@ -27,8 +27,8 @@ export function createTelegramManagementApiHandler(
       if (!bot || bot.ownerId !== principal.ownerId) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
 
       if (toolGrantMatch) {
-        if (request.method === "GET") requireApiScope(principal, "bots:read");
-        else if (request.method === "PUT") requireApiScope(principal, "bots:write");
+        if (request.method === "GET") await requireApiScope(principal, "bots:read");
+        else if (request.method === "PUT") await requireApiScope(principal, "bots:write");
         else return methodNotAllowed("GET, PUT");
         const telegramUserId = Number(toolGrantMatch[2]);
         if (!Number.isSafeInteger(telegramUserId) || telegramUserId < 1) {
@@ -73,7 +73,7 @@ export function createTelegramManagementApiHandler(
       }
 
       if (request.method === "GET") {
-        requireApiScope(principal, "bots:read");
+        await requireApiScope(principal, "bots:read");
         const deployment = await deployments.getOwnedTelegramDeployment({
           tenantId: principal.tenantId,
           ownerId: principal.ownerId,
@@ -90,7 +90,7 @@ export function createTelegramManagementApiHandler(
         );
       }
 
-      requireApiScope(principal, "bots:write");
+      await requireApiScope(principal, "bots:write");
       if (request.method === "PATCH") {
         const body = await readJsonBody(request);
         if (Object.keys(body).length !== 1 || !Array.isArray(body.allowedUserIds)) {
@@ -150,6 +150,7 @@ export function createTelegramManagementApiHandler(
       return methodNotAllowed("GET, PUT, PATCH, DELETE");
     } catch (cause) {
       if (cause instanceof AppError) {
+        await recordApiAuthorizationDenial(request, cause);
         return Response.json(
           { error: cause.code, message: cause.message },
           {

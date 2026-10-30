@@ -24,11 +24,34 @@ describe("authenticated agent API", () => {
       const ownerToken = await issueToken(repositories, ownerId, ["agent:run"], "token-agent-owner");
       const otherToken = await issueToken(repositories, otherOwnerId, ["agent:run"], "token-agent-other");
       const readOnlyToken = await issueToken(repositories, ownerId, ["factory:read"], "token-agent-readonly");
-      const calls: string[] = [];
+      const calls: {
+        readonly conversationId: string;
+        readonly executionId?: string;
+        readonly responseSchema?: unknown;
+      }[] = [];
       const engine: AgentEngine = {
-        respond: async (request) => {
-          calls.push(request.conversationId);
-          return { message: { role: "assistant", content: "The bot reply." } };
+        respond: async (request, options) => {
+          calls.push({
+            conversationId: request.conversationId,
+            ...(request.executionId === undefined ? {} : { executionId: request.executionId }),
+            ...(request.responseSchema === undefined ? {} : { responseSchema: request.responseSchema }),
+          });
+          options?.onTextDelta?.("The ");
+          options?.onTextDelta?.("bot reply.");
+          return {
+            message: {
+              role: "assistant",
+              content: request.responseSchema ? '{"answer":"structured"}' : "The bot reply.",
+            },
+            ...(request.messages[0]?.content === "Generate image" || request.messages[0]?.content === "Stream image"
+              ? {
+                  attachments: [
+                    { kind: "image" as const, url: "https://images.example.test/generated.png", alt: "A kite" },
+                  ],
+                }
+              : {}),
+            ...(request.responseSchema ? { structuredOutput: { answer: "structured" } } : {}),
+          };
         },
       };
       const handler = createAgentApiHandler(
@@ -60,7 +83,44 @@ describe("authenticated agent API", () => {
       );
       expect(second?.status).toBe(200);
       expect(calls).toHaveLength(2);
-      expect(calls[0]).toBe(calls[1]);
+      expect(calls[0]?.conversationId).toBe(calls[1]?.conversationId);
+      expect(calls[0]?.executionId).not.toBe(calls[1]?.executionId);
+
+      const streamed = await handler(
+        new Request(endpoint, {
+          method: "POST",
+          headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+          body: JSON.stringify({
+            message: "Stream a reply",
+            conversationId: firstResponse.conversationId,
+            stream: true,
+          }),
+        }),
+      );
+      expect(streamed?.headers.get("content-type")).toContain("text/event-stream");
+      const eventText = await streamed?.text();
+      expect(eventText).toContain('event: delta\ndata: {"delta":"The "}');
+      expect(eventText).toContain('event: delta\ndata: {"delta":"bot reply."}');
+      expect(eventText).toContain('event: done\ndata: {"conversationId":"');
+      expect(calls).toHaveLength(3);
+      expect(calls[2]?.conversationId).toBe(calls[0]?.conversationId);
+      expect(calls[2]?.executionId).not.toBe(calls[0]?.executionId);
+
+      const idempotentRequest = () =>
+        handler(
+          new Request(endpoint, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${ownerToken}`,
+              "content-type": "application/json",
+              "idempotency-key": "agent-retry-0001",
+            },
+            body: JSON.stringify({ message: "Retry this request", conversationId: firstResponse.conversationId }),
+          }),
+        );
+      expect((await idempotentRequest())?.status).toBe(200);
+      expect((await idempotentRequest())?.status).toBe(200);
+      expect(calls[3]?.executionId).toBe(calls[4]?.executionId);
 
       const unauthorizedOwner = await handler(
         new Request(endpoint, {
@@ -70,7 +130,7 @@ describe("authenticated agent API", () => {
         }),
       );
       expect(unauthorizedOwner?.status).toBe(404);
-      expect(calls).toHaveLength(2);
+      expect(calls).toHaveLength(5);
 
       const missingScope = await handler(
         new Request(endpoint, {
@@ -80,7 +140,62 @@ describe("authenticated agent API", () => {
         }),
       );
       expect(missingScope?.status).toBe(403);
-      expect(calls).toHaveLength(2);
+      expect(calls).toHaveLength(5);
+
+      const responseSchema = {
+        type: "object",
+        properties: { answer: { type: "string" } },
+        required: ["answer"],
+        additionalProperties: false,
+      };
+      const structured = await handler(
+        new Request(endpoint, {
+          method: "POST",
+          headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ message: "Return JSON", responseSchema }),
+        }),
+      );
+      expect(structured?.status).toBe(200);
+      expect(await structured?.json()).toMatchObject({
+        message: '{"answer":"structured"}',
+        structuredOutput: { answer: "structured" },
+      });
+      expect(calls[5]?.responseSchema).toEqual(responseSchema);
+
+      const invalidStructured = await handler(
+        new Request(endpoint, {
+          method: "POST",
+          headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+          body: JSON.stringify({
+            message: "Return JSON",
+            responseSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
+          }),
+        }),
+      );
+      expect(invalidStructured?.status).toBe(400);
+      expect(calls).toHaveLength(6);
+
+      const generatedImage = await handler(
+        new Request(endpoint, {
+          method: "POST",
+          headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ message: "Generate image" }),
+        }),
+      );
+      expect(await generatedImage?.json()).toMatchObject({
+        attachments: [{ kind: "image", url: "https://images.example.test/generated.png", alt: "A kite" }],
+      });
+
+      const streamedImage = await handler(
+        new Request(endpoint, {
+          method: "POST",
+          headers: { authorization: `Bearer ${ownerToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ message: "Stream image", stream: true }),
+        }),
+      );
+      expect(await streamedImage?.text()).toContain(
+        '"attachments":[{"kind":"image","url":"https://images.example.test/generated.png","alt":"A kite"}]',
+      );
     } finally {
       db.close();
     }

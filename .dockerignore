@@ -1,5 +1,6 @@
 .git
 .wrangler
+AI Hat*.html
 node_modules
 dist
 data

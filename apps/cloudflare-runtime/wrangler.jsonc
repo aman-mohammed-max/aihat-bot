@@ -2,6 +2,12 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "aihat-bot-factory",
   "main": "src/index.ts",
+  "assets": {
+    "directory": "../../apps/dashboard/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
   "compatibility_date": "2026-10-30",
   "alias": { "@aihat/core": "../../packages/core/src/index.ts" },
   "observability": { "enabled": true },
@@ -9,9 +15,13 @@
   "vars": {
     "APP_ENV": "development",
     "MODEL_ALLOWED_ORIGINS": "https://api.openai.com",
+    "MODEL_STREAMING_ORIGINS": "https://api.openai.com",
+    "MODEL_STRUCTURED_OUTPUT_ORIGINS": "",
     "HTTP_SKILL_ALLOWED_ORIGINS": "",
     "MCP_ALLOWED_ORIGINS": "",
-    "TELEGRAM_WEBHOOK_BASE_URL": ""
+    "FACTORY_LLM_ENDPOINT": "https://freellmapi-production-5248.up.railway.app/v1",
+    "FACTORY_LLM_MODEL": "auto",
+    "TELEGRAM_WEBHOOK_BASE_URL": "https://aihat-bot-factory.work-fdc.workers.dev"
   },
   "durable_objects": {
     "bindings": [{ "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" }]
@@ -21,7 +31,7 @@
     {
       "binding": "DB",
       "database_name": "aihat-bot-development",
-      "database_id": "00000000-0000-0000-0000-000000000001",
+      "database_id": "41b78acb-ad21-47f0-8b54-2e3642427c1a",
       "migrations_dir": "../../migrations/sqlite"
     }
   ],
@@ -37,8 +47,12 @@
       "vars": {
         "APP_ENV": "staging",
         "MODEL_ALLOWED_ORIGINS": "https://api.openai.com",
+        "MODEL_STREAMING_ORIGINS": "https://api.openai.com",
+        "MODEL_STRUCTURED_OUTPUT_ORIGINS": "",
         "HTTP_SKILL_ALLOWED_ORIGINS": "",
         "MCP_ALLOWED_ORIGINS": "",
+        "FACTORY_LLM_ENDPOINT": "",
+        "FACTORY_LLM_MODEL": "",
         "TELEGRAM_WEBHOOK_BASE_URL": ""
       },
       "durable_objects": {
@@ -64,8 +78,12 @@
       "vars": {
         "APP_ENV": "production",
         "MODEL_ALLOWED_ORIGINS": "https://api.openai.com",
+        "MODEL_STREAMING_ORIGINS": "https://api.openai.com",
+        "MODEL_STRUCTURED_OUTPUT_ORIGINS": "",
         "HTTP_SKILL_ALLOWED_ORIGINS": "",
         "MCP_ALLOWED_ORIGINS": "",
+        "FACTORY_LLM_ENDPOINT": "",
+        "FACTORY_LLM_MODEL": "",
         "TELEGRAM_WEBHOOK_BASE_URL": ""
       },
       "durable_objects": {

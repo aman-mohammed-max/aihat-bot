@@ -8,3 +8,5 @@ coverage/
 .wrangler/
 apps/cloudflare-runtime/worker-configuration.d.ts
 *.log
+AI Hat*.html
+apps/dashboard/dist/

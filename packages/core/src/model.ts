@@ -1,9 +1,18 @@
 import { AppError } from "./errors.js";
-import type { ModelConfig, ModelToolDefinition, ModelTurn, ConversationMessage, TenantId } from "./types.js";
+import { validateStructuredOutputSchema, validateStructuredOutputValue } from "./structured-output.js";
+import type {
+  JsonSchema,
+  ModelConfig,
+  ModelToolDefinition,
+  ModelTurn,
+  ConversationMessage,
+  TenantId,
+} from "./types.js";
 import type { SecretStore } from "./ports.js";
 
 export interface ProviderCapabilities {
   readonly toolCalling: boolean;
+  readonly imageInput?: boolean;
   readonly streaming: boolean;
   readonly structuredOutput: boolean;
 }
@@ -16,7 +25,9 @@ export interface ModelProvider {
     readonly config: ModelConfig;
     readonly messages: readonly ConversationMessage[];
     readonly tools?: readonly ModelToolDefinition[];
+    readonly responseSchema?: JsonSchema;
     readonly signal?: AbortSignal;
+    readonly onTextDelta?: (delta: string) => void;
   }): Promise<ModelTurn>;
 }
 
@@ -44,11 +55,16 @@ export interface OpenAICompatibleProviderOptions {
   readonly defaultEndpoint: string;
   /** Exact origins approved by the operator. Tenant-provided arbitrary URLs are never fetched. */
   readonly allowedOrigins: ReadonlySet<string>;
+  /** Origins whose OpenAI-compatible SSE endpoint was verified by the operator. */
+  readonly streamingOrigins?: ReadonlySet<string>;
+  /** Origins whose strict JSON-schema response format was verified by the operator. */
+  readonly structuredOutputOrigins?: ReadonlySet<string>;
   readonly secrets: SecretStore;
   readonly fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   readonly timeoutMs?: number;
   /** Set only after the endpoint has been checked for this deployment/provider. */
   readonly toolCalling?: boolean;
+  readonly imageInput?: boolean;
 }
 
 interface OpenAIResponse {
@@ -65,11 +81,15 @@ interface OpenAIResponse {
   readonly usage?: { readonly prompt_tokens?: unknown; readonly completion_tokens?: unknown };
 }
 
+const MAX_STRUCTURED_OUTPUT_BYTES = 64 * 1024;
+
 /** OpenAI chat-completions adapter with strict egress, timeout, and redirect controls. */
 export class OpenAICompatibleProvider implements ModelProvider {
   readonly id: string;
   readonly #defaultEndpoint: string;
   readonly #allowedOrigins: ReadonlySet<string>;
+  readonly #streamingOrigins: ReadonlySet<string>;
+  readonly #structuredOutputOrigins: ReadonlySet<string>;
   readonly #secrets: SecretStore;
   readonly #fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   readonly #timeoutMs: number;
@@ -82,18 +102,34 @@ export class OpenAICompatibleProvider implements ModelProvider {
     this.id = options.id;
     this.#defaultEndpoint = options.defaultEndpoint;
     this.#allowedOrigins = new Set([...options.allowedOrigins].map((origin) => new URL(origin).origin));
+    this.#streamingOrigins = new Set([...(options.streamingOrigins ?? [])].map((origin) => new URL(origin).origin));
+    this.#structuredOutputOrigins = new Set(
+      [...(options.structuredOutputOrigins ?? [])].map((origin) => new URL(origin).origin),
+    );
     this.#secrets = options.secrets;
     this.#fetch = options.fetch ?? fetch;
     this.#timeoutMs = options.timeoutMs ?? 30_000;
     this.#capabilities = {
       toolCalling: options.toolCalling ?? false,
+      imageInput: options.imageInput ?? false,
       streaming: false,
       structuredOutput: false,
     };
   }
 
-  capabilities(_config: ModelConfig): ProviderCapabilities {
-    return this.#capabilities;
+  capabilities(config: ModelConfig): ProviderCapabilities {
+    let origin = "";
+    try {
+      origin = new URL(config.endpoint ?? this.#defaultEndpoint).origin;
+    } catch {
+      // Invalid endpoints are rejected before a request; they cannot advertise optional features.
+    }
+    const approved = this.#allowedOrigins.has(origin);
+    return {
+      ...this.#capabilities,
+      streaming: approved && this.#streamingOrigins.has(origin),
+      structuredOutput: approved && this.#structuredOutputOrigins.has(origin),
+    };
   }
 
   async complete(input: {
@@ -101,8 +137,13 @@ export class OpenAICompatibleProvider implements ModelProvider {
     readonly config: ModelConfig;
     readonly messages: readonly ConversationMessage[];
     readonly tools?: readonly ModelToolDefinition[];
+    readonly responseSchema?: JsonSchema;
     readonly signal?: AbortSignal;
+    readonly onTextDelta?: (delta: string) => void;
   }): Promise<ModelTurn> {
+    if (input.signal?.aborted) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Model request was cancelled.", 504);
+    }
     const credentialRef = input.config.credentialRef;
     if (!credentialRef) {
       throw new AppError("VALIDATION_ERROR", "A model credential reference is required.", 400);
@@ -113,6 +154,17 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
     const endpoint = input.config.endpoint ?? this.#defaultEndpoint;
     const target = this.#completionUrl(endpoint);
+    const streaming = input.onTextDelta !== undefined;
+    if (streaming && !this.capabilities(input.config).streaming) {
+      throw new AppError("UNSUPPORTED_CAPABILITY", "Streaming is not verified for this model endpoint.", 501);
+    }
+    const responseSchema = input.responseSchema ? validateStructuredOutputSchema(input.responseSchema) : undefined;
+    if (responseSchema && streaming) {
+      throw new AppError("UNSUPPORTED_CAPABILITY", "Structured output is not supported for streaming requests.", 501);
+    }
+    if (responseSchema && !this.capabilities(input.config).structuredOutput) {
+      throw new AppError("UNSUPPORTED_CAPABILITY", "Structured output is not verified for this model endpoint.", 501);
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(new Error("Model request timed out")), this.#timeoutMs);
     const abortFromCaller = () => controller.abort(input.signal?.reason);
@@ -128,6 +180,15 @@ export class OpenAICompatibleProvider implements ModelProvider {
       const body: Record<string, unknown> = {
         model: input.config.model,
         messages: input.messages.map(toOpenAIMessage),
+        ...(streaming ? { stream: true } : {}),
+        ...(responseSchema
+          ? {
+              response_format: {
+                type: "json_schema",
+                json_schema: { name: "agent_response", strict: true, schema: responseSchema },
+              },
+            }
+          : {}),
       };
       const allowedParameters = new Set([
         "temperature",
@@ -175,10 +236,14 @@ export class OpenAICompatibleProvider implements ModelProvider {
       }
 
       let payload: OpenAIResponse;
-      try {
-        payload = (await response.json()) as OpenAIResponse;
-      } catch (cause) {
-        throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider returned invalid JSON.", 502, { cause });
+      if (streaming) {
+        payload = await readOpenAIEventStream(response, input.onTextDelta as (delta: string) => void);
+      } else {
+        try {
+          payload = (await response.json()) as OpenAIResponse;
+        } catch (cause) {
+          throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider returned invalid JSON.", 502, { cause });
+        }
       }
 
       const choice = payload.choices?.[0]?.message;
@@ -211,11 +276,32 @@ export class OpenAICompatibleProvider implements ModelProvider {
         );
       }
 
+      let structuredOutput: unknown;
+      let content = typeof choice.content === "string" ? choice.content : "";
+      if (responseSchema && toolCalls.length === 0) {
+        try {
+          if (new TextEncoder().encode(content).byteLength > MAX_STRUCTURED_OUTPUT_BYTES) {
+            throw new Error("Structured output exceeded the response size limit.");
+          }
+          structuredOutput = JSON.parse(content) as unknown;
+          validateStructuredOutputValue(structuredOutput, responseSchema);
+          content = JSON.stringify(structuredOutput);
+        } catch (cause) {
+          throw new AppError(
+            "DEPENDENCY_UNAVAILABLE",
+            "Model provider returned output that did not match the requested schema.",
+            502,
+            { cause },
+          );
+        }
+      }
+
       const promptTokens = payload.usage?.prompt_tokens;
       const completionTokens = payload.usage?.completion_tokens;
       return {
-        message: { role: "assistant", content: typeof choice.content === "string" ? choice.content : "" },
+        message: { role: "assistant", content },
         toolCalls,
+        ...(structuredOutput === undefined ? {} : { structuredOutput }),
         ...(typeof promptTokens === "number" &&
         Number.isSafeInteger(promptTokens) &&
         promptTokens >= 0 &&
@@ -256,8 +342,164 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
 }
 
+interface StreamedToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+async function readOpenAIEventStream(
+  response: Response,
+  onTextDelta: (delta: string) => void,
+): Promise<OpenAIResponse> {
+  const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+  if (contentType !== "text/event-stream" || !response.body) {
+    throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider returned an invalid streaming response.", 502);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const toolCalls = new Map<number, StreamedToolCall>();
+  const eventData: string[] = [];
+  let buffer = "";
+  let content = "";
+  let usage: OpenAIResponse["usage"];
+  let sawPayload = false;
+  let sawFinishReason = false;
+  let finished = false;
+
+  const processEvent = (): void => {
+    if (eventData.length === 0 || finished) {
+      eventData.length = 0;
+      return;
+    }
+    const data = eventData.join("\n");
+    eventData.length = 0;
+    if (data.trim() === "[DONE]") {
+      finished = true;
+      return;
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(data);
+    } catch (cause) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider returned an invalid stream event.", 502, {
+        cause,
+      });
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider returned an invalid stream event.", 502);
+    }
+    const event = payload as {
+      readonly error?: unknown;
+      readonly choices?: readonly {
+        readonly delta?: {
+          readonly content?: unknown;
+          readonly tool_calls?: readonly {
+            readonly index?: unknown;
+            readonly id?: unknown;
+            readonly function?: { readonly name?: unknown; readonly arguments?: unknown };
+          }[];
+        };
+        readonly finish_reason?: unknown;
+      }[];
+      readonly usage?: OpenAIResponse["usage"];
+    };
+    if (event.error !== undefined) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider stream failed.", 502);
+    }
+    sawPayload = true;
+    if (event.usage) usage = event.usage;
+    if (event.choices?.some((choice) => choice.finish_reason !== undefined && choice.finish_reason !== null)) {
+      sawFinishReason = true;
+    }
+    const delta = event.choices?.[0]?.delta;
+    if (typeof delta?.content === "string" && delta.content.length > 0) {
+      content += delta.content;
+      onTextDelta(delta.content);
+    }
+    for (const part of delta?.tool_calls ?? []) {
+      if (!Number.isSafeInteger(part.index) || (part.index as number) < 0) {
+        throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider returned an invalid tool-call stream.", 502);
+      }
+      const index = part.index as number;
+      const current = toolCalls.get(index) ?? { id: "", name: "", arguments: "" };
+      if (typeof part.id === "string") current.id = part.id;
+      if (typeof part.function?.name === "string") current.name += part.function.name;
+      if (typeof part.function?.arguments === "string") current.arguments += part.function.arguments;
+      toolCalls.set(index, current);
+    }
+  };
+
+  const processLine = (line: string): void => {
+    const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
+    if (normalized === "") {
+      processEvent();
+    } else if (normalized.startsWith("data:")) {
+      eventData.push(normalized.slice(5).replace(/^ /, ""));
+    }
+  };
+
+  try {
+    while (!finished) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      let newline = buffer.indexOf("\n");
+      while (newline !== -1) {
+        processLine(buffer.slice(0, newline));
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+      }
+      if (done) {
+        if (buffer.length > 0) processLine(buffer);
+        processEvent();
+        break;
+      }
+    }
+  } catch (cause) {
+    await reader.cancel().catch(() => undefined);
+    if (cause instanceof AppError) throw cause;
+    throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider stream could not be read.", 502, { cause });
+  } finally {
+    reader.releaseLock();
+  }
+  if (!sawPayload) {
+    throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider returned an empty completion stream.", 502);
+  }
+  if (!finished && !sawFinishReason) {
+    throw new AppError("DEPENDENCY_UNAVAILABLE", "Model provider stream ended before completion.", 502);
+  }
+  const calls = [...toolCalls.entries()].sort(([left], [right]) => left - right).map(([, call]) => call);
+  const messageToolCalls = calls.map((call) => ({
+    id: call.id,
+    function: { name: call.name, arguments: call.arguments },
+  }));
+  return {
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: content || null,
+          ...(messageToolCalls.length ? { tool_calls: messageToolCalls } : {}),
+        },
+      },
+    ],
+    ...(usage ? { usage } : {}),
+  };
+}
+
 function toOpenAIMessage(message: ConversationMessage): Record<string, unknown> {
-  const result: Record<string, unknown> = { role: message.role, content: message.content };
+  const result: Record<string, unknown> = {
+    role: message.role,
+    content: message.images?.length
+      ? [
+          { type: "text", text: message.content },
+          ...message.images.map((image) => ({
+            type: "image_url",
+            image_url: { url: image.dataUrl, detail: image.detail ?? "auto" },
+          })),
+        ]
+      : message.content,
+  };
   if (message.name) result.name = message.name;
   if (message.toolCallId) result.tool_call_id = message.toolCallId;
   if (message.toolCalls?.length) {

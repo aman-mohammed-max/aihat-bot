@@ -52,6 +52,66 @@ const migrations: readonly Migration[] = [
     name: "telegram_tool_grants",
     sql: readFileSync(findMigration("0008_telegram_tool_grants.sql"), "utf8"),
   },
+  {
+    version: 9,
+    name: "telegram_webapp_auth",
+    sql: readFileSync(findMigration("0009_telegram_webapp_auth.sql"), "utf8"),
+  },
+  {
+    version: 10,
+    name: "usage_reporting",
+    sql: readFileSync(findMigration("0010_usage_reporting.sql"), "utf8"),
+  },
+  {
+    version: 11,
+    name: "master_bot",
+    sql: readFileSync(findMigration("0011_master_bot.sql"), "utf8"),
+  },
+  {
+    version: 12,
+    name: "encrypted_memory",
+    sql: readFileSync(findMigration("0012_encrypted_memory.sql"), "utf8"),
+  },
+  {
+    version: 13,
+    name: "public_bot_access",
+    sql: readFileSync(findMigration("0013_public_bot_access.sql"), "utf8"),
+  },
+  {
+    version: 14,
+    name: "api_rate_limits",
+    sql: readFileSync(findMigration("0014_api_rate_limits.sql"), "utf8"),
+  },
+  {
+    version: 15,
+    name: "bot_version_labels",
+    sql: readFileSync(findMigration("0015_bot_version_labels.sql"), "utf8"),
+  },
+  {
+    version: 16,
+    name: "bot_credential_approvals",
+    sql: readFileSync(findMigration("0016_bot_credential_approvals.sql"), "utf8"),
+  },
+  {
+    version: 17,
+    name: "workflow_executions",
+    sql: readFileSync(findMigration("0017_workflow_executions.sql"), "utf8"),
+  },
+  {
+    version: 18,
+    name: "telegram_response_attachments",
+    sql: readFileSync(findMigration("0018_telegram_response_attachments.sql"), "utf8"),
+  },
+  {
+    version: 19,
+    name: "tool_executions",
+    sql: readFileSync(findMigration("0019_tool_executions.sql"), "utf8"),
+  },
+  {
+    version: 20,
+    name: "tenant_membership_status",
+    sql: readFileSync(findMigration("0020_tenant_membership_status.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {

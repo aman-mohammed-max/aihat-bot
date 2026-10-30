@@ -4,6 +4,7 @@ import {
   BotFactory,
   CreationApprovalService,
   EncryptedSecretStore,
+  FactoryAssistant,
   createApiTokenMaterial,
   createFactoryApiHandler,
 } from "../../packages/core/src/index.js";
@@ -48,13 +49,64 @@ describe("authenticated bot factory API", () => {
         activeKey: async () => ({ id: "test-key", material: encryptionKey }),
         getKey: async (id) => (id === "test-key" ? encryptionKey : undefined),
       });
+      const modelCalls: Array<{ url: string; authorization: string | null; redirect: RequestRedirect | undefined }> =
+        [];
       const handler = createFactoryApiHandler(
         new ApiTokenAuthenticator(repositories.apiTokens),
         new BotFactory({ sessions: repositories.sessions, approvals, drafts: repositories }),
         approvals,
         secrets,
+        {
+          modelDiscoveryOrigins: new Set(["https://api.example.test"]),
+          fetch: async (input, init) => {
+            modelCalls.push({
+              url: String(input),
+              authorization: new Headers(init?.headers).get("authorization"),
+              redirect: init?.redirect,
+            });
+            return Response.json({
+              data: [
+                { id: "model-one", name: "Chat model", type: "chat" },
+                { id: "gpt-image-1", name: "Image model", type: "image" },
+              ],
+            });
+          },
+          assistant: new FactoryAssistant({
+            endpoint: "https://factory-llm.example.test/v1",
+            token: "factory-draft-secret",
+            model: "small-model",
+            fetch: async () =>
+              Response.json({
+                choices: [
+                  {
+                    message: {
+                      content: JSON.stringify({
+                        name: "Draft assistant",
+                        description: "A draft bot.",
+                        purpose: "Help with a task.",
+                        audience: "The team.",
+                        personality: "Be clear and kind.",
+                      }),
+                    },
+                  },
+                ],
+              }),
+          }),
+        },
       );
       const headers = { authorization: `Bearer ${material.token}` };
+
+      const assisted = await handler(
+        new Request("https://local.test/v1/factory-assist/generate", {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify({ idea: "A helpful team assistant." }),
+        }),
+      );
+      expect(assisted?.status).toBe(200);
+      const assistedBody = await assisted?.text();
+      expect(assistedBody).toContain("Draft assistant");
+      expect(assistedBody).not.toContain("factory-draft-secret");
 
       const start = await handler(new Request("https://local.test/v1/factory-sessions", { method: "POST", headers }));
       expect(start?.status).toBe(201);
@@ -85,6 +137,8 @@ describe("authenticated bot factory API", () => {
         ["endpoint", "https://api.example.test/v1"],
         ["model", "model-one"],
         ["credentialRef", `secret_${"a".repeat(32)}`],
+        ["imageModel", "gpt-image-1"],
+        ["searchModel", "provider-search-v2"],
         ["skills", []],
         ["mcpConnections", []],
         ["integrations", []],
@@ -94,8 +148,34 @@ describe("authenticated bot factory API", () => {
         ["visibility", "private"],
         ["interfaces", ["api"]],
       ];
+      const discoverModels = async (role: "chat" | "image" | "search", credential?: string) => {
+        const response = await handler(
+          new Request(`https://local.test/v1/factory-sessions/${session.id}/models`, {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify({ role, ...(credential ? { credential } : {}) }),
+          }),
+        );
+        if (!response) throw new Error("model discovery route did not handle the request");
+        return { response, body: (await response.json()) as { models: Array<{ id: string }> } };
+      };
       let connectedCredentialRef: string | undefined;
       for (const [step, value] of answers) {
+        if (step === "model") {
+          const result = await discoverModels("chat", "temporary-model-secret");
+          expect(result.response.status).toBe(200);
+          expect(result.body.models.map((model) => model.id)).toEqual(["model-one"]);
+          expect(modelCalls.at(-1)?.authorization).toBe("Bearer temporary-model-secret");
+          expect(modelCalls.at(-1)?.url).toBe("https://api.example.test/v1/models");
+          expect(modelCalls.at(-1)?.redirect).toBe("error");
+          expect(JSON.stringify(result.body)).not.toContain("temporary-model-secret");
+        }
+        if (step === "imageModel" || step === "searchModel") {
+          const result = await discoverModels(step === "imageModel" ? "image" : "search");
+          expect(result.response.status).toBe(200);
+          expect(modelCalls.at(-1)?.authorization).toBe("Bearer test-model-api-key");
+          expect(result.body.models.length).toBe(step === "imageModel" ? 1 : 2);
+        }
         if (step === "credentialRef") {
           const issue = await handler(
             new Request(`https://local.test/v1/factory-sessions/${session.id}/approvals`, { method: "POST", headers }),
@@ -167,6 +247,8 @@ describe("authenticated bot factory API", () => {
       const bot = await repositories.get(tenantId, draftSession.botId as BotId);
       expect(bot?.status).toBe("published");
       expect(bot?.model.credentialRef).toBe(connectedCredentialRef);
+      expect(bot?.model.imageModel).toBe("gpt-image-1");
+      expect(bot?.model.searchModel).toBe("provider-search-v2");
       const encryptedRecord = connectedCredentialRef
         ? await repositories.secretRecords.get(tenantId, connectedCredentialRef)
         : undefined;
@@ -229,6 +311,16 @@ describe("authenticated bot factory API", () => {
           ownerId,
           sessionId: "factory_test_session",
           action: "connect_credentials",
+          approvalId: "malformed-approval",
+        }),
+      ).toBe(false);
+
+      expect(
+        await approvals.consume({
+          tenantId,
+          ownerId,
+          sessionId: "factory_test_session",
+          action: "connect_credentials",
           approvalId: issued.approvalId,
         }),
       ).toBe(true);
@@ -241,6 +333,22 @@ describe("authenticated bot factory API", () => {
           approvalId: issued.approvalId,
         }),
       ).toBe(false);
+
+      const auditEvents = await repositories.listOwnedAuditLogs({ tenantId, ownerId, limit: 10 });
+      expect(auditEvents.map((event) => event.action).sort()).toEqual(
+        [
+          "creation.approval_issued",
+          "creation.approval_rejected",
+          "creation.approval_consumed",
+          "creation.approval_rejected",
+          "creation.approval_rejected",
+        ].sort(),
+      );
+      expect(new Set(auditEvents.map((event) => event.resourceId))).toEqual(
+        new Set(["factory_test_session", "factory_another_session"]),
+      );
+      expect(JSON.stringify(auditEvents)).not.toContain(issued.approvalId);
+      expect(JSON.stringify(auditEvents)).not.toContain("approvalHash");
     } finally {
       db.close();
     }

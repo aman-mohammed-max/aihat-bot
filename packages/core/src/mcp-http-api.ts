@@ -1,4 +1,4 @@
-import { requireApiScope } from "./api-auth.js";
+import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
 import type { BotRepository } from "./ports.js";
@@ -34,12 +34,12 @@ export function createMcpApiHandler(
 
       if (collection) {
         if (request.method === "GET") {
-          requireApiScope(principal, "bots:read");
+          await requireApiScope(principal, "bots:read");
           const servers = await mcp.listServers(principal.tenantId, botId);
           return json(servers.map(serverSummary));
         }
         if (request.method !== "POST") return methodNotAllowed("GET, POST");
-        requireApiScope(principal, "bots:write");
+        await requireApiScope(principal, "bots:write");
         const body = await readJsonBody(request);
         if (!hasOnlyKeys(body, ["name", "endpoint", "credentialRef"])) {
           throw new AppError(
@@ -72,7 +72,7 @@ export function createMcpApiHandler(
       }
 
       if (toolRoute) {
-        requireApiScope(principal, "bots:write");
+        await requireApiScope(principal, "bots:write");
         if (request.method !== "PATCH") return methodNotAllowed("PATCH");
         const body = await readJsonBody(request);
         if (!hasOnlyKeys(body, ["enabled", "grantedPermissions"])) {
@@ -108,12 +108,12 @@ export function createMcpApiHandler(
       const action = serverRoute?.[3];
       if (!serverId) return undefined;
       if (action === "tools" && request.method === "GET") {
-        requireApiScope(principal, "bots:read");
+        await requireApiScope(principal, "bots:read");
         return json(await mcp.listTools(principal.tenantId, botId, serverId));
       }
       if (action === "connect" || action === "test") {
         if (request.method !== "POST") return methodNotAllowed("POST");
-        requireApiScope(principal, "bots:write");
+        await requireApiScope(principal, "bots:write");
         const tools = await mcp.connect(principal.tenantId, botId, serverId);
         const servers = await mcp.listServers(principal.tenantId, botId);
         const server = servers.find((item) => item.id === serverId);
@@ -121,18 +121,19 @@ export function createMcpApiHandler(
       }
       if (action === "disconnect") {
         if (request.method !== "POST") return methodNotAllowed("POST");
-        requireApiScope(principal, "bots:write");
+        await requireApiScope(principal, "bots:write");
         await mcp.disconnect(principal.tenantId, botId, serverId);
         return new Response(null, { status: 204, headers: noStoreHeaders() });
       }
       if (!action && request.method === "DELETE") {
-        requireApiScope(principal, "bots:write");
+        await requireApiScope(principal, "bots:write");
         await mcp.removeServer(principal.tenantId, botId, serverId);
         return new Response(null, { status: 204, headers: noStoreHeaders() });
       }
       return methodNotAllowed(action ? "GET, POST" : "GET, DELETE");
     } catch (cause) {
       if (cause instanceof AppError) {
+        await recordApiAuthorizationDenial(request, cause);
         return Response.json(
           { error: cause.code, message: cause.message },
           {

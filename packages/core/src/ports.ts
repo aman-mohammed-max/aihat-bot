@@ -2,8 +2,11 @@ import type {
   AgentRequest,
   AgentResponse,
   BotDefinition,
+  BotVersionHistoryItem,
   BotId,
   ConversationId,
+  ConversationSummary,
+  StoredConversationMessage,
   CreationAnswers,
   CreationSession,
   InstalledSkill,
@@ -11,6 +14,7 @@ import type {
   McpRemoteTool,
   McpServerConnection,
   SkillDefinition,
+  SkillCatalogPublication,
   TenantId,
   UserId,
   TelegramDeploymentId,
@@ -18,6 +22,18 @@ import type {
   ScheduledTaskId,
   ScheduledJob,
   JobId,
+  UsageRecord,
+  UsageSummary,
+  BotMemoryRecord,
+  BotAccessGrant,
+  BotAccessDecision,
+  PublicBotListing,
+  AuditLogEvent,
+  WorkflowExecutionAcquisition,
+  ToolExecutionAcquisition,
+  TenantMember,
+  TenantRole,
+  TenantWorkspace,
 } from "./types.js";
 
 export interface BotRepository {
@@ -25,10 +41,18 @@ export interface BotRepository {
   saveDraft(bot: BotDefinition): Promise<void>;
 }
 
-export type BotSettingsPatch = Partial<Pick<BotDefinition, "name" | "description" | "systemPrompt" | "model">>;
+export type BotSettingsPatch = Partial<
+  Pick<BotDefinition, "name" | "description" | "systemPrompt" | "model" | "memoryEnabled">
+>;
 
 export interface BotManagementRepository {
   listOwned(tenantId: TenantId, ownerId: UserId): Promise<readonly BotDefinition[]>;
+  listVersions(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly limit: number;
+  }): Promise<readonly BotVersionHistoryItem[]>;
   updateOwned(input: {
     readonly tenantId: TenantId;
     readonly ownerId: UserId;
@@ -43,6 +67,51 @@ export interface BotManagementRepository {
     readonly disabled: boolean;
   }): Promise<void>;
   deleteOwned(input: { readonly tenantId: TenantId; readonly ownerId: UserId; readonly botId: BotId }): Promise<void>;
+}
+
+export interface BotCredentialApprovalRepository {
+  create(input: {
+    readonly approvalHash: string;
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly createdAt: string;
+    readonly expiresAt: string;
+  }): Promise<void>;
+  consume(input: {
+    readonly approvalHash: string;
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly now: string;
+  }): Promise<boolean>;
+}
+
+/** Owner-controlled membership administration. Adapters enforce the actor role in the same transaction as changes. */
+export interface TenantMembershipRepository {
+  listMembers(input: { readonly tenantId: TenantId; readonly actorId: UserId }): Promise<readonly TenantMember[]>;
+  listWorkspacesForUser(userId: UserId): Promise<readonly TenantWorkspace[]>;
+  getActiveRole(input: { readonly tenantId: TenantId; readonly userId: UserId }): Promise<TenantRole | undefined>;
+  addMember(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly memberId: UserId;
+    readonly role: Exclude<TenantRole, "owner">;
+    readonly now: string;
+  }): Promise<TenantMember>;
+  changeMemberRole(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly memberId: UserId;
+    readonly role: TenantRole;
+    readonly now: string;
+  }): Promise<TenantMember>;
+  deactivateMember(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly memberId: UserId;
+    readonly now: string;
+  }): Promise<TenantMember>;
 }
 
 export interface ConversationRepository {
@@ -62,6 +131,156 @@ export interface ApiConversationRepository {
   }): Promise<ConversationId>;
 }
 
+export interface ConversationHistoryRepository {
+  listOwnedConversations(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly limit: number;
+    readonly offset: number;
+  }): Promise<readonly ConversationSummary[]>;
+  getOwnedConversationMessages(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly conversationId: ConversationId;
+    readonly limit: number;
+    readonly beforeSequence?: number;
+  }): Promise<{ readonly items: readonly StoredConversationMessage[]; readonly hasMore: boolean } | undefined>;
+}
+
+export interface UsageRepository {
+  recordUsage(record: UsageRecord): Promise<void>;
+  getOwnedUsageSummary(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly from: string;
+    readonly through: string;
+  }): Promise<UsageSummary>;
+}
+
+export interface StoredBotMemoryRecord extends BotMemoryRecord {
+  /** False only for legacy rows written before encrypted memory storage was enabled. */
+  readonly encryptedValue: boolean;
+}
+
+export interface MemoryRepository {
+  listOwnedBotMemory(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+  }): Promise<readonly StoredBotMemoryRecord[]>;
+  listActiveBotMemory(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly now: string;
+  }): Promise<readonly StoredBotMemoryRecord[]>;
+  putOwnedBotMemory(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly key: string;
+    readonly value: string;
+    readonly encryptedValue?: boolean;
+    readonly expiresAt?: string;
+    readonly now: string;
+  }): Promise<StoredBotMemoryRecord>;
+  deleteOwnedBotMemory(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly key: string;
+  }): Promise<boolean>;
+}
+
+/** Plaintext memory operations exposed only after the encrypted storage boundary. */
+export interface BotMemoryService {
+  listOwnedBotMemory(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+  }): Promise<readonly BotMemoryRecord[]>;
+  listActiveBotMemory(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly now: string;
+  }): Promise<readonly BotMemoryRecord[]>;
+  putOwnedBotMemory(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly key: string;
+    readonly value: string;
+    readonly expiresAt?: string;
+    readonly now: string;
+  }): Promise<BotMemoryRecord>;
+  deleteOwnedBotMemory(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly key: string;
+  }): Promise<boolean>;
+}
+
+/** Cross-tenant public and explicitly shared bot access, enforced by each runtime's database adapter. */
+export interface BotAccessRepository {
+  listPublicBots(input: { readonly query?: string; readonly limit: number }): Promise<readonly PublicBotListing[]>;
+  getPublicBotBySlug(slug: string): Promise<BotDefinition | undefined>;
+  getSharedBot(input: {
+    readonly botId: BotId;
+    readonly userId: UserId;
+    readonly now: string;
+  }): Promise<BotDefinition | undefined>;
+  listOwnedAccessGrants(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+  }): Promise<readonly BotAccessGrant[]>;
+  getOwnedPublicBotAccessPolicy(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+  }): Promise<PublicBotListing | undefined>;
+  setPublicBotAccessPolicy(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly dailyUsageLimit: number;
+    readonly rateLimitPerMinute: number;
+    readonly now: string;
+  }): Promise<PublicBotListing>;
+  createOwnedAccessGrant(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly userId?: UserId;
+    readonly invitationTokenHash?: string;
+    readonly dailyUsageLimit?: number;
+    readonly rateLimitPerMinute?: number;
+    readonly expiresAt?: string;
+    readonly now: string;
+  }): Promise<BotAccessGrant>;
+  revokeOwnedAccessGrant(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly grantId: string;
+  }): Promise<boolean>;
+  acceptBotInvitation(input: {
+    readonly invitationTokenHash: string;
+    readonly userId: UserId;
+    readonly now: string;
+  }): Promise<BotAccessGrant | undefined>;
+  consumeBotUse(input: {
+    readonly botId: BotId;
+    readonly userId: UserId;
+    readonly accessMode: "public" | "shared";
+    readonly now: string;
+  }): Promise<BotAccessDecision>;
+}
+
 export interface TelegramDeployment {
   readonly id: TelegramDeploymentId;
   readonly tenantId: TenantId;
@@ -75,8 +294,17 @@ export interface TelegramDeployment {
 export type TelegramUpdateReservation =
   | { readonly state: "acquired" }
   | { readonly state: "busy" }
-  | { readonly state: "completed" }
-  | { readonly state: "ready"; readonly responseText: string };
+  | { readonly state: "completed"; readonly attachmentRefs?: readonly TelegramResponseAttachmentReference[] }
+  | {
+      readonly state: "ready";
+      readonly responseText: string;
+      readonly attachmentRefs?: readonly TelegramResponseAttachmentReference[];
+    };
+
+export interface TelegramResponseAttachmentReference {
+  readonly kind: "image";
+  readonly secretRef: string;
+}
 
 export interface TelegramAccessPolicy {
   readonly allowedUserIds: readonly number[];
@@ -144,6 +372,7 @@ export interface TelegramRepository {
     readonly deploymentId: TelegramDeploymentId;
     readonly updateId: number;
     readonly responseText: string;
+    readonly attachmentRefs?: readonly TelegramResponseAttachmentReference[];
     readonly leaseUntil: string;
     readonly now: string;
   }): Promise<void>;
@@ -151,6 +380,10 @@ export interface TelegramRepository {
     readonly deploymentId: TelegramDeploymentId;
     readonly updateId: number;
     readonly now: string;
+  }): Promise<void>;
+  clearTelegramUpdateAttachments(input: {
+    readonly deploymentId: TelegramDeploymentId;
+    readonly updateId: number;
   }): Promise<void>;
   releaseTelegramUpdate(input: {
     readonly deploymentId: TelegramDeploymentId;
@@ -160,7 +393,7 @@ export interface TelegramRepository {
 }
 
 export interface AgentEngine {
-  respond(request: AgentRequest): Promise<AgentResponse>;
+  respond(request: AgentRequest, options?: { readonly onTextDelta?: (delta: string) => void }): Promise<AgentResponse>;
 }
 
 export interface SecretStore {
@@ -186,6 +419,14 @@ export interface SecretRecordRepository {
   get(tenantId: TenantId, reference: string): Promise<EncryptedSecretRecord | undefined>;
   create(record: EncryptedSecretRecord): Promise<void>;
   delete(tenantId: TenantId, reference: string): Promise<void>;
+  listPage(
+    after: { readonly tenantId: TenantId; readonly reference: string } | undefined,
+    limit: number,
+  ): Promise<readonly EncryptedSecretRecord[]>;
+  replaceIfUnchanged(
+    record: EncryptedSecretRecord,
+    expected: { readonly keyId: string; readonly nonce: string; readonly ciphertext: string },
+  ): Promise<boolean>;
 }
 
 export interface SecretKeyring {
@@ -347,6 +588,10 @@ export interface StoredObject extends StoredObjectMetadata {
   readonly bytes: Uint8Array;
 }
 
+export interface StoredObjectStream extends StoredObjectMetadata {
+  readonly body: ReadableStream<Uint8Array>;
+}
+
 /** Tenant-scoped binary storage with explicit size and content-type validation. */
 export interface ObjectStore {
   put(input: {
@@ -356,6 +601,14 @@ export interface ObjectStore {
     readonly bytes: Uint8Array;
   }): Promise<StoredObjectMetadata>;
   get(tenantId: TenantId, objectId: string): Promise<StoredObject | undefined>;
+  putStream(input: {
+    readonly tenantId: TenantId;
+    readonly objectId: string;
+    readonly contentType: string;
+    readonly size: number;
+    readonly body: ReadableStream<Uint8Array>;
+  }): Promise<StoredObjectMetadata>;
+  getStream(tenantId: TenantId, objectId: string): Promise<StoredObjectStream | undefined>;
   delete(tenantId: TenantId, objectId: string): Promise<void>;
 }
 
@@ -364,13 +617,16 @@ export interface ApiTokenPrincipal {
   readonly tenantId: TenantId;
   readonly ownerId: UserId;
   readonly scopes: readonly string[];
+  /** Workspace role used to limit effective scopes. Raw token scopes remain the delegation ceiling. */
+  readonly tenantRole?: TenantRole;
+  readonly expiresAt?: string;
+  readonly delegableScopes?: readonly string[];
 }
 
 export interface ApiTokenRecord extends ApiTokenPrincipal {
   readonly tokenHash: string;
   readonly tokenPrefix: string;
   readonly createdAt: string;
-  readonly expiresAt?: string;
 }
 
 /** Stores only a one-way hash; raw API tokens are shown once at creation time. */
@@ -378,11 +634,118 @@ export interface ApiTokenRepository {
   findActive(tokenHash: string, now: string): Promise<ApiTokenPrincipal | undefined>;
   create(record: ApiTokenRecord): Promise<void>;
   revoke(tenantId: TenantId, ownerId: UserId, tokenId: string, revokedAt: string): Promise<void>;
+  consumeApiRequest(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly now: string;
+    readonly limitPerMinute: number;
+  }): Promise<boolean>;
+  recordApiMutation(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly tokenId: string;
+    readonly method: string;
+    readonly pathname: string;
+    readonly createdAt: string;
+  }): Promise<void>;
+}
+
+export interface AuditLogRepository {
+  recordPermissionDecision(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly category: "skill" | "mcp";
+    readonly permission: string;
+    readonly outcome: "allowed" | "denied";
+    readonly createdAt: string;
+  }): Promise<void>;
+  listOwnedAuditLogs(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly limit: number;
+  }): Promise<readonly AuditLogEvent[]>;
+}
+
+/** Persist authorization decisions for authenticated API requests. */
+export interface ApiAuthorizationDenialRepository {
+  recordApiAuthorizationDenial(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly tokenId: string;
+    readonly method: string;
+    readonly pathname: string;
+    readonly denialType: "scope" | "resource";
+    readonly errorCode: "FORBIDDEN" | "NOT_FOUND";
+    readonly requiredScope?: string;
+    readonly createdAt: string;
+  }): Promise<void>;
+}
+
+/** Telegram Web App identity and one-use initData replay protection. */
+export interface TelegramAuthRepository {
+  claimInitData(input: {
+    readonly dataHash: string;
+    readonly expiresAt: string;
+    readonly now: string;
+  }): Promise<boolean>;
+  getOrCreateOwner(input: {
+    readonly telegramUserId: number;
+    readonly ownerId: UserId;
+    readonly tenantId: TenantId;
+    readonly workspaceName: string;
+    readonly now: string;
+  }): Promise<{ readonly ownerId: UserId; readonly tenantId: TenantId }>;
+}
+
+export interface MasterBotSession {
+  readonly telegramUserId: number;
+  readonly chatId: number;
+  readonly tenantId: TenantId;
+  readonly ownerId: UserId;
+  readonly sessionId: string;
+  readonly updatedAt: string;
+}
+
+export interface MasterBotReply {
+  readonly chat_id: number;
+  readonly text: string;
+  readonly reply_markup?: Readonly<Record<string, unknown>>;
+}
+
+export type MasterBotUpdateReservation =
+  | { readonly state: "completed" | "busy" | "acquired" }
+  | { readonly state: "ready"; readonly reply: MasterBotReply };
+
+/** Persistent owner-to-factory routing and idempotent master-bot webhook delivery. */
+export interface MasterBotRepository {
+  getSession(telegramUserId: number): Promise<MasterBotSession | undefined>;
+  saveSession(session: MasterBotSession): Promise<void>;
+  deleteSession(telegramUserId: number): Promise<void>;
+  reserveUpdate(input: {
+    readonly updateId: number;
+    readonly leaseUntil: string;
+    readonly now: string;
+  }): Promise<MasterBotUpdateReservation>;
+  saveUpdateReply(input: {
+    readonly updateId: number;
+    readonly reply: MasterBotReply;
+    readonly leaseUntil: string;
+    readonly now: string;
+  }): Promise<void>;
+  completeUpdate(input: { readonly updateId: number; readonly now: string }): Promise<void>;
+  releaseUpdate(input: { readonly updateId: number; readonly now: string }): Promise<void>;
 }
 
 export interface SkillRepository {
   listCatalog(tenantId: TenantId): Promise<readonly SkillDefinition[]>;
   getCatalogSkill(tenantId: TenantId, skillId: string): Promise<SkillDefinition | undefined>;
+  listGlobalCatalog(): Promise<readonly SkillDefinition[]>;
+  publishGlobalCatalogSkill(input: { readonly definition: SkillCatalogPublication }): Promise<void>;
+  setGlobalCatalogSkillEnabled(skillId: string, enabled: boolean): Promise<void>;
+  publishCatalogSkill(input: {
+    readonly tenantId: TenantId;
+    readonly definition: SkillCatalogPublication;
+  }): Promise<void>;
   listInstalled(tenantId: TenantId, botId: BotId): Promise<readonly InstalledSkill[]>;
   install(input: {
     readonly tenantId: TenantId;
@@ -411,6 +774,87 @@ export interface SkillRateLimiter {
     readonly maxRequests: number;
     readonly windowSeconds: number;
   }): Promise<boolean>;
+}
+
+/** Durable, tenant-scoped workflow checkpoints. State payloads live only in encrypted secret storage. */
+export interface WorkflowExecutionRepository {
+  acquire(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly skillId: string;
+    readonly executionKey: string;
+    readonly initialStateRef: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly leaseUntil: string;
+    readonly expiresAt: string;
+  }): Promise<WorkflowExecutionAcquisition>;
+  checkpoint(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly skillId: string;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly expectedVersion: number;
+    readonly stateRef: string;
+    readonly nextStep: number;
+    readonly now: string;
+    readonly leaseUntil: string;
+    readonly expiresAt: string;
+  }): Promise<boolean>;
+  complete(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly skillId: string;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly expectedVersion: number;
+    readonly stateRef: string;
+    readonly nextStep: number;
+    readonly now: string;
+    readonly expiresAt: string;
+  }): Promise<boolean>;
+  release(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly skillId: string;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly now: string;
+  }): Promise<void>;
+  purgeExpired(tenantId: TenantId, now: string, limit: number): Promise<readonly string[]>;
+}
+
+/** Durable idempotency ledger for completed model-issued tool calls. Result payloads remain encrypted in secret storage. */
+export interface ToolExecutionRepository {
+  acquire(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly executionKey: string;
+    readonly toolName: string;
+    readonly inputHash: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly leaseUntil: string;
+    readonly expiresAt: string;
+  }): Promise<ToolExecutionAcquisition>;
+  complete(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly resultRef: string;
+    readonly now: string;
+    readonly expiresAt: string;
+  }): Promise<boolean>;
+  release(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly now: string;
+  }): Promise<void>;
+  purgeExpired(tenantId: TenantId, now: string, limit: number): Promise<readonly string[]>;
 }
 
 export interface McpRepository {

@@ -36,9 +36,9 @@ export class CreationApprovalService implements CreationApprovalVerifier {
     readonly action: CreationApprovalAction;
     readonly approvalId: string;
   }): Promise<boolean> {
-    if (!/^approval_[A-Za-z0-9_-]{43}$/.test(input.approvalId)) return false;
+    const wellFormed = /^approval_[A-Za-z0-9_-]{43}$/.test(input.approvalId);
     return this.approvals.consume({
-      approvalHash: await hashApprovalId(input.approvalId),
+      approvalHash: await hashApprovalId(wellFormed ? input.approvalId : "invalid-approval-id"),
       tenantId: input.tenantId,
       ownerId: input.ownerId,
       sessionId: input.sessionId,

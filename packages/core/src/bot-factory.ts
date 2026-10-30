@@ -18,6 +18,8 @@ export const CREATION_STEPS = [
   "endpoint",
   "model",
   "credentialRef",
+  "imageModel",
+  "searchModel",
   "skills",
   "mcpConnections",
   "integrations",
@@ -233,7 +235,12 @@ function validateAnswer<K extends CreationStep>(step: K, value: unknown): Creati
     case "endpoint":
       return httpsEndpoint(value) as CreationAnswers[K];
     case "model":
-      return identifier(value, step) as CreationAnswers[K];
+      return modelIdentifier(value, step) as CreationAnswers[K];
+    case "imageModel":
+    case "searchModel":
+      return typeof value === "string" && ["", "skip", "none"].includes(value.trim().toLowerCase())
+        ? ("" as CreationAnswers[K])
+        : (modelIdentifier(value, step) as CreationAnswers[K]);
     case "credentialRef": {
       if (typeof value !== "string" || !/^secret_[a-f0-9]{32}$/.test(value)) {
         throw new AppError(
@@ -305,11 +312,31 @@ function stringList(value: unknown, field: string): readonly string[] {
   return [...new Set(parsed)];
 }
 
+function modelIdentifier(value: unknown, field: string): string {
+  if (typeof value !== "string") throw invalid(field);
+  const model = value.trim();
+  if (
+    model.length < 1 ||
+    model.length > 128 ||
+    [...model].some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 0x20 || code === 0x7f;
+    })
+  ) {
+    throw invalid(field);
+  }
+  return model;
+}
+
 function requireCompleteAnswers(answers: Partial<CreationAnswers>): CreationAnswers {
-  if (CREATION_STEPS.some((step) => answers[step] === undefined)) {
+  if (CREATION_STEPS.some((step) => step !== "imageModel" && step !== "searchModel" && answers[step] === undefined)) {
     throw new AppError("VALIDATION_ERROR", "Creation session is missing required answers.", 400);
   }
-  return answers as CreationAnswers;
+  return {
+    ...answers,
+    imageModel: answers.imageModel ?? "",
+    searchModel: answers.searchModel ?? "",
+  } as CreationAnswers;
 }
 
 function invalid(field: string): AppError {

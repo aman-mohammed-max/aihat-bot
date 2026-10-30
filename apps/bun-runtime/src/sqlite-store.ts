@@ -3,20 +3,27 @@ import {
   AppError,
   parseStoredSkillDefinition,
   parseStoredSkillInstallation,
+  mapBotVersionHistoryItem,
   validateBotSettingsPatch,
   validateSkillInstallation,
   validateSkillRateLimitInput,
 } from "@aihat/core";
 import type {
   ApiConversationRepository,
+  BotAccessRepository,
   ApiTokenPrincipal,
   ApiTokenRecord,
   ApiTokenRepository,
+  AuditLogRepository,
+  ApiAuthorizationDenialRepository,
+  BotCredentialApprovalRepository,
   BotDraftPublisher,
   BotManagementRepository,
+  BotVersionHistoryItem,
   BotRepository,
   BotSettingsPatch,
   ConversationRepository,
+  ConversationHistoryRepository,
   CreationApprovalAction,
   CreationApprovalRecord,
   CreationApprovalRepository,
@@ -24,10 +31,24 @@ import type {
   EncryptedSecretRecord,
   SecretRecordRepository,
   SkillRateLimiter,
+  SkillCatalogPublication,
   SkillRepository,
   McpRepository,
+  MemoryRepository,
+  MasterBotRepository,
+  MasterBotReply,
+  MasterBotSession,
+  MasterBotUpdateReservation,
   ScheduledTaskRepository,
   TelegramRepository,
+  TelegramAuthRepository,
+  UsageRepository,
+  WorkflowExecution,
+  WorkflowExecutionAcquisition,
+  WorkflowExecutionRepository,
+  ToolExecutionAcquisition,
+  ToolExecutionRepository,
+  TenantMembershipRepository,
 } from "@aihat/core";
 import type {
   AgentRequest,
@@ -36,6 +57,8 @@ import type {
   BotVisibility,
   ConversationId,
   ConversationMessage,
+  ConversationSummary,
+  StoredConversationMessage,
   CreationAnswers,
   CreationSession,
   InstalledSkill,
@@ -51,6 +74,16 @@ import type {
   ScheduledTaskId,
   JobId,
   UserId,
+  StoredBotMemoryRecord,
+  BotAccessDecision,
+  BotAccessGrant,
+  PublicBotListing,
+  AuditLogEvent,
+  TenantMember,
+  TenantRole,
+  TenantWorkspace,
+  UsageRecord,
+  UsageSummary,
 } from "@aihat/core";
 
 interface BotRow {
@@ -67,10 +100,24 @@ interface BotRow {
   configuration_json: string;
 }
 
+interface BotVersionRow {
+  bot_id: string;
+  version: number;
+  current_version: number;
+  configuration_json: string;
+  created_at: string;
+}
+
 interface ConversationRow {
   role: ConversationMessage["role"];
   content: string;
   metadata_json: string;
+}
+
+interface ConversationHistoryRow extends ConversationRow {
+  id: string;
+  sequence: number;
+  created_at: string;
 }
 
 interface SessionRow {
@@ -101,6 +148,8 @@ interface ApiTokenRow {
   tenant_id: string;
   owner_id: string;
   scopes_json: string;
+  expires_at: string | null;
+  role: TenantRole;
 }
 
 interface SkillRow {
@@ -158,6 +207,22 @@ interface TelegramDeploymentRow {
 interface TelegramUpdateRow {
   state: "processing" | "ready" | "completed";
   response_text: string | null;
+  response_attachments_json: string;
+  lease_until: string;
+}
+
+interface MasterBotSessionRow {
+  telegram_user_id: number;
+  chat_id: number;
+  tenant_id: string;
+  owner_id: string;
+  session_id: string;
+  updated_at: string;
+}
+
+interface MasterBotUpdateRow {
+  state: "processing" | "ready" | "completed";
+  response_json: string | null;
   lease_until: string;
 }
 
@@ -185,24 +250,129 @@ interface ScheduledJobRow {
   payload_json: string;
 }
 
+interface UsageAggregateRow {
+  date?: string;
+  requests: number;
+  reported_requests: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+interface UsageBotAggregateRow extends Omit<UsageAggregateRow, "date"> {
+  bot_id: string;
+  bot_name: string;
+}
+
+interface MemoryRow {
+  id: string;
+  bot_id: string;
+  memory_key: string;
+  value_json: string;
+  encrypted_value: number;
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface PublicListingRow {
+  bot_id: string;
+  slug: string;
+  title: string;
+  summary: string;
+  listed_at: string;
+  daily_usage_limit: number;
+  rate_limit_per_minute: number;
+}
+
+interface AuditLogRow {
+  id: string;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  metadata_json: string;
+  created_at: string;
+}
+
+interface AccessGrantRow {
+  id: string;
+  bot_id: string;
+  user_id: string | null;
+  invitation_token_hash: string | null;
+  access_level: BotAccessGrant["accessLevel"];
+  status: BotAccessGrant["status"];
+  usage_limit: number | null;
+  rate_limit_per_minute: number | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
+interface WorkflowExecutionRow {
+  tenant_id: string;
+  bot_id: string;
+  skill_id: string;
+  execution_key: string;
+  state_ref: string;
+  next_step: number;
+  version: number;
+  status: WorkflowExecution["status"];
+  lease_token: string | null;
+  lease_until: string;
+  expires_at: string;
+  updated_at: string;
+}
+
+interface ToolExecutionRow {
+  tenant_id: string;
+  bot_id: string;
+  execution_key: string;
+  tool_name: string;
+  input_hash: string;
+  status: "running" | "succeeded";
+  result_ref: string | null;
+  lease_token: string | null;
+  lease_until: string;
+  expires_at: string;
+  updated_at: string;
+}
+
+interface TenantMemberRow {
+  user_id: string;
+  role: TenantRole;
+  status: "active" | "inactive";
+  created_at: string;
+  owned_bot_count: number;
+}
+
 /** Bun-specific SQLite repositories. Every read and write carries the owning tenant. */
 export class BunSqliteRepositories
   implements
     BotRepository,
     BotManagementRepository,
     ConversationRepository,
+    ConversationHistoryRepository,
     ApiConversationRepository,
+    BotAccessRepository,
+    AuditLogRepository,
+    ApiAuthorizationDenialRepository,
     TelegramRepository,
     ScheduledTaskRepository,
+    UsageRepository,
+    MemoryRepository,
     BotDraftPublisher
 {
   readonly #db: Database;
   readonly sessions: CreationSessionRepository;
   readonly creationApprovals: CreationApprovalRepository;
+  readonly botCredentialApprovals: BotCredentialApprovalRepository;
   readonly secretRecords: SecretRecordRepository;
   readonly apiTokens: ApiTokenRepository;
+  readonly telegramAuth: TelegramAuthRepository;
+  readonly masterBot: MasterBotRepository;
   readonly skills: SkillRepository;
   readonly skillRateLimiter: SkillRateLimiter;
+  readonly workflowExecutions: WorkflowExecutionRepository;
+  readonly toolExecutions: ToolExecutionRepository;
+  readonly tenantMembers: TenantMembershipRepository;
   readonly mcp: McpRepository;
 
   constructor(db: Database) {
@@ -216,19 +386,44 @@ export class BunSqliteRepositories
       create: (record) => this.createCreationApproval(record),
       consume: (input) => this.consumeCreationApproval(input),
     };
+    this.botCredentialApprovals = {
+      create: (input) => this.createBotCredentialApproval(input),
+      consume: (input) => this.consumeBotCredentialApproval(input),
+    };
     this.secretRecords = {
       get: (tenantId, reference) => this.getSecret(tenantId, reference),
       create: (record) => this.createSecret(record),
       delete: (tenantId, reference) => this.deleteSecret(tenantId, reference),
+      listPage: (after, limit) => this.listSecrets(after, limit),
+      replaceIfUnchanged: (record, expected) => this.replaceSecretIfUnchanged(record, expected),
     };
     this.apiTokens = {
       findActive: (tokenHash, now) => this.findActiveApiToken(tokenHash, now),
       create: (record) => this.createApiToken(record),
       revoke: (tenantId, ownerId, tokenId, revokedAt) => this.revokeApiToken(tenantId, ownerId, tokenId, revokedAt),
+      consumeApiRequest: (input) => this.consumeApiRequest(input),
+      recordApiMutation: (input) => this.recordApiMutation(input),
+    };
+    this.telegramAuth = {
+      claimInitData: (input) => this.claimTelegramInitData(input),
+      getOrCreateOwner: (input) => this.getOrCreateTelegramOwner(input),
+    };
+    this.masterBot = {
+      getSession: (telegramUserId) => this.getMasterBotSession(telegramUserId),
+      saveSession: (session) => this.saveMasterBotSession(session),
+      deleteSession: (telegramUserId) => this.deleteMasterBotSession(telegramUserId),
+      reserveUpdate: (input) => this.reserveMasterBotUpdate(input),
+      saveUpdateReply: (input) => this.saveMasterBotUpdateReply(input),
+      completeUpdate: (input) => this.completeMasterBotUpdate(input),
+      releaseUpdate: (input) => this.releaseMasterBotUpdate(input),
     };
     this.skills = {
       listCatalog: (tenantId) => this.listSkillCatalog(tenantId),
       getCatalogSkill: (tenantId, skillId) => this.getCatalogSkill(tenantId, skillId),
+      listGlobalCatalog: () => this.listGlobalSkillCatalog(),
+      publishGlobalCatalogSkill: (input) => this.publishGlobalSkillCatalogItem(input),
+      setGlobalCatalogSkillEnabled: (skillId, enabled) => this.setGlobalSkillCatalogEnabled(skillId, enabled),
+      publishCatalogSkill: (input) => this.publishCatalogSkill(input),
       listInstalled: (tenantId, botId) => this.listInstalledSkills(tenantId, botId),
       install: (input) => this.installSkill(input),
       setEnabled: (input) => this.setSkillEnabled(input),
@@ -236,6 +431,27 @@ export class BunSqliteRepositories
     };
     this.skillRateLimiter = {
       consume: (input) => this.consumeSkillRateLimit(input),
+    };
+    this.workflowExecutions = {
+      acquire: (input) => this.acquireWorkflowExecution(input),
+      checkpoint: (input) => this.checkpointWorkflowExecution(input),
+      complete: (input) => this.completeWorkflowExecution(input),
+      release: (input) => this.releaseWorkflowExecution(input),
+      purgeExpired: (tenantId, now, limit) => this.purgeWorkflowExecutions(tenantId, now, limit),
+    };
+    this.toolExecutions = {
+      acquire: (input) => this.acquireToolExecution(input),
+      complete: (input) => this.completeToolExecution(input),
+      release: (input) => this.releaseToolExecution(input),
+      purgeExpired: (tenantId, now, limit) => this.purgeToolExecutions(tenantId, now, limit),
+    };
+    this.tenantMembers = {
+      listMembers: (input) => this.listTenantMembers(input),
+      listWorkspacesForUser: (userId) => this.listWorkspacesForUser(userId),
+      getActiveRole: (input) => this.getActiveTenantRole(input),
+      addMember: (input) => this.addTenantMember(input),
+      changeMemberRole: (input) => this.changeTenantMemberRole(input),
+      deactivateMember: (input) => this.deactivateTenantMember(input),
     };
     this.mcp = {
       listServers: (tenantId, botId) => this.listMcpServers(tenantId, botId),
@@ -279,6 +495,415 @@ export class BunSqliteRepositories
       `)
       .all(tenantId, ownerId);
     return rows.map(mapBot);
+  }
+
+  async listVersions(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly limit: number;
+  }): Promise<readonly BotVersionHistoryItem[]> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+      throw new AppError("VALIDATION_ERROR", "Version page size must be between 1 and 100.", 400);
+    }
+    const rows = this.#db
+      .query<BotVersionRow, [string, string, string, number]>(`
+        SELECT v.bot_id, v.version, b.current_version, v.configuration_json, v.created_at
+        FROM bots AS b
+        JOIN bot_versions AS v ON v.bot_id = b.id AND v.tenant_id = b.tenant_id
+        WHERE b.tenant_id = ? AND b.owner_id = ? AND b.id = ?
+        ORDER BY v.version DESC
+        LIMIT ?
+      `)
+      .all(input.tenantId, input.ownerId, input.botId, input.limit);
+    if (!rows.length) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+    return rows.map((row) =>
+      mapBotVersionHistoryItem({
+        botId: row.bot_id as BotId,
+        version: row.version,
+        configurationJson: row.configuration_json,
+        createdAt: row.created_at,
+        current: row.version === row.current_version,
+      }),
+    );
+  }
+
+  async listPublicBots(input: { query?: string; limit: number }): Promise<readonly PublicBotListing[]> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 50) {
+      throw new AppError("VALIDATION_ERROR", "Public bot page size must be between 1 and 50.", 400);
+    }
+    const query = input.query?.trim().toLowerCase() ?? "";
+    const rows = this.#db
+      .query<PublicListingRow, [string, string, string, number]>(`
+        SELECT p.bot_id, p.slug, p.title, p.summary, p.listed_at,
+               p.daily_usage_limit, p.rate_limit_per_minute
+        FROM public_bot_listings AS p
+        JOIN bots AS b ON b.id = p.bot_id AND b.tenant_id = p.tenant_id
+        WHERE b.status = 'published' AND b.visibility = 'public'
+          AND (? = '' OR lower(p.title) LIKE ? OR lower(p.summary) LIKE ?)
+        ORDER BY p.listed_at DESC, p.slug
+        LIMIT ?
+      `)
+      .all(query, `%${query}%`, `%${query}%`, input.limit);
+    return rows.map(mapPublicListing);
+  }
+
+  async getPublicBotBySlug(slug: string): Promise<BotDefinition | undefined> {
+    const row = this.#db
+      .query<BotRow, [string]>(`
+        SELECT b.id, b.tenant_id, b.owner_id, b.name, b.description, b.status,
+               b.visibility, b.current_version, b.created_at, b.updated_at, v.configuration_json
+        FROM public_bot_listings AS p
+        JOIN bots AS b ON b.id = p.bot_id AND b.tenant_id = p.tenant_id
+        JOIN bot_versions AS v ON v.bot_id = b.id AND v.tenant_id = b.tenant_id AND v.version = b.current_version
+        WHERE p.slug = ? AND b.status = 'published' AND b.visibility = 'public'
+      `)
+      .get(slug);
+    return row ? mapBot(row) : undefined;
+  }
+
+  async getSharedBot(input: { botId: BotId; userId: UserId; now: string }): Promise<BotDefinition | undefined> {
+    const row = this.#db
+      .query<BotRow, [string, string, string]>(`
+        SELECT b.id, b.tenant_id, b.owner_id, b.name, b.description, b.status,
+               b.visibility, b.current_version, b.created_at, b.updated_at, v.configuration_json
+        FROM bots AS b
+        JOIN bot_versions AS v ON v.bot_id = b.id AND v.tenant_id = b.tenant_id AND v.version = b.current_version
+        WHERE b.id = ? AND b.status = 'published' AND b.visibility IN ('shared', 'invitation')
+          AND EXISTS (
+            SELECT 1 FROM bot_access_grants AS g
+            WHERE g.tenant_id = b.tenant_id AND g.bot_id = b.id AND g.user_id = ?
+              AND g.status = 'active' AND (g.expires_at IS NULL OR g.expires_at > ?)
+              AND g.access_level IN ('use', 'manage')
+          )
+      `)
+      .get(input.botId, input.userId, input.now);
+    return row ? mapBot(row) : undefined;
+  }
+
+  async listOwnedAccessGrants(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+  }): Promise<readonly BotAccessGrant[]> {
+    this.requireOwnedAccessBot(input.tenantId, input.ownerId, input.botId);
+    return this.#db
+      .query<AccessGrantRow, [string, string]>(`
+        SELECT id, bot_id, user_id, invitation_token_hash, access_level, status,
+               usage_limit, rate_limit_per_minute, expires_at, created_at
+        FROM bot_access_grants WHERE tenant_id = ? AND bot_id = ?
+        ORDER BY created_at DESC, id
+      `)
+      .all(input.tenantId, input.botId)
+      .map(mapAccessGrant);
+  }
+
+  async getOwnedPublicBotAccessPolicy(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+  }): Promise<PublicBotListing | undefined> {
+    const bot = this.requireOwnedAccessBot(input.tenantId, input.ownerId, input.botId);
+    if (bot.visibility !== "public") return undefined;
+    const row = this.#db
+      .query<PublicListingRow, [string, string]>(`
+        SELECT bot_id, slug, title, summary, listed_at, daily_usage_limit, rate_limit_per_minute
+        FROM public_bot_listings WHERE tenant_id = ? AND bot_id = ?
+      `)
+      .get(input.tenantId, input.botId);
+    return row ? mapPublicListing(row) : undefined;
+  }
+
+  async setPublicBotAccessPolicy(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    dailyUsageLimit: number;
+    rateLimitPerMinute: number;
+    now: string;
+  }): Promise<PublicBotListing> {
+    validateAccessLimits(input.dailyUsageLimit, input.rateLimitPerMinute);
+    const bot = this.requireOwnedAccessBot(input.tenantId, input.ownerId, input.botId);
+    if (bot.visibility !== "public") throw new AppError("CONFLICT", "Only public bots have public access limits.", 409);
+    const result = this.#db
+      .query(`
+        UPDATE public_bot_listings SET daily_usage_limit = ?, rate_limit_per_minute = ?, listed_at = ?
+        WHERE tenant_id = ? AND bot_id = ?
+      `)
+      .run(input.dailyUsageLimit, input.rateLimitPerMinute, input.now, input.tenantId, input.botId);
+    if (result.changes !== 1) throw new AppError("CONFLICT", "Public bot listing is not available yet.", 409);
+    const row = this.#db
+      .query<PublicListingRow, [string, string]>(`
+        SELECT bot_id, slug, title, summary, listed_at, daily_usage_limit, rate_limit_per_minute
+        FROM public_bot_listings WHERE tenant_id = ? AND bot_id = ?
+      `)
+      .get(input.tenantId, input.botId);
+    if (!row) throw new AppError("INTERNAL_ERROR", "Public bot settings could not be loaded.", 500);
+    return mapPublicListing(row);
+  }
+
+  async createOwnedAccessGrant(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    userId?: UserId;
+    invitationTokenHash?: string;
+    dailyUsageLimit?: number;
+    rateLimitPerMinute?: number;
+    expiresAt?: string;
+    now: string;
+  }): Promise<BotAccessGrant> {
+    if (Boolean(input.userId) === Boolean(input.invitationTokenHash)) {
+      throw new AppError("VALIDATION_ERROR", "Specify one user or one invitation token.", 400);
+    }
+    if (input.dailyUsageLimit !== undefined || input.rateLimitPerMinute !== undefined) {
+      validateAccessLimits(input.dailyUsageLimit ?? 100, input.rateLimitPerMinute ?? 10);
+    }
+    const bot = this.requireOwnedAccessBot(input.tenantId, input.ownerId, input.botId);
+    if (bot.visibility === "private") throw new AppError("CONFLICT", "Private bots cannot grant outside access.", 409);
+    if (
+      input.expiresAt !== undefined &&
+      (!Number.isFinite(Date.parse(input.expiresAt)) || input.expiresAt <= input.now)
+    ) {
+      throw new AppError("VALIDATION_ERROR", "Grant expiry must be a future timestamp.", 400);
+    }
+    const id = `grant_${crypto.randomUUID().replaceAll("-", "")}`;
+    try {
+      if (input.userId) {
+        this.#db
+          .query(`
+            INSERT INTO bot_access_grants (
+              id, tenant_id, bot_id, user_id, invitation_token_hash, access_level, status,
+              usage_limit, rate_limit_per_minute, expires_at, created_at
+            ) VALUES (?, ?, ?, ?, NULL, 'use', 'active', ?, ?, ?, ?)
+            ON CONFLICT(bot_id, user_id) WHERE user_id IS NOT NULL DO UPDATE SET
+              status = 'active', access_level = 'use', usage_limit = excluded.usage_limit,
+              rate_limit_per_minute = excluded.rate_limit_per_minute,
+              expires_at = excluded.expires_at, created_at = excluded.created_at
+          `)
+          .run(
+            id,
+            input.tenantId,
+            input.botId,
+            input.userId,
+            input.dailyUsageLimit ?? null,
+            input.rateLimitPerMinute ?? null,
+            input.expiresAt ?? null,
+            input.now,
+          );
+      } else {
+        const invitationTokenHash = input.invitationTokenHash;
+        if (!invitationTokenHash) {
+          throw new AppError("VALIDATION_ERROR", "Invitation token hash is required.", 400);
+        }
+        this.#db
+          .query(`
+            INSERT INTO bot_access_grants (
+              id, tenant_id, bot_id, user_id, invitation_token_hash, access_level, status,
+              usage_limit, rate_limit_per_minute, expires_at, created_at
+            ) VALUES (?, ?, ?, NULL, ?, 'use', 'active', ?, ?, ?, ?)
+          `)
+          .run(
+            id,
+            input.tenantId,
+            input.botId,
+            invitationTokenHash,
+            input.dailyUsageLimit ?? null,
+            input.rateLimitPerMinute ?? null,
+            input.expiresAt ?? null,
+            input.now,
+          );
+      }
+    } catch (cause) {
+      if (cause instanceof AppError) throw cause;
+      throw new AppError("CONFLICT", "Bot access grant could not be created.", 409, { cause });
+    }
+    const row = input.userId
+      ? this.#db
+          .query<AccessGrantRow, [string, string, string]>(`
+            SELECT id, bot_id, user_id, invitation_token_hash, access_level, status,
+                   usage_limit, rate_limit_per_minute, expires_at, created_at
+            FROM bot_access_grants WHERE tenant_id = ? AND bot_id = ? AND user_id = ?
+          `)
+          .get(input.tenantId, input.botId, input.userId)
+      : this.#db
+          .query<AccessGrantRow, [string]>(`
+            SELECT id, bot_id, user_id, invitation_token_hash, access_level, status,
+                   usage_limit, rate_limit_per_minute, expires_at, created_at
+            FROM bot_access_grants WHERE id = ?
+          `)
+          .get(id);
+    if (!row) throw new AppError("INTERNAL_ERROR", "Created access grant could not be loaded.", 500);
+    return mapAccessGrant(row);
+  }
+
+  async revokeOwnedAccessGrant(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    grantId: string;
+  }): Promise<boolean> {
+    this.requireOwnedAccessBot(input.tenantId, input.ownerId, input.botId);
+    const result = this.#db
+      .query(`
+        UPDATE bot_access_grants SET status = 'revoked', invitation_token_hash = NULL
+        WHERE tenant_id = ? AND bot_id = ? AND id = ? AND status != 'revoked'
+      `)
+      .run(input.tenantId, input.botId, input.grantId);
+    return result.changes === 1;
+  }
+
+  async acceptBotInvitation(input: {
+    invitationTokenHash: string;
+    userId: UserId;
+    now: string;
+  }): Promise<BotAccessGrant | undefined> {
+    const accept = this.#db.transaction(() => {
+      const grant = this.#db
+        .query<{ id: string; bot_id: string }, [string, string]>(`
+          SELECT g.id, g.bot_id FROM bot_access_grants AS g
+          JOIN bots AS b ON b.id = g.bot_id AND b.tenant_id = g.tenant_id
+          WHERE g.invitation_token_hash = ? AND g.status = 'active'
+            AND (g.expires_at IS NULL OR g.expires_at > ?)
+            AND b.status = 'published' AND b.visibility IN ('shared', 'invitation')
+        `)
+        .get(input.invitationTokenHash, input.now);
+      if (!grant) return undefined;
+      this.#db
+        .query(`
+          UPDATE bot_access_grants SET user_id = ?, invitation_token_hash = NULL
+          WHERE id = ? AND invitation_token_hash = ? AND user_id IS NULL
+        `)
+        .run(input.userId, grant.id, input.invitationTokenHash);
+      return this.#db
+        .query<AccessGrantRow, [string, string]>(`
+          SELECT id, bot_id, user_id, invitation_token_hash, access_level, status,
+                 usage_limit, rate_limit_per_minute, expires_at, created_at
+          FROM bot_access_grants WHERE id = ? AND user_id = ?
+        `)
+        .get(grant.id, input.userId);
+    });
+    const row = accept.immediate();
+    return row ? mapAccessGrant(row) : undefined;
+  }
+
+  async consumeBotUse(input: {
+    botId: BotId;
+    userId: UserId;
+    accessMode: "public" | "shared";
+    now: string;
+  }): Promise<BotAccessDecision> {
+    const timestamp = Date.parse(input.now);
+    if (!Number.isFinite(timestamp)) throw new AppError("VALIDATION_ERROR", "Access request time is invalid.", 400);
+    const minuteWindow = Math.floor(timestamp / 60_000);
+    const dayWindow = Math.floor(timestamp / 86_400_000);
+    const consume = this.#db.transaction((): BotAccessDecision => {
+      const finish = (decision: BotAccessDecision): BotAccessDecision => {
+        const id = `audit_${crypto.randomUUID().replaceAll("-", "")}`;
+        this.#db
+          .query(`
+            INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+            SELECT ?, b.tenant_id, ?, 'bot.access.decision', 'bot', b.id, ?, ?
+            FROM bots AS b WHERE b.id = ?
+          `)
+          .run(
+            id,
+            input.userId,
+            JSON.stringify({ outcome: decision, accessMode: input.accessMode }),
+            input.now,
+            input.botId,
+          );
+        return decision;
+      };
+      const entitlement = this.#db
+        .query<
+          { tenant_id: string; daily_limit: number; rate_limit: number },
+          [string, string, string, string, string, string]
+        >(`
+          SELECT b.tenant_id, COALESCE(g.usage_limit, p.daily_usage_limit, 100) AS daily_limit,
+                 COALESCE(g.rate_limit_per_minute, p.rate_limit_per_minute, 10) AS rate_limit
+          FROM bots AS b
+          LEFT JOIN public_bot_listings AS p ON p.tenant_id = b.tenant_id AND p.bot_id = b.id
+          LEFT JOIN bot_access_grants AS g ON g.tenant_id = b.tenant_id AND g.bot_id = b.id
+            AND g.user_id = ? AND g.status = 'active' AND (g.expires_at IS NULL OR g.expires_at > ?)
+          WHERE b.id = ? AND b.status = 'published' AND (
+            (? = 'public' AND b.visibility = 'public' AND p.bot_id IS NOT NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM bot_access_grants AS banned WHERE banned.tenant_id = b.tenant_id
+                  AND banned.bot_id = b.id AND banned.user_id = ? AND banned.status = 'revoked'
+              ))
+            OR (? = 'shared' AND b.visibility IN ('shared', 'invitation') AND g.id IS NOT NULL)
+          )
+        `)
+        .get(input.userId, input.now, input.botId, input.accessMode, input.userId, input.accessMode);
+      if (!entitlement) return finish("forbidden");
+      const existing = this.#db
+        .query<
+          {
+            minute_window: number;
+            minute_count: number;
+            day_window: number;
+            day_count: number;
+          },
+          [string, string, string]
+        >(`
+          SELECT minute_window, minute_count, day_window, day_count
+          FROM bot_access_usage WHERE tenant_id = ? AND bot_id = ? AND user_id = ?
+        `)
+        .get(entitlement.tenant_id, input.botId, input.userId);
+      const minuteCount = existing?.minute_window === minuteWindow ? existing.minute_count : 0;
+      const dayCount = existing?.day_window === dayWindow ? existing.day_count : 0;
+      if (dayCount >= entitlement.daily_limit) return finish("quota_exceeded");
+      if (minuteCount >= entitlement.rate_limit) return finish("rate_limited");
+      const result = this.#db
+        .query(`
+          INSERT INTO bot_access_usage (
+            tenant_id, bot_id, user_id, minute_window, minute_count, day_window, day_count,
+            rate_limit_per_minute, daily_usage_limit, updated_at
+          ) VALUES (?, ?, ?, ?, 1, ?, 1, ?, ?, ?)
+          ON CONFLICT(tenant_id, bot_id, user_id) DO UPDATE SET
+            minute_window = excluded.minute_window,
+            minute_count = CASE WHEN bot_access_usage.minute_window = excluded.minute_window
+              THEN bot_access_usage.minute_count + 1 ELSE 1 END,
+            day_window = excluded.day_window,
+            day_count = CASE WHEN bot_access_usage.day_window = excluded.day_window
+              THEN bot_access_usage.day_count + 1 ELSE 1 END,
+            rate_limit_per_minute = excluded.rate_limit_per_minute,
+            daily_usage_limit = excluded.daily_usage_limit,
+            updated_at = excluded.updated_at
+          WHERE (bot_access_usage.minute_window != excluded.minute_window
+            OR bot_access_usage.minute_count < excluded.rate_limit_per_minute)
+            AND (bot_access_usage.day_window != excluded.day_window
+              OR bot_access_usage.day_count < excluded.daily_usage_limit)
+        `)
+        .run(
+          entitlement.tenant_id,
+          input.botId,
+          input.userId,
+          minuteWindow,
+          dayWindow,
+          entitlement.rate_limit,
+          entitlement.daily_limit,
+          input.now,
+        );
+      if (result.changes !== 1) {
+        if (dayCount >= entitlement.daily_limit) return finish("quota_exceeded");
+        if (minuteCount >= entitlement.rate_limit) return finish("rate_limited");
+        return finish("forbidden");
+      }
+      return finish("allowed");
+    });
+    return consume.immediate();
+  }
+
+  private requireOwnedAccessBot(tenantId: TenantId, ownerId: UserId, botId: BotId): { visibility: BotVisibility } {
+    const bot = this.#db
+      .query<{ owner_id: string; visibility: BotVisibility }, [string, string]>(
+        "SELECT owner_id, visibility FROM bots WHERE tenant_id = ? AND id = ?",
+      )
+      .get(tenantId, botId);
+    if (!bot || bot.owner_id !== ownerId) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+    return { visibility: bot.visibility };
   }
 
   async updateOwned(input: {
@@ -422,6 +1047,8 @@ export class BunSqliteRepositories
         model: {
           providerId: input.answers.providerId,
           model: input.answers.model,
+          ...(input.answers.imageModel ? { imageModel: input.answers.imageModel } : {}),
+          ...(input.answers.searchModel ? { searchModel: input.answers.searchModel } : {}),
           endpoint: input.answers.endpoint,
           credentialRef: input.answers.credentialRef,
         },
@@ -542,6 +1169,308 @@ export class BunSqliteRepositories
     `)
       .all(tenantId, conversationId, limit);
     return rows.map(mapMessage);
+  }
+
+  async listOwnedConversations(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    limit: number;
+    offset: number;
+  }): Promise<readonly ConversationSummary[]> {
+    const bot = this.#db
+      .query<{ id: string }, [string, string, string]>(`
+        SELECT id FROM bots WHERE tenant_id = ? AND owner_id = ? AND id = ?
+      `)
+      .get(input.tenantId, input.ownerId, input.botId);
+    if (!bot) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+    const rows = this.#db
+      .query<
+        {
+          id: string;
+          platform: ConversationSummary["platform"];
+          message_count: number;
+          preview: string;
+          created_at: string;
+          updated_at: string;
+        },
+        [string, string, string, number, number]
+      >(`
+        SELECT c.id, c.platform, c.created_at, c.updated_at,
+          (SELECT count(*) FROM messages AS m WHERE m.tenant_id = c.tenant_id AND m.conversation_id = c.id) AS message_count,
+          COALESCE((
+            SELECT substr(m.content, 1, 280) FROM messages AS m
+            WHERE m.tenant_id = c.tenant_id AND m.conversation_id = c.id AND m.role IN ('user', 'assistant')
+            ORDER BY m.sequence DESC LIMIT 1
+          ), '') AS preview
+        FROM conversations AS c
+        JOIN bots AS b ON b.id = c.bot_id AND b.tenant_id = c.tenant_id
+        WHERE c.tenant_id = ? AND b.owner_id = ? AND c.bot_id = ?
+        ORDER BY c.updated_at DESC, c.id DESC
+        LIMIT ? OFFSET ?
+      `)
+      .all(input.tenantId, input.ownerId, input.botId, input.limit, input.offset);
+    return rows.map((row) => ({
+      id: row.id as ConversationId,
+      platform: row.platform,
+      messageCount: row.message_count,
+      preview: row.preview,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  async getOwnedConversationMessages(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    conversationId: ConversationId;
+    limit: number;
+    beforeSequence?: number;
+  }): Promise<{ items: readonly StoredConversationMessage[]; hasMore: boolean } | undefined> {
+    const exists = this.#db
+      .query<{ id: string }, [string, string, string, string]>(`
+        SELECT c.id FROM conversations AS c
+        JOIN bots AS b ON b.id = c.bot_id AND b.tenant_id = c.tenant_id
+        WHERE c.tenant_id = ? AND b.owner_id = ? AND c.bot_id = ? AND c.id = ?
+      `)
+      .get(input.tenantId, input.ownerId, input.botId, input.conversationId);
+    if (!exists) return undefined;
+    const before = input.beforeSequence ?? null;
+    const rows = this.#db
+      .query<ConversationHistoryRow, [string, string, number | null, number | null, number]>(`
+        SELECT id, sequence, role, content, metadata_json, created_at FROM (
+          SELECT id, sequence, role, content, metadata_json, created_at
+          FROM messages
+          WHERE tenant_id = ? AND conversation_id = ? AND (? IS NULL OR sequence < ?)
+          ORDER BY sequence DESC LIMIT ?
+        ) ORDER BY sequence ASC
+      `)
+      .all(input.tenantId, input.conversationId, before, before, input.limit + 1);
+    const hasMore = rows.length > input.limit;
+    const pageRows = hasMore ? rows.slice(1) : rows;
+    return { items: pageRows.map(mapStoredMessage), hasMore };
+  }
+
+  async recordUsage(record: UsageRecord): Promise<void> {
+    this.#db
+      .query(
+        `INSERT INTO usage_records (
+          id, tenant_id, bot_id, actor_id, provider_id, model, input_tokens, output_tokens, usage_reported, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.tenantId,
+        record.botId,
+        record.actorId ?? null,
+        record.providerId,
+        record.model,
+        record.inputTokens,
+        record.outputTokens,
+        record.usageReported ? 1 : 0,
+        record.createdAt,
+      );
+  }
+
+  async getOwnedUsageSummary(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    from: string;
+    through: string;
+  }): Promise<UsageSummary> {
+    const params: [string, string, string, string] = [input.tenantId, input.ownerId, input.from, input.through];
+    const dailyRows = this.#db
+      .query<UsageAggregateRow, [string, string, string, string]>(`
+        SELECT substr(u.created_at, 1, 10) AS date, count(*) AS requests,
+          sum(u.usage_reported) AS reported_requests,
+          sum(CASE WHEN u.usage_reported = 1 THEN u.input_tokens ELSE 0 END) AS input_tokens,
+          sum(CASE WHEN u.usage_reported = 1 THEN u.output_tokens ELSE 0 END) AS output_tokens
+        FROM usage_records AS u JOIN bots AS b ON b.id = u.bot_id AND b.tenant_id = u.tenant_id
+        WHERE u.tenant_id = ? AND b.owner_id = ? AND u.created_at >= ? AND u.created_at <= ?
+        GROUP BY substr(u.created_at, 1, 10) ORDER BY date ASC
+      `)
+      .all(...params);
+    const botRows = this.#db
+      .query<UsageBotAggregateRow, [string, string, string, string]>(`
+        SELECT b.id AS bot_id, b.name AS bot_name, count(*) AS requests,
+          sum(u.usage_reported) AS reported_requests,
+          sum(CASE WHEN u.usage_reported = 1 THEN u.input_tokens ELSE 0 END) AS input_tokens,
+          sum(CASE WHEN u.usage_reported = 1 THEN u.output_tokens ELSE 0 END) AS output_tokens
+        FROM usage_records AS u JOIN bots AS b ON b.id = u.bot_id AND b.tenant_id = u.tenant_id
+        WHERE u.tenant_id = ? AND b.owner_id = ? AND u.created_at >= ? AND u.created_at <= ?
+        GROUP BY b.id ORDER BY requests DESC, b.name ASC LIMIT 100
+      `)
+      .all(...params);
+    const total = dailyRows.reduce(
+      (sum, row) => ({
+        requests: sum.requests + row.requests,
+        reportedRequests: sum.reportedRequests + row.reported_requests,
+        inputTokens: sum.inputTokens + row.input_tokens,
+        outputTokens: sum.outputTokens + row.output_tokens,
+      }),
+      { requests: 0, reportedRequests: 0, inputTokens: 0, outputTokens: 0 },
+    );
+    return {
+      from: input.from,
+      through: input.through,
+      total,
+      byDay: dailyRows.map((row) => ({
+        date: row.date ?? "",
+        requests: row.requests,
+        reportedRequests: row.reported_requests,
+        inputTokens: row.input_tokens,
+        outputTokens: row.output_tokens,
+      })),
+      byBot: botRows.map((row) => ({
+        botId: row.bot_id as BotId,
+        botName: row.bot_name ?? "",
+        requests: row.requests,
+        reportedRequests: row.reported_requests,
+        inputTokens: row.input_tokens,
+        outputTokens: row.output_tokens,
+      })),
+    };
+  }
+
+  async listOwnedBotMemory(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+  }): Promise<readonly StoredBotMemoryRecord[]> {
+    const bot = this.#db
+      .query<{ id: string }, [string, string, string]>(
+        "SELECT id FROM bots WHERE tenant_id = ? AND owner_id = ? AND id = ?",
+      )
+      .get(input.tenantId, input.ownerId, input.botId);
+    if (!bot) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+    const rows = this.#db
+      .query<MemoryRow, [string, string]>(`
+        SELECT id, bot_id, memory_key, value_json, encrypted_value, expires_at, created_at, updated_at
+        FROM memory_records WHERE tenant_id = ? AND bot_id = ? AND actor_id IS NULL
+        ORDER BY updated_at DESC, memory_key ASC LIMIT 16
+      `)
+      .all(input.tenantId, input.botId);
+    return rows.map(mapBotMemory);
+  }
+
+  async listActiveBotMemory(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    now: string;
+  }): Promise<readonly StoredBotMemoryRecord[]> {
+    const bot = this.#db
+      .query<{ id: string }, [string, string, string]>(
+        "SELECT id FROM bots WHERE tenant_id = ? AND owner_id = ? AND id = ?",
+      )
+      .get(input.tenantId, input.ownerId, input.botId);
+    if (!bot) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+    const rows = this.#db
+      .query<MemoryRow, [string, string]>(`
+        SELECT id, bot_id, memory_key, value_json, encrypted_value, expires_at, created_at, updated_at
+        FROM memory_records WHERE tenant_id = ? AND bot_id = ? AND actor_id IS NULL
+        ORDER BY updated_at DESC, memory_key ASC LIMIT 16
+      `)
+      .all(input.tenantId, input.botId);
+    return rows.map(mapBotMemory);
+  }
+
+  async putOwnedBotMemory(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    key: string;
+    value: string;
+    encryptedValue?: boolean;
+    expiresAt?: string;
+    now: string;
+  }): Promise<StoredBotMemoryRecord> {
+    const save = this.#db.transaction(() => {
+      const bot = this.#db
+        .query<{ id: string }, [string, string, string]>(
+          "SELECT id FROM bots WHERE tenant_id = ? AND owner_id = ? AND id = ?",
+        )
+        .get(input.tenantId, input.ownerId, input.botId);
+      if (!bot) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+      this.#db
+        .query("DELETE FROM memory_records WHERE tenant_id = ? AND bot_id = ? AND actor_id IS NULL AND expires_at <= ?")
+        .run(input.tenantId, input.botId, input.now);
+      const existing = this.#db
+        .query<{ id: string }, [string, string, string]>(`
+          SELECT id FROM memory_records
+          WHERE tenant_id = ? AND bot_id = ? AND actor_id IS NULL AND memory_key = ?
+        `)
+        .get(input.tenantId, input.botId, input.key);
+      if (!existing) {
+        const count = this.#db
+          .query<{ count: number }, [string, string]>(`
+            SELECT count(*) AS count FROM memory_records WHERE tenant_id = ? AND bot_id = ? AND actor_id IS NULL
+          `)
+          .get(input.tenantId, input.botId)?.count;
+        if ((count ?? 0) >= 16) {
+          throw new AppError("CONFLICT", "A bot can store at most 16 memory records.", 409);
+        }
+        this.#db
+          .query(`
+            INSERT INTO memory_records (id, tenant_id, bot_id, actor_id, memory_key, value_json, encrypted_value, expires_at, created_at, updated_at)
+            VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+          `)
+          .run(
+            `memory_${crypto.randomUUID().replaceAll("-", "")}`,
+            input.tenantId,
+            input.botId,
+            input.key,
+            JSON.stringify(input.value),
+            input.encryptedValue ? 1 : 0,
+            input.expiresAt ?? null,
+            input.now,
+            input.now,
+          );
+      } else {
+        this.#db
+          .query(`
+            UPDATE memory_records SET value_json = ?, encrypted_value = ?, expires_at = ?, updated_at = ?
+            WHERE tenant_id = ? AND bot_id = ? AND actor_id IS NULL AND memory_key = ?
+          `)
+          .run(
+            JSON.stringify(input.value),
+            input.encryptedValue ? 1 : 0,
+            input.expiresAt ?? null,
+            input.now,
+            input.tenantId,
+            input.botId,
+            input.key,
+          );
+      }
+      const row = this.#db
+        .query<MemoryRow, [string, string, string]>(`
+          SELECT id, bot_id, memory_key, value_json, encrypted_value, expires_at, created_at, updated_at
+          FROM memory_records WHERE tenant_id = ? AND bot_id = ? AND actor_id IS NULL AND memory_key = ?
+        `)
+        .get(input.tenantId, input.botId, input.key);
+      if (!row) throw new AppError("INTERNAL_ERROR", "Saved memory could not be loaded.", 500);
+      return mapBotMemory(row);
+    });
+    return save.immediate();
+  }
+
+  async deleteOwnedBotMemory(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    key: string;
+  }): Promise<boolean> {
+    const bot = this.#db
+      .query<{ id: string }, [string, string, string]>(
+        "SELECT id FROM bots WHERE tenant_id = ? AND owner_id = ? AND id = ?",
+      )
+      .get(input.tenantId, input.ownerId, input.botId);
+    if (!bot) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+    const result = this.#db
+      .query("DELETE FROM memory_records WHERE tenant_id = ? AND bot_id = ? AND actor_id IS NULL AND memory_key = ?")
+      .run(input.tenantId, input.botId, input.key);
+    return result.changes > 0;
   }
 
   async append(tenantId: TenantId, conversationId: ConversationId, messages: AgentRequest["messages"]): Promise<void> {
@@ -927,10 +1856,17 @@ export class BunSqliteRepositories
     const reserve = this.#db.transaction(() => {
       const row = this.#db
         .query<TelegramUpdateRow, [string, number]>(`
-          SELECT state, response_text, lease_until FROM telegram_updates WHERE deployment_id = ? AND update_id = ?
+          SELECT state, response_text, response_attachments_json, lease_until
+          FROM telegram_updates WHERE deployment_id = ? AND update_id = ?
         `)
         .get(input.deploymentId, input.updateId);
-      if (row?.state === "completed") return { state: "completed" as const };
+      if (row?.state === "completed") {
+        const attachmentRefs = parseTelegramAttachmentRefs(row.response_attachments_json);
+        return {
+          state: "completed" as const,
+          ...(attachmentRefs.length ? { attachmentRefs } : {}),
+        };
+      }
       if (row && row.lease_until > input.now) return { state: "busy" as const };
       if (row?.state === "ready") {
         this.#db
@@ -938,12 +1874,18 @@ export class BunSqliteRepositories
             "UPDATE telegram_updates SET lease_until = ?, updated_at = ? WHERE deployment_id = ? AND update_id = ?",
           )
           .run(input.leaseUntil, input.now, input.deploymentId, input.updateId);
-        return { state: "ready" as const, responseText: row.response_text ?? "" };
+        const attachmentRefs = parseTelegramAttachmentRefs(row.response_attachments_json);
+        return {
+          state: "ready" as const,
+          responseText: row.response_text ?? "",
+          ...(attachmentRefs.length ? { attachmentRefs } : {}),
+        };
       }
       if (row) {
         this.#db
           .query(`
-            UPDATE telegram_updates SET state = 'processing', response_text = NULL, lease_until = ?, updated_at = ?
+            UPDATE telegram_updates SET state = 'processing', response_text = NULL,
+              response_attachments_json = '[]', lease_until = ?, updated_at = ?
             WHERE deployment_id = ? AND update_id = ?
           `)
           .run(input.leaseUntil, input.now, input.deploymentId, input.updateId);
@@ -964,17 +1906,27 @@ export class BunSqliteRepositories
     deploymentId: TelegramDeploymentId;
     updateId: number;
     responseText: string;
+    attachmentRefs?: readonly { readonly kind: "image"; readonly secretRef: string }[];
     leaseUntil: string;
     now: string;
   }): Promise<void> {
     if (input.responseText.length > 100_000)
       throw new AppError("VALIDATION_ERROR", "Telegram response is too large.", 400);
+    const attachmentRefs = validateTelegramAttachmentRefs(input.attachmentRefs ?? []);
     const result = this.#db
       .query(`
-        UPDATE telegram_updates SET state = 'ready', response_text = ?, lease_until = ?, updated_at = ?
+        UPDATE telegram_updates SET state = 'ready', response_text = ?, response_attachments_json = ?,
+          lease_until = ?, updated_at = ?
         WHERE deployment_id = ? AND update_id = ? AND state = 'processing'
       `)
-      .run(input.responseText, input.leaseUntil, input.now, input.deploymentId, input.updateId);
+      .run(
+        input.responseText,
+        JSON.stringify(attachmentRefs),
+        input.leaseUntil,
+        input.now,
+        input.deploymentId,
+        input.updateId,
+      );
     if (result.changes !== 1) throw new AppError("CONFLICT", "Telegram update lease was lost.", 409);
   }
 
@@ -990,6 +1942,15 @@ export class BunSqliteRepositories
       `)
       .run(input.now, input.deploymentId, input.updateId);
     if (result.changes !== 1) throw new AppError("CONFLICT", "Telegram update could not be completed.", 409);
+  }
+
+  async clearTelegramUpdateAttachments(input: { deploymentId: TelegramDeploymentId; updateId: number }): Promise<void> {
+    this.#db
+      .query(`
+        UPDATE telegram_updates SET response_attachments_json = '[]'
+        WHERE deployment_id = ? AND update_id = ? AND state = 'completed'
+      `)
+      .run(input.deploymentId, input.updateId);
   }
 
   async releaseTelegramUpdate(input: {
@@ -1389,6 +2350,54 @@ export class BunSqliteRepositories
     }
   }
 
+  async listSecrets(
+    after: { readonly tenantId: TenantId; readonly reference: string } | undefined,
+    limit: number,
+  ): Promise<readonly EncryptedSecretRecord[]> {
+    const rows = after
+      ? this.#db
+          .query<SecretRow, [string, string, string, number]>(`
+            SELECT tenant_id, reference, key_id, nonce, ciphertext, envelope_version, created_at
+            FROM encrypted_secrets
+            WHERE tenant_id > ? OR (tenant_id = ? AND reference > ?)
+            ORDER BY tenant_id, reference
+            LIMIT ?
+          `)
+          .all(after.tenantId, after.tenantId, after.reference, limit)
+      : this.#db
+          .query<SecretRow, [number]>(`
+            SELECT tenant_id, reference, key_id, nonce, ciphertext, envelope_version, created_at
+            FROM encrypted_secrets ORDER BY tenant_id, reference LIMIT ?
+          `)
+          .all(limit);
+    return rows.map(mapSecretRow);
+  }
+
+  async replaceSecretIfUnchanged(
+    record: EncryptedSecretRecord,
+    expected: { readonly keyId: string; readonly nonce: string; readonly ciphertext: string },
+  ): Promise<boolean> {
+    const result = this.#db
+      .query(`
+        UPDATE encrypted_secrets
+        SET key_id = ?, nonce = ?, ciphertext = ?, envelope_version = ?, created_at = ?
+        WHERE tenant_id = ? AND reference = ? AND key_id = ? AND nonce = ? AND ciphertext = ?
+      `)
+      .run(
+        record.keyId,
+        record.nonce,
+        record.ciphertext,
+        record.version,
+        record.createdAt,
+        record.tenantId,
+        record.reference,
+        expected.keyId,
+        expected.nonce,
+        expected.ciphertext,
+      );
+    return result.changes === 1;
+  }
+
   async deleteSecret(tenantId: TenantId, reference: string): Promise<void> {
     this.#db.query("DELETE FROM encrypted_secrets WHERE tenant_id = ? AND reference = ?").run(tenantId, reference);
   }
@@ -1396,11 +2405,11 @@ export class BunSqliteRepositories
   async findActiveApiToken(tokenHash: string, now: string): Promise<ApiTokenPrincipal | undefined> {
     const row = this.#db
       .query<ApiTokenRow, [string, string]>(`
-        SELECT t.id, t.tenant_id, t.owner_id, t.scopes_json
+        SELECT t.id, t.tenant_id, t.owner_id, t.scopes_json, t.expires_at, m.role
         FROM api_tokens AS t
         JOIN tenant_memberships AS m
           ON m.tenant_id = t.tenant_id AND m.user_id = t.owner_id
-        WHERE t.token_hash = ? AND t.revoked_at IS NULL
+        WHERE t.token_hash = ? AND t.revoked_at IS NULL AND m.status = 'active'
           AND (t.expires_at IS NULL OR t.expires_at > ?)
       `)
       .get(tokenHash, now);
@@ -1410,28 +2419,605 @@ export class BunSqliteRepositories
       tenantId: row.tenant_id as TenantId,
       ownerId: row.owner_id as UserId,
       scopes: parseScopes(row.scopes_json),
+      tenantRole: row.role,
+      ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
     };
+  }
+
+  async listWorkspacesForUser(userId: UserId): Promise<readonly TenantWorkspace[]> {
+    const rows = this.#db
+      .query<{ tenant_id: string; name: string; role: TenantRole; created_at: string }, [string]>(`
+        SELECT t.id AS tenant_id, t.name, m.role, m.created_at
+        FROM tenant_memberships AS m
+        JOIN tenants AS t ON t.id = m.tenant_id
+        WHERE m.user_id = ? AND m.status = 'active'
+        ORDER BY m.created_at ASC, t.id ASC
+      `)
+      .all(userId);
+    return rows.map((row) => ({
+      tenantId: row.tenant_id as TenantId,
+      name: row.name,
+      role: row.role,
+      createdAt: row.created_at,
+    }));
+  }
+
+  async getActiveTenantRole(input: {
+    readonly tenantId: TenantId;
+    readonly userId: UserId;
+  }): Promise<TenantRole | undefined> {
+    return this.#db
+      .query<{ role: TenantRole }, [string, string]>(`
+        SELECT role FROM tenant_memberships
+        WHERE tenant_id = ? AND user_id = ? AND status = 'active'
+      `)
+      .get(input.tenantId, input.userId)?.role;
+  }
+
+  async listTenantMembers(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+  }): Promise<readonly TenantMember[]> {
+    const actor = this.#db
+      .query<{ role: TenantRole }, [string, string]>(`
+        SELECT role FROM tenant_memberships
+        WHERE tenant_id = ? AND user_id = ? AND status = 'active'
+      `)
+      .get(input.tenantId, input.actorId);
+    if (!actor || (actor.role !== "owner" && actor.role !== "admin")) {
+      throw new AppError("FORBIDDEN", "Tenant owner or admin role is required to list members.", 403);
+    }
+    const rows = this.#db
+      .query<TenantMemberRow, [string]>(`
+        SELECT m.user_id, m.role, m.status, m.created_at,
+               (SELECT COUNT(*) FROM bots AS b
+                WHERE b.tenant_id = m.tenant_id AND b.owner_id = m.user_id) AS owned_bot_count
+        FROM tenant_memberships AS m
+        WHERE m.tenant_id = ?
+        ORDER BY CASE m.status WHEN 'active' THEN 0 ELSE 1 END, m.role, m.created_at, m.user_id
+      `)
+      .all(input.tenantId);
+    return rows.map(mapTenantMember);
+  }
+
+  async addTenantMember(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly memberId: UserId;
+    readonly role: Exclude<TenantRole, "owner">;
+    readonly now: string;
+  }): Promise<TenantMember> {
+    const add = this.#db.transaction(() => {
+      this.#assertTenantOwner(input.tenantId, input.actorId);
+      const user = this.#db.query<{ id: string }, [string]>("SELECT id FROM users WHERE id = ?").get(input.memberId);
+      if (!user) throw new AppError("NOT_FOUND", "User account was not found.", 404);
+      const existing = this.#db
+        .query<{ role: TenantRole; status: "active" | "inactive"; created_at: string }, [string, string]>(`
+          SELECT role, status, created_at FROM tenant_memberships WHERE tenant_id = ? AND user_id = ?
+        `)
+        .get(input.tenantId, input.memberId);
+      let action: string;
+      let previousRole: TenantRole | undefined;
+      if (existing?.status === "active")
+        throw new AppError("CONFLICT", "User is already an active tenant member.", 409);
+      if (existing) {
+        previousRole = existing.role;
+        action = "tenant.member.reactivated";
+        this.#db
+          .query("UPDATE tenant_memberships SET role = ?, status = 'active' WHERE tenant_id = ? AND user_id = ?")
+          .run(input.role, input.tenantId, input.memberId);
+      } else {
+        action = "tenant.member.added";
+        this.#db
+          .query(`
+            INSERT INTO tenant_memberships (tenant_id, user_id, role, created_at, status)
+            VALUES (?, ?, ?, ?, 'active')
+          `)
+          .run(input.tenantId, input.memberId, input.role, input.now);
+      }
+      this.#recordTenantMembershipEvent(input, action, {
+        role: input.role,
+        ...(previousRole === undefined ? {} : { previousRole }),
+      });
+      return this.#getTenantMember(input.tenantId, input.memberId);
+    });
+    return add.immediate();
+  }
+
+  async changeTenantMemberRole(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly memberId: UserId;
+    readonly role: TenantRole;
+    readonly now: string;
+  }): Promise<TenantMember> {
+    const change = this.#db.transaction(() => {
+      this.#assertTenantOwner(input.tenantId, input.actorId);
+      const member = this.#db
+        .query<{ role: TenantRole; status: "active" | "inactive" }, [string, string]>(`
+          SELECT role, status FROM tenant_memberships WHERE tenant_id = ? AND user_id = ?
+        `)
+        .get(input.tenantId, input.memberId);
+      if (member?.status !== "active") throw new AppError("NOT_FOUND", "Active tenant member was not found.", 404);
+      if (member.role === input.role) return this.#getTenantMember(input.tenantId, input.memberId);
+      if (member.role === "owner" && input.role !== "owner") this.#assertAnotherTenantOwner(input.tenantId);
+      this.#db
+        .query("UPDATE tenant_memberships SET role = ? WHERE tenant_id = ? AND user_id = ? AND status = 'active'")
+        .run(input.role, input.tenantId, input.memberId);
+      this.#recordTenantMembershipEvent(input, "tenant.member.role_changed", {
+        previousRole: member.role,
+        role: input.role,
+      });
+      return this.#getTenantMember(input.tenantId, input.memberId);
+    });
+    return change.immediate();
+  }
+
+  async deactivateTenantMember(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly memberId: UserId;
+    readonly now: string;
+  }): Promise<TenantMember> {
+    const deactivate = this.#db.transaction(() => {
+      this.#assertTenantOwner(input.tenantId, input.actorId);
+      const member = this.#db
+        .query<{ role: TenantRole; status: "active" | "inactive" }, [string, string]>(`
+          SELECT role, status FROM tenant_memberships WHERE tenant_id = ? AND user_id = ?
+        `)
+        .get(input.tenantId, input.memberId);
+      if (member?.status !== "active") throw new AppError("NOT_FOUND", "Active tenant member was not found.", 404);
+      if (member.role === "owner") this.#assertAnotherTenantOwner(input.tenantId);
+      this.#db
+        .query(
+          "UPDATE tenant_memberships SET status = 'inactive' WHERE tenant_id = ? AND user_id = ? AND status = 'active'",
+        )
+        .run(input.tenantId, input.memberId);
+      const revokedTokens = this.#db
+        .query("UPDATE api_tokens SET revoked_at = ? WHERE tenant_id = ? AND owner_id = ? AND revoked_at IS NULL")
+        .run(input.now, input.tenantId, input.memberId).changes;
+      this.#recordTenantMembershipEvent(input, "tenant.member.deactivated", {
+        role: member.role,
+        revokedTokens,
+      });
+      return this.#getTenantMember(input.tenantId, input.memberId);
+    });
+    return deactivate.immediate();
+  }
+
+  #assertTenantOwner(tenantId: TenantId, actorId: UserId): void {
+    const row = this.#db
+      .query<{ role: TenantRole }, [string, string]>(`
+        SELECT role FROM tenant_memberships
+        WHERE tenant_id = ? AND user_id = ? AND status = 'active'
+      `)
+      .get(tenantId, actorId);
+    if (row?.role !== "owner") throw new AppError("FORBIDDEN", "Only a tenant owner can change membership.", 403);
+  }
+
+  #assertAnotherTenantOwner(tenantId: TenantId): void {
+    const row = this.#db
+      .query<{ count: number }, [string]>(`
+        SELECT COUNT(*) AS count FROM tenant_memberships
+        WHERE tenant_id = ? AND status = 'active' AND role = 'owner'
+      `)
+      .get(tenantId);
+    if ((row?.count ?? 0) <= 1) throw new AppError("CONFLICT", "A tenant must retain at least one active owner.", 409);
+  }
+
+  #getTenantMember(tenantId: TenantId, memberId: UserId): TenantMember {
+    const row = this.#db
+      .query<TenantMemberRow, [string, string]>(`
+        SELECT m.user_id, m.role, m.status, m.created_at,
+               (SELECT COUNT(*) FROM bots AS b
+                WHERE b.tenant_id = m.tenant_id AND b.owner_id = m.user_id) AS owned_bot_count
+        FROM tenant_memberships AS m WHERE m.tenant_id = ? AND m.user_id = ?
+      `)
+      .get(tenantId, memberId);
+    if (!row) throw new AppError("INTERNAL_ERROR", "Tenant member could not be loaded after an update.", 500);
+    return mapTenantMember(row);
+  }
+
+  #recordTenantMembershipEvent(
+    input: { readonly tenantId: TenantId; readonly actorId: UserId; readonly memberId: UserId; readonly now: string },
+    action: string,
+    metadata: Readonly<Record<string, unknown>>,
+  ): void {
+    this.#db
+      .query(`
+        INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+        VALUES (?, ?, ?, ?, 'tenant_member', ?, ?, ?)
+      `)
+      .run(
+        `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+        input.tenantId,
+        input.actorId,
+        action,
+        input.memberId,
+        JSON.stringify(metadata),
+        input.now,
+      );
+  }
+
+  async consumeApiRequest(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    now: string;
+    limitPerMinute: number;
+  }): Promise<boolean> {
+    const timestamp = Date.parse(input.now);
+    if (!Number.isFinite(timestamp)) throw new AppError("VALIDATION_ERROR", "API request time is invalid.", 400);
+    if (!Number.isSafeInteger(input.limitPerMinute) || input.limitPerMinute < 1 || input.limitPerMinute > 10_000) {
+      throw new AppError("VALIDATION_ERROR", "API request limit is invalid.", 400);
+    }
+    const minuteWindow = Math.floor(timestamp / 60_000);
+    const result = this.#db
+      .query(`
+        INSERT INTO api_request_usage (tenant_id, owner_id, minute_window, request_count, updated_at)
+        VALUES (?, ?, ?, 1, ?)
+        ON CONFLICT(tenant_id, owner_id) DO UPDATE SET
+          minute_window = excluded.minute_window,
+          request_count = CASE WHEN api_request_usage.minute_window = excluded.minute_window
+            THEN api_request_usage.request_count + 1 ELSE 1 END,
+          updated_at = excluded.updated_at
+        WHERE api_request_usage.minute_window != excluded.minute_window
+          OR api_request_usage.request_count < ?
+      `)
+      .run(input.tenantId, input.ownerId, minuteWindow, input.now, input.limitPerMinute);
+    return result.changes === 1;
+  }
+
+  async recordApiMutation(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    tokenId: string;
+    method: string;
+    pathname: string;
+    createdAt: string;
+  }): Promise<void> {
+    const method = input.method.toUpperCase().slice(0, 16);
+    const pathname = input.pathname.slice(0, 512);
+    const id = `audit_${crypto.randomUUID().replaceAll("-", "")}`;
+    const metadata = JSON.stringify({ tokenId: input.tokenId, method, path: pathname });
+    try {
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          VALUES (?, ?, ?, 'api.mutation_attempt', 'http_api', ?, ?, ?)
+        `)
+        .run(id, input.tenantId, input.ownerId, `${method} ${pathname}`.slice(0, 512), metadata, input.createdAt);
+    } catch (cause) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Security event could not be recorded.", 503, { cause });
+    }
+  }
+
+  async recordApiAuthorizationDenial(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    tokenId: string;
+    method: string;
+    pathname: string;
+    denialType: "scope" | "resource";
+    errorCode: "FORBIDDEN" | "NOT_FOUND";
+    requiredScope?: string;
+    createdAt: string;
+  }): Promise<void> {
+    const method = input.method.toUpperCase().slice(0, 16);
+    const pathname = input.pathname.slice(0, 512);
+    const requiredScope = input.requiredScope?.slice(0, 64);
+    const id = `audit_${crypto.randomUUID().replaceAll("-", "")}`;
+    try {
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          VALUES (?, ?, ?, ?, 'http_api', ?, ?, ?)
+        `)
+        .run(
+          id,
+          input.tenantId,
+          input.ownerId,
+          `authorization.${input.denialType}_denied`,
+          `${method} ${pathname}`.slice(0, 512),
+          JSON.stringify({
+            tokenId: input.tokenId,
+            method,
+            errorCode: input.errorCode,
+            ...(input.requiredScope ? { requiredScope } : {}),
+            outcome: "denied",
+          }),
+          input.createdAt,
+        );
+    } catch (cause) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Security event could not be recorded.", 503, { cause });
+    }
+  }
+
+  async recordPermissionDecision(input: {
+    tenantId: TenantId;
+    botId: BotId;
+    category: "skill" | "mcp";
+    permission: string;
+    outcome: "allowed" | "denied";
+    createdAt: string;
+  }): Promise<void> {
+    const id = `audit_${crypto.randomUUID().replaceAll("-", "")}`;
+    const permission = [...input.permission]
+      .filter((character) => {
+        const code = character.charCodeAt(0);
+        return code >= 0x20 && code !== 0x7f;
+      })
+      .join("")
+      .slice(0, 128);
+    try {
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, action, resource_type, resource_id, metadata_json, created_at)
+          SELECT ?, b.tenant_id, 'authorization.permission_decision', 'bot', b.id, ?, ?
+          FROM bots AS b WHERE b.tenant_id = ? AND b.id = ?
+        `)
+        .run(
+          id,
+          JSON.stringify({ category: input.category, permission, outcome: input.outcome }),
+          input.createdAt,
+          input.tenantId,
+          input.botId,
+        );
+    } catch (cause) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Security event could not be recorded.", 503, { cause });
+    }
+  }
+
+  async listOwnedAuditLogs(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    limit: number;
+  }): Promise<readonly AuditLogEvent[]> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+      throw new AppError("VALIDATION_ERROR", "Audit log page size must be between 1 and 100.", 400);
+    }
+    const rows = this.#db
+      .query<AuditLogRow, [string, string, string, string, number]>(`
+        SELECT id, action, resource_type, resource_id, metadata_json, created_at
+        FROM audit_logs AS a WHERE a.tenant_id = ? AND (
+          a.actor_id = ? OR (a.resource_type = 'bot' AND EXISTS (
+            SELECT 1 FROM bots AS b
+            WHERE b.tenant_id = a.tenant_id AND b.id = a.resource_id AND b.owner_id = ?
+          )) OR EXISTS (
+            SELECT 1 FROM tenant_memberships AS viewer
+            WHERE viewer.tenant_id = a.tenant_id AND viewer.user_id = ?
+              AND viewer.role = 'owner' AND viewer.status = 'active'
+          )
+        )
+        ORDER BY created_at DESC, id DESC LIMIT ?
+      `)
+      .all(input.tenantId, input.ownerId, input.ownerId, input.ownerId, input.limit);
+    return rows.map(mapAuditLog);
+  }
+
+  async claimTelegramInitData(input: { dataHash: string; expiresAt: string; now: string }): Promise<boolean> {
+    const claim = this.#db.transaction(() => {
+      this.#db.query("DELETE FROM telegram_auth_nonces WHERE expires_at <= ?").run(input.now);
+      const result = this.#db
+        .query(`
+          INSERT INTO telegram_auth_nonces (data_hash, expires_at, created_at)
+          VALUES (?, ?, ?)
+          ON CONFLICT (data_hash) DO NOTHING
+        `)
+        .run(input.dataHash, input.expiresAt, input.now);
+      return result.changes === 1;
+    });
+    return claim.immediate();
+  }
+
+  async getOrCreateTelegramOwner(input: {
+    telegramUserId: number;
+    ownerId: UserId;
+    tenantId: TenantId;
+    workspaceName: string;
+    now: string;
+  }): Promise<{ ownerId: UserId; tenantId: TenantId }> {
+    const createOrFind = this.#db.transaction(() => {
+      const existing = this.#db
+        .query<{ owner_id: string; tenant_id: string }, [string]>(`
+          SELECT m.user_id AS owner_id, m.tenant_id
+          FROM users AS u
+          JOIN tenant_memberships AS m ON m.user_id = u.id
+          WHERE u.auth_issuer = 'telegram-miniapp' AND u.auth_subject = ? AND m.role = 'owner'
+          ORDER BY m.created_at ASC
+          LIMIT 1
+        `)
+        .get(String(input.telegramUserId));
+      if (existing) return { ownerId: existing.owner_id as UserId, tenantId: existing.tenant_id as TenantId };
+
+      this.#db
+        .query(
+          `INSERT OR IGNORE INTO users (id, auth_issuer, auth_subject, created_at) VALUES (?, 'telegram-miniapp', ?, ?)`,
+        )
+        .run(input.ownerId, String(input.telegramUserId), input.now);
+      this.#db
+        .query("INSERT OR IGNORE INTO tenants (id, name, created_at) VALUES (?, ?, ?)")
+        .run(input.tenantId, input.workspaceName, input.now);
+      this.#db
+        .query(
+          "INSERT OR IGNORE INTO tenant_memberships (tenant_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)",
+        )
+        .run(input.tenantId, input.ownerId, input.now);
+
+      const account = this.#db
+        .query<{ owner_id: string; tenant_id: string }, [string]>(`
+          SELECT m.user_id AS owner_id, m.tenant_id
+          FROM users AS u
+          JOIN tenant_memberships AS m ON m.user_id = u.id
+          WHERE u.auth_issuer = 'telegram-miniapp' AND u.auth_subject = ? AND m.role = 'owner'
+          ORDER BY m.created_at ASC
+          LIMIT 1
+        `)
+        .get(String(input.telegramUserId));
+      if (!account) throw new AppError("CONFLICT", "Telegram workspace could not be created.", 409);
+      return { ownerId: account.owner_id as UserId, tenantId: account.tenant_id as TenantId };
+    });
+    return createOrFind.immediate();
+  }
+
+  async getMasterBotSession(telegramUserId: number): Promise<MasterBotSession | undefined> {
+    validateTelegramUserId(telegramUserId);
+    const row = this.#db
+      .query<MasterBotSessionRow, [number]>(`
+        SELECT telegram_user_id, chat_id, tenant_id, owner_id, session_id, updated_at
+        FROM master_bot_sessions WHERE telegram_user_id = ?
+      `)
+      .get(telegramUserId);
+    return row
+      ? {
+          telegramUserId: row.telegram_user_id,
+          chatId: row.chat_id,
+          tenantId: row.tenant_id as TenantId,
+          ownerId: row.owner_id as UserId,
+          sessionId: row.session_id,
+          updatedAt: row.updated_at,
+        }
+      : undefined;
+  }
+
+  async saveMasterBotSession(session: MasterBotSession): Promise<void> {
+    validateTelegramUserId(session.telegramUserId);
+    this.#db
+      .query(`
+        INSERT INTO master_bot_sessions (telegram_user_id, chat_id, tenant_id, owner_id, session_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(telegram_user_id) DO UPDATE SET
+          chat_id = excluded.chat_id, tenant_id = excluded.tenant_id, owner_id = excluded.owner_id,
+          session_id = excluded.session_id, updated_at = excluded.updated_at
+      `)
+      .run(
+        session.telegramUserId,
+        session.chatId,
+        session.tenantId,
+        session.ownerId,
+        session.sessionId,
+        session.updatedAt,
+      );
+  }
+
+  async deleteMasterBotSession(telegramUserId: number): Promise<void> {
+    validateTelegramUserId(telegramUserId);
+    this.#db.query("DELETE FROM master_bot_sessions WHERE telegram_user_id = ?").run(telegramUserId);
+  }
+
+  async reserveMasterBotUpdate(input: {
+    updateId: number;
+    leaseUntil: string;
+    now: string;
+  }): Promise<MasterBotUpdateReservation> {
+    validateMasterUpdateId(input.updateId);
+    const reserve = this.#db.transaction(() => {
+      this.#db
+        .query("DELETE FROM master_bot_updates WHERE created_at < ?")
+        .run(new Date(Date.parse(input.now) - 30 * 24 * 60 * 60 * 1000).toISOString());
+      const row = this.#db
+        .query<MasterBotUpdateRow, [number]>(`
+          SELECT state, response_json, lease_until FROM master_bot_updates WHERE update_id = ?
+        `)
+        .get(input.updateId);
+      if (row?.state === "completed") return { state: "completed" as const };
+      if (row && row.lease_until > input.now) return { state: "busy" as const };
+      if (row?.state === "ready") {
+        this.#db
+          .query("UPDATE master_bot_updates SET lease_until = ?, updated_at = ? WHERE update_id = ?")
+          .run(input.leaseUntil, input.now, input.updateId);
+        return { state: "ready" as const, reply: parseMasterBotReply(row.response_json) };
+      }
+      if (row) {
+        this.#db
+          .query(`
+            UPDATE master_bot_updates SET state = 'processing', response_json = NULL, lease_until = ?, updated_at = ?
+            WHERE update_id = ?
+          `)
+          .run(input.leaseUntil, input.now, input.updateId);
+      } else {
+        this.#db
+          .query(`
+            INSERT INTO master_bot_updates (update_id, state, response_json, lease_until, created_at, updated_at)
+            VALUES (?, 'processing', NULL, ?, ?, ?)
+          `)
+          .run(input.updateId, input.leaseUntil, input.now, input.now);
+      }
+      return { state: "acquired" as const };
+    });
+    return reserve.immediate();
+  }
+
+  async saveMasterBotUpdateReply(input: {
+    updateId: number;
+    reply: MasterBotReply;
+    leaseUntil: string;
+    now: string;
+  }): Promise<void> {
+    validateMasterUpdateId(input.updateId);
+    const serialized = JSON.stringify(input.reply);
+    if (serialized.length > 20_000) throw new AppError("VALIDATION_ERROR", "Master bot reply is too large.", 400);
+    const result = this.#db
+      .query(`
+        UPDATE master_bot_updates SET state = 'ready', response_json = ?, lease_until = ?, updated_at = ?
+        WHERE update_id = ? AND state = 'processing'
+      `)
+      .run(serialized, input.leaseUntil, input.now, input.updateId);
+    if (result.changes !== 1) throw new AppError("CONFLICT", "Master bot update lease was lost.", 409);
+  }
+
+  async completeMasterBotUpdate(input: { updateId: number; now: string }): Promise<void> {
+    const result = this.#db
+      .query(`
+        UPDATE master_bot_updates SET state = 'completed', response_json = NULL, updated_at = ?
+        WHERE update_id = ? AND state = 'ready'
+      `)
+      .run(input.now, input.updateId);
+    if (result.changes !== 1) throw new AppError("CONFLICT", "Master bot update could not be completed.", 409);
+  }
+
+  async releaseMasterBotUpdate(input: { updateId: number; now: string }): Promise<void> {
+    this.#db
+      .query(
+        "UPDATE master_bot_updates SET lease_until = ?, updated_at = ? WHERE update_id = ? AND state != 'completed'",
+      )
+      .run(input.now, input.now, input.updateId);
   }
 
   async createCreationApproval(record: CreationApprovalRecord): Promise<void> {
     try {
-      this.#db
-        .query(`
+      const create = this.#db.transaction(() => {
+        this.#db
+          .query(`
           INSERT INTO creation_approvals (
             approval_hash, tenant_id, owner_id, session_id, action, created_at, expires_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?)
         `)
-        .run(
-          record.approvalHash,
-          record.tenantId,
-          record.ownerId,
-          record.sessionId,
-          record.action,
-          record.createdAt,
-          record.expiresAt,
-        );
+          .run(
+            record.approvalHash,
+            record.tenantId,
+            record.ownerId,
+            record.sessionId,
+            record.action,
+            record.createdAt,
+            record.expiresAt,
+          );
+        this.#db
+          .query(`
+            INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+            VALUES (?, ?, ?, 'creation.approval_issued', 'factory_session', ?, ?, ?)
+          `)
+          .run(
+            `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+            record.tenantId,
+            record.ownerId,
+            record.sessionId,
+            JSON.stringify({ approvalAction: record.action, expiresAt: record.expiresAt }),
+            record.createdAt,
+          );
+      });
+      create();
     } catch (cause) {
-      throw new AppError("CONFLICT", "Creation approval could not be issued.", 409, { cause });
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Approval could not be issued and audited.", 503, { cause });
     }
   }
 
@@ -1443,14 +3029,115 @@ export class BunSqliteRepositories
     readonly action: CreationApprovalAction;
     readonly now: string;
   }): Promise<boolean> {
-    const result = this.#db
-      .query(`
+    const consume = this.#db.transaction(() => {
+      const result = this.#db
+        .query(`
         UPDATE creation_approvals SET consumed_at = ?
         WHERE approval_hash = ? AND tenant_id = ? AND owner_id = ? AND session_id = ? AND action = ?
           AND consumed_at IS NULL AND expires_at > ?
       `)
-      .run(input.now, input.approvalHash, input.tenantId, input.ownerId, input.sessionId, input.action, input.now);
-    return result.changes === 1;
+        .run(input.now, input.approvalHash, input.tenantId, input.ownerId, input.sessionId, input.action, input.now);
+      const consumed = result.changes === 1;
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          SELECT ?, COALESCE((SELECT tenant_id FROM creation_approvals WHERE approval_hash = ?), ?), ?, ?,
+            'factory_session', ?, ?, ?
+        `)
+        .run(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.approvalHash,
+          input.tenantId,
+          input.ownerId,
+          consumed ? "creation.approval_consumed" : "creation.approval_rejected",
+          input.sessionId,
+          JSON.stringify({ approvalAction: input.action }),
+          input.now,
+        );
+      return consumed;
+    });
+    try {
+      return consume();
+    } catch (cause) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Approval attempt could not be audited.", 503, { cause });
+    }
+  }
+
+  async createBotCredentialApproval(input: {
+    readonly approvalHash: string;
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly createdAt: string;
+    readonly expiresAt: string;
+  }): Promise<void> {
+    try {
+      const create = this.#db.transaction(() => {
+        this.#db
+          .query(`
+            INSERT INTO bot_credential_approvals (
+              approval_hash, tenant_id, owner_id, bot_id, created_at, expires_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `)
+          .run(input.approvalHash, input.tenantId, input.ownerId, input.botId, input.createdAt, input.expiresAt);
+        this.#db
+          .query(`
+            INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+            VALUES (?, ?, ?, 'bot.credential_approval_issued', 'bot', ?, ?, ?)
+          `)
+          .run(
+            `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+            input.tenantId,
+            input.ownerId,
+            input.botId,
+            JSON.stringify({ expiresAt: input.expiresAt }),
+            input.createdAt,
+          );
+      });
+      create();
+    } catch (cause) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Credential update approval could not be stored.", 503, { cause });
+    }
+  }
+
+  async consumeBotCredentialApproval(input: {
+    readonly approvalHash: string;
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly now: string;
+  }): Promise<boolean> {
+    const consume = this.#db.transaction(() => {
+      const result = this.#db
+        .query(`
+          UPDATE bot_credential_approvals SET consumed_at = ?
+          WHERE approval_hash = ? AND tenant_id = ? AND owner_id = ? AND bot_id = ?
+            AND consumed_at IS NULL AND expires_at > ?
+        `)
+        .run(input.now, input.approvalHash, input.tenantId, input.ownerId, input.botId, input.now);
+      const consumed = result.changes === 1;
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          VALUES (?, ?, ?, ?, 'bot', ?, '{}', ?)
+        `)
+        .run(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.tenantId,
+          input.ownerId,
+          consumed ? "bot.credential_approval_consumed" : "bot.credential_approval_rejected",
+          input.botId,
+          input.now,
+        );
+      return consumed;
+    });
+    try {
+      return consume();
+    } catch (cause) {
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "Credential update approval attempt could not be audited.", 503, {
+        cause,
+      });
+    }
   }
 
   async listSkillCatalog(tenantId: TenantId): Promise<readonly SkillDefinition[]> {
@@ -1462,6 +3149,18 @@ export class BunSqliteRepositories
         ORDER BY category, name, version
       `)
       .all(tenantId);
+    return rows.map(mapSkillDefinition);
+  }
+
+  async listGlobalSkillCatalog(): Promise<readonly SkillDefinition[]> {
+    const rows = this.#db
+      .query<SkillRow, []>(`
+        SELECT id, tenant_id, name, version, author, category, description, execution_type,
+               input_schema_json, output_schema_json, permissions_json, definition_json, enabled
+        FROM skills WHERE tenant_id IS NULL
+        ORDER BY category, name, version
+      `)
+      .all();
     return rows.map(mapSkillDefinition);
   }
 
@@ -1626,6 +3325,91 @@ export class BunSqliteRepositories
     return row ? mapSkillDefinition(row) : undefined;
   }
 
+  async publishCatalogSkill(input: {
+    readonly tenantId: TenantId;
+    readonly definition: SkillCatalogPublication;
+  }): Promise<void> {
+    const definition = input.definition;
+    try {
+      this.#db
+        .query(`
+          INSERT INTO skills (
+            id, tenant_id, name, version, author, category, description, execution_type,
+            input_schema_json, output_schema_json, permissions_json, definition_json, enabled, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        `)
+        .run(
+          definition.id,
+          input.tenantId,
+          definition.name,
+          definition.version,
+          definition.author,
+          definition.category,
+          definition.description,
+          definition.executionType,
+          JSON.stringify(definition.inputSchema),
+          JSON.stringify(definition.outputSchema),
+          JSON.stringify(definition.requiredPermissions),
+          JSON.stringify({
+            configuration: definition.configuration,
+            timeoutMs: definition.timeoutMs,
+            rateLimit: definition.rateLimit,
+            retryPolicy: definition.retryPolicy,
+          }),
+          new Date().toISOString(),
+        );
+    } catch (cause) {
+      if (cause instanceof Error && /UNIQUE constraint failed|PRIMARY KEY/i.test(cause.message)) {
+        throw new AppError("CONFLICT", "Skill ID or version is already present in the catalog.", 409, { cause });
+      }
+      throw cause;
+    }
+  }
+
+  async publishGlobalSkillCatalogItem(input: { readonly definition: SkillCatalogPublication }): Promise<void> {
+    const definition = input.definition;
+    try {
+      this.#db
+        .query(`
+          INSERT INTO skills (
+            id, tenant_id, name, version, author, category, description, execution_type,
+            input_schema_json, output_schema_json, permissions_json, definition_json, enabled, created_at
+          ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        `)
+        .run(
+          definition.id,
+          definition.name,
+          definition.version,
+          definition.author,
+          definition.category,
+          definition.description,
+          definition.executionType,
+          JSON.stringify(definition.inputSchema),
+          JSON.stringify(definition.outputSchema),
+          JSON.stringify(definition.requiredPermissions),
+          JSON.stringify({
+            configuration: definition.configuration,
+            timeoutMs: definition.timeoutMs,
+            rateLimit: definition.rateLimit,
+            retryPolicy: definition.retryPolicy,
+          }),
+          new Date().toISOString(),
+        );
+    } catch (cause) {
+      if (cause instanceof Error && /UNIQUE constraint failed|PRIMARY KEY/i.test(cause.message)) {
+        throw new AppError("CONFLICT", "Skill ID or version is already present in the catalog.", 409, { cause });
+      }
+      throw cause;
+    }
+  }
+
+  async setGlobalSkillCatalogEnabled(skillId: string, enabled: boolean): Promise<void> {
+    const result = this.#db
+      .query("UPDATE skills SET enabled = ? WHERE id = ? AND tenant_id IS NULL")
+      .run(Number(enabled), skillId);
+    if (result.changes !== 1) throw new AppError("NOT_FOUND", "Global catalog skill was not found.", 404);
+  }
+
   async listInstalledSkills(tenantId: TenantId, botId: BotId): Promise<readonly InstalledSkill[]> {
     const rows = this.#db
       .query<SkillRow, [string, string, string]>(`
@@ -1723,6 +3507,385 @@ export class BunSqliteRepositories
       return result.changes === 1;
     });
     return consume.immediate();
+  }
+
+  async acquireWorkflowExecution(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly skillId: string;
+    readonly executionKey: string;
+    readonly initialStateRef: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly leaseUntil: string;
+    readonly expiresAt: string;
+  }): Promise<WorkflowExecutionAcquisition> {
+    const acquire = this.#db.transaction(() => {
+      const key: [string, string, string, string] = [input.tenantId, input.botId, input.skillId, input.executionKey];
+      let replacedStateRef: string | undefined;
+      let row = this.#db
+        .query<WorkflowExecutionRow, typeof key>(`
+          SELECT tenant_id, bot_id, skill_id, execution_key, state_ref, next_step, version, status,
+                 lease_token, lease_until, expires_at, updated_at
+          FROM workflow_executions WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ?
+        `)
+        .get(...key);
+      if (!row) {
+        this.#db
+          .query(`
+            INSERT INTO workflow_executions (
+              tenant_id, bot_id, skill_id, execution_key, state_ref, next_step, version, status,
+              lease_token, lease_until, expires_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 0, 1, 'running', ?, ?, ?, ?)
+          `)
+          .run(
+            input.tenantId,
+            input.botId,
+            input.skillId,
+            input.executionKey,
+            input.initialStateRef,
+            input.leaseToken,
+            input.leaseUntil,
+            input.expiresAt,
+            input.now,
+          );
+        row = this.#db
+          .query<WorkflowExecutionRow, typeof key>(`
+            SELECT tenant_id, bot_id, skill_id, execution_key, state_ref, next_step, version, status,
+                   lease_token, lease_until, expires_at, updated_at
+            FROM workflow_executions WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ?
+          `)
+          .get(...key);
+      } else if (row.expires_at <= input.now) {
+        replacedStateRef = row.state_ref;
+        this.#db
+          .query(`
+            UPDATE workflow_executions
+            SET state_ref = ?, next_step = 0, version = version + 1, status = 'running', lease_token = ?,
+                lease_until = ?, expires_at = ?, updated_at = ?
+            WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ? AND expires_at <= ?
+          `)
+          .run(
+            input.initialStateRef,
+            input.leaseToken,
+            input.leaseUntil,
+            input.expiresAt,
+            input.now,
+            ...key,
+            input.now,
+          );
+        row = this.#db
+          .query<WorkflowExecutionRow, typeof key>(`
+            SELECT tenant_id, bot_id, skill_id, execution_key, state_ref, next_step, version, status,
+                   lease_token, lease_until, expires_at, updated_at
+            FROM workflow_executions WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ?
+          `)
+          .get(...key);
+      } else if (row.status === "succeeded") {
+        return { state: "completed", execution: mapWorkflowExecution(row) } as const;
+      } else if (row.lease_until > input.now) {
+        return { state: "busy" } as const;
+      } else {
+        this.#db
+          .query(`
+            UPDATE workflow_executions
+            SET lease_token = ?, lease_until = ?, expires_at = ?, updated_at = ?, version = version + 1
+            WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ?
+              AND status = 'running' AND lease_until <= ?
+          `)
+          .run(input.leaseToken, input.leaseUntil, input.expiresAt, input.now, ...key, input.now);
+        row = this.#db
+          .query<WorkflowExecutionRow, typeof key>(`
+            SELECT tenant_id, bot_id, skill_id, execution_key, state_ref, next_step, version, status,
+                   lease_token, lease_until, expires_at, updated_at
+            FROM workflow_executions WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ?
+          `)
+          .get(...key);
+      }
+      if (row?.status !== "running" || row.lease_token !== input.leaseToken) {
+        throw new AppError("CONFLICT", "Workflow execution could not be acquired.", 409);
+      }
+      return {
+        state: "acquired",
+        execution: mapWorkflowExecution(row),
+        ...(replacedStateRef === undefined ? {} : { replacedStateRef }),
+      } as const;
+    });
+    return acquire.immediate();
+  }
+
+  async acquireToolExecution(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly executionKey: string;
+    readonly toolName: string;
+    readonly inputHash: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly leaseUntil: string;
+    readonly expiresAt: string;
+  }): Promise<ToolExecutionAcquisition> {
+    const acquire = this.#db.transaction(() => {
+      const key: [string, string, string] = [input.tenantId, input.botId, input.executionKey];
+      const select = () =>
+        this.#db
+          .query<ToolExecutionRow, typeof key>(`
+            SELECT tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
+                   lease_token, lease_until, expires_at, updated_at
+            FROM tool_executions WHERE tenant_id = ? AND bot_id = ? AND execution_key = ?
+          `)
+          .get(...key);
+      let row = select();
+      if (!row) {
+        this.#db
+          .query(`
+            INSERT INTO tool_executions (
+              tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
+              lease_token, lease_until, expires_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, ?, ?, ?)
+          `)
+          .run(
+            input.tenantId,
+            input.botId,
+            input.executionKey,
+            input.toolName,
+            input.inputHash,
+            input.leaseToken,
+            input.leaseUntil,
+            input.expiresAt,
+            input.now,
+          );
+        return { state: "acquired", leaseToken: input.leaseToken } as const;
+      }
+      if (row.tool_name !== input.toolName || row.input_hash !== input.inputHash) {
+        throw new AppError("CONFLICT", "Tool execution identity was reused with different input.", 409);
+      }
+      if (row.status === "succeeded" && row.expires_at > input.now) {
+        if (!row.result_ref) throw new AppError("INTERNAL_ERROR", "Completed tool result is missing.", 500);
+        return { state: "completed", resultRef: row.result_ref } as const;
+      }
+
+      const replacedResultRef = row.expires_at <= input.now ? (row.result_ref ?? undefined) : undefined;
+      if (row.expires_at <= input.now) {
+        this.#db
+          .query(`
+            UPDATE tool_executions
+            SET status = 'running', result_ref = NULL, lease_token = ?, lease_until = ?,
+                expires_at = ?, updated_at = ?
+            WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND expires_at <= ?
+          `)
+          .run(input.leaseToken, input.leaseUntil, input.expiresAt, input.now, ...key, input.now);
+      } else if (row.status === "running" && row.lease_until <= input.now) {
+        this.#db
+          .query(`
+            UPDATE tool_executions SET lease_token = ?, lease_until = ?, expires_at = ?, updated_at = ?
+            WHERE tenant_id = ? AND bot_id = ? AND execution_key = ?
+              AND status = 'running' AND lease_until <= ? AND expires_at > ?
+          `)
+          .run(input.leaseToken, input.leaseUntil, input.expiresAt, input.now, ...key, input.now, input.now);
+      } else {
+        return { state: "busy" } as const;
+      }
+      row = select();
+      if (row?.status === "running" && row.lease_token === input.leaseToken) {
+        return {
+          state: "acquired",
+          leaseToken: input.leaseToken,
+          ...(replacedResultRef === undefined ? {} : { replacedResultRef }),
+        } as const;
+      }
+      if (row?.status === "succeeded" && row.result_ref && row.expires_at > input.now) {
+        return { state: "completed", resultRef: row.result_ref } as const;
+      }
+      return { state: "busy" } as const;
+    });
+    return acquire.immediate();
+  }
+
+  async completeToolExecution(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly resultRef: string;
+    readonly now: string;
+    readonly expiresAt: string;
+  }): Promise<boolean> {
+    const result = this.#db
+      .query(`
+        UPDATE tool_executions
+        SET status = 'succeeded', result_ref = ?, lease_token = NULL, lease_until = ?, expires_at = ?, updated_at = ?
+        WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND status = 'running' AND lease_token = ?
+      `)
+      .run(
+        input.resultRef,
+        input.now,
+        input.expiresAt,
+        input.now,
+        input.tenantId,
+        input.botId,
+        input.executionKey,
+        input.leaseToken,
+      );
+    return result.changes === 1;
+  }
+
+  async releaseToolExecution(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly now: string;
+  }): Promise<void> {
+    this.#db
+      .query(`
+        UPDATE tool_executions SET lease_until = ?, updated_at = ?
+        WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND status = 'running' AND lease_token = ?
+      `)
+      .run(input.now, input.now, input.tenantId, input.botId, input.executionKey, input.leaseToken);
+  }
+
+  async purgeToolExecutions(tenantId: TenantId, now: string, limit: number): Promise<readonly string[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+      throw new AppError("VALIDATION_ERROR", "Tool execution cleanup page size is invalid.", 400);
+    }
+    const purge = this.#db.transaction(() => {
+      const rows = this.#db
+        .query<ToolExecutionRow, [string, string, number]>(`
+          SELECT tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
+                 lease_token, lease_until, expires_at, updated_at
+          FROM tool_executions WHERE tenant_id = ? AND expires_at <= ? ORDER BY expires_at LIMIT ?
+        `)
+        .all(tenantId, now, limit);
+      const deleted: string[] = [];
+      for (const row of rows) {
+        const result = this.#db
+          .query(`
+            DELETE FROM tool_executions
+            WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND expires_at <= ?
+          `)
+          .run(row.tenant_id, row.bot_id, row.execution_key, now);
+        if (result.changes === 1 && row.result_ref) deleted.push(row.result_ref);
+      }
+      return deleted;
+    });
+    return purge.immediate();
+  }
+
+  async checkpointWorkflowExecution(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly skillId: string;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly expectedVersion: number;
+    readonly stateRef: string;
+    readonly nextStep: number;
+    readonly now: string;
+    readonly leaseUntil: string;
+    readonly expiresAt: string;
+  }): Promise<boolean> {
+    const result = this.#db
+      .query(`
+        UPDATE workflow_executions
+        SET state_ref = ?, next_step = ?, version = version + 1, lease_until = ?, expires_at = ?, updated_at = ?
+        WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ?
+          AND status = 'running' AND lease_token = ? AND version = ?
+      `)
+      .run(
+        input.stateRef,
+        input.nextStep,
+        input.leaseUntil,
+        input.expiresAt,
+        input.now,
+        input.tenantId,
+        input.botId,
+        input.skillId,
+        input.executionKey,
+        input.leaseToken,
+        input.expectedVersion,
+      );
+    return result.changes === 1;
+  }
+
+  async completeWorkflowExecution(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly skillId: string;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly expectedVersion: number;
+    readonly stateRef: string;
+    readonly nextStep: number;
+    readonly now: string;
+    readonly expiresAt: string;
+  }): Promise<boolean> {
+    const result = this.#db
+      .query(`
+        UPDATE workflow_executions
+        SET state_ref = ?, next_step = ?, status = 'succeeded', lease_token = NULL,
+            lease_until = ?, expires_at = ?, updated_at = ?, version = version + 1
+        WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ?
+          AND status = 'running' AND lease_token = ? AND version = ?
+      `)
+      .run(
+        input.stateRef,
+        input.nextStep,
+        input.now,
+        input.expiresAt,
+        input.now,
+        input.tenantId,
+        input.botId,
+        input.skillId,
+        input.executionKey,
+        input.leaseToken,
+        input.expectedVersion,
+      );
+    return result.changes === 1;
+  }
+
+  async releaseWorkflowExecution(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly skillId: string;
+    readonly executionKey: string;
+    readonly leaseToken: string;
+    readonly now: string;
+  }): Promise<void> {
+    this.#db
+      .query(`
+        UPDATE workflow_executions SET lease_until = ?, updated_at = ?
+        WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ?
+          AND status = 'running' AND lease_token = ?
+      `)
+      .run(input.now, input.now, input.tenantId, input.botId, input.skillId, input.executionKey, input.leaseToken);
+  }
+
+  async purgeWorkflowExecutions(tenantId: TenantId, now: string, limit: number): Promise<readonly string[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
+      throw new AppError("VALIDATION_ERROR", "Workflow cleanup page size is invalid.", 400);
+    }
+    const purge = this.#db.transaction(() => {
+      const rows = this.#db
+        .query<WorkflowExecutionRow, [string, string, number]>(`
+          SELECT tenant_id, bot_id, skill_id, execution_key, state_ref, next_step, version, status,
+                 lease_token, lease_until, expires_at, updated_at
+          FROM workflow_executions WHERE tenant_id = ? AND expires_at <= ? ORDER BY expires_at LIMIT ?
+        `)
+        .all(tenantId, now, limit);
+      const deleted: string[] = [];
+      for (const row of rows) {
+        const result = this.#db
+          .query(`
+            DELETE FROM workflow_executions
+            WHERE tenant_id = ? AND bot_id = ? AND skill_id = ? AND execution_key = ? AND expires_at <= ?
+          `)
+          .run(row.tenant_id, row.bot_id, row.skill_id, row.execution_key, now);
+        if (result.changes === 1) deleted.push(row.state_ref);
+      }
+      return deleted;
+    });
+    return purge.immediate();
   }
 
   async createApiToken(record: ApiTokenRecord): Promise<void> {
@@ -1888,8 +4051,71 @@ function mapBot(row: BotRow): BotDefinition {
   };
 }
 
+function mapPublicListing(row: PublicListingRow): PublicBotListing {
+  return {
+    botId: row.bot_id as BotId,
+    slug: row.slug,
+    title: row.title,
+    summary: row.summary,
+    listedAt: row.listed_at,
+    dailyUsageLimit: row.daily_usage_limit,
+    rateLimitPerMinute: row.rate_limit_per_minute,
+  };
+}
+
+function mapAccessGrant(row: AccessGrantRow): BotAccessGrant {
+  return {
+    id: row.id,
+    botId: row.bot_id as BotId,
+    ...(row.user_id === null ? {} : { userId: row.user_id as UserId }),
+    invitationAvailable: row.invitation_token_hash !== null,
+    accessLevel: row.access_level,
+    status: row.status,
+    ...(row.usage_limit === null ? {} : { dailyUsageLimit: row.usage_limit }),
+    ...(row.rate_limit_per_minute === null ? {} : { rateLimitPerMinute: row.rate_limit_per_minute }),
+    ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
+    createdAt: row.created_at,
+  };
+}
+
+function mapTenantMember(row: TenantMemberRow): TenantMember {
+  return {
+    userId: row.user_id as UserId,
+    role: row.role,
+    status: row.status,
+    createdAt: row.created_at,
+    ownedBotCount: row.owned_bot_count,
+  };
+}
+
+function mapAuditLog(row: AuditLogRow): AuditLogEvent {
+  const metadata = parseJson<unknown>(row.metadata_json, "audit metadata");
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new AppError("INTERNAL_ERROR", "Stored audit metadata is invalid.", 500);
+  }
+  return {
+    id: row.id,
+    action: row.action,
+    resourceType: row.resource_type,
+    resourceId: row.resource_id,
+    metadata: metadata as Record<string, unknown>,
+    createdAt: row.created_at,
+  };
+}
+
+function validateAccessLimits(dailyUsageLimit: number, rateLimitPerMinute: number): void {
+  if (!Number.isSafeInteger(dailyUsageLimit) || dailyUsageLimit < 1 || dailyUsageLimit > 10_000) {
+    throw new AppError("VALIDATION_ERROR", "Daily usage limit must be between 1 and 10000.", 400);
+  }
+  if (!Number.isSafeInteger(rateLimitPerMinute) || rateLimitPerMinute < 1 || rateLimitPerMinute > 600) {
+    throw new AppError("VALIDATION_ERROR", "Rate limit must be between 1 and 600 requests per minute.", 400);
+  }
+}
+
 function configurationFromBot(bot: BotDefinition): Record<string, unknown> {
   return {
+    name: bot.name,
+    description: bot.description,
     systemPrompt: bot.systemPrompt,
     model: bot.model,
     ...(bot.purpose !== undefined ? { purpose: bot.purpose } : {}),
@@ -1917,6 +4143,30 @@ function mapMessage(row: ConversationRow): ConversationMessage {
   };
 }
 
+function mapStoredMessage(row: ConversationHistoryRow): StoredConversationMessage {
+  return {
+    ...mapMessage(row),
+    id: row.id,
+    sequence: row.sequence,
+    createdAt: row.created_at,
+  };
+}
+
+function mapBotMemory(row: MemoryRow): StoredBotMemoryRecord {
+  const value = parseJson<unknown>(row.value_json, "bot memory");
+  if (typeof value !== "string") throw new AppError("INTERNAL_ERROR", "Stored bot memory is invalid.", 500);
+  return {
+    id: row.id,
+    botId: row.bot_id as BotId,
+    key: row.memory_key,
+    value,
+    encryptedValue: row.encrypted_value === 1,
+    ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
 function mapSession(row: SessionRow): CreationSession {
   return {
     id: row.id,
@@ -1928,6 +4178,23 @@ function mapSession(row: SessionRow): CreationSession {
     ...(row.bot_id ? { botId: row.bot_id as BotId } : {}),
     revision: row.revision,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapWorkflowExecution(row: WorkflowExecutionRow): WorkflowExecution {
+  return {
+    tenantId: row.tenant_id as TenantId,
+    botId: row.bot_id as BotId,
+    skillId: row.skill_id,
+    executionKey: row.execution_key,
+    stateRef: row.state_ref,
+    nextStep: row.next_step,
+    version: row.version,
+    status: row.status,
+    ...(row.lease_token === null ? {} : { leaseToken: row.lease_token }),
+    leaseUntil: row.lease_until,
+    expiresAt: row.expires_at,
     updatedAt: row.updated_at,
   };
 }
@@ -2067,6 +4334,27 @@ function validateTelegramUserId(value: number): void {
   }
 }
 
+function validateMasterUpdateId(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new AppError("VALIDATION_ERROR", "Master bot update ID is invalid.", 400);
+  }
+}
+
+function parseMasterBotReply(value: string | null): MasterBotReply {
+  if (!value) throw new AppError("INTERNAL_ERROR", "Stored master bot reply is missing.", 500);
+  const reply = parseJson<unknown>(value, "master bot reply");
+  if (
+    !reply ||
+    typeof reply !== "object" ||
+    Array.isArray(reply) ||
+    !Number.isSafeInteger((reply as Record<string, unknown>).chat_id) ||
+    typeof (reply as Record<string, unknown>).text !== "string"
+  ) {
+    throw new AppError("INTERNAL_ERROR", "Stored master bot reply is invalid.", 500);
+  }
+  return reply as MasterBotReply;
+}
+
 function validateTelegramUserIds(values: readonly number[]): void {
   if (values.length > 100 || new Set(values).size !== values.length) {
     throw new AppError("VALIDATION_ERROR", "Telegram allowlist must contain up to 100 unique user IDs.", 400);
@@ -2094,6 +4382,50 @@ function parseScopes(scopesJson: string): readonly string[] {
     throw new AppError("INTERNAL_ERROR", "API token scopes are corrupted.", 500);
   }
   return scopes;
+}
+
+function validateTelegramAttachmentRefs(
+  value: unknown,
+): readonly { readonly kind: "image"; readonly secretRef: string }[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > 4 ||
+    value.some(
+      (item) =>
+        !item ||
+        typeof item !== "object" ||
+        Array.isArray(item) ||
+        (item as Record<string, unknown>).kind !== "image" ||
+        typeof (item as Record<string, unknown>).secretRef !== "string" ||
+        !/^secret_[a-f0-9]{32}$/.test((item as Record<string, unknown>).secretRef as string),
+    )
+  ) {
+    throw new AppError("VALIDATION_ERROR", "Telegram response attachments are invalid.", 400);
+  }
+  return value as readonly { readonly kind: "image"; readonly secretRef: string }[];
+}
+
+function parseTelegramAttachmentRefs(value: string): readonly { readonly kind: "image"; readonly secretRef: string }[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (cause) {
+    throw new AppError("INTERNAL_ERROR", "Stored Telegram attachments are corrupted.", 500, { cause });
+  }
+  if (!Array.isArray(parsed)) throw new AppError("INTERNAL_ERROR", "Stored Telegram attachments are corrupted.", 500);
+  return validateTelegramAttachmentRefs(parsed);
+}
+
+function mapSecretRow(row: SecretRow): EncryptedSecretRecord {
+  return {
+    tenantId: row.tenant_id as TenantId,
+    reference: row.reference,
+    keyId: row.key_id,
+    nonce: row.nonce,
+    ciphertext: row.ciphertext,
+    version: row.envelope_version,
+    createdAt: row.created_at,
+  };
 }
 
 function parseJson<T>(value: string, label: string): T {

@@ -1,7 +1,8 @@
-import { requireApiScope } from "./api-auth.js";
+import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
-import { validateSkillInstallation } from "./skill-data.js";
+import { validateSkillCatalogPublication, validateSkillInstallation } from "./skill-data.js";
+import { validateSkillDefinitionForPublication } from "./skill-engine.js";
 import type { BotRepository, SecretStore, SkillRepository } from "./ports.js";
 import type { BotId, InstalledSkill, SkillDefinition } from "./types.js";
 
@@ -26,10 +27,21 @@ export function createSkillsApiHandler(
     try {
       const principal = await authenticator.authenticate(request);
       if (catalogRoute) {
-        requireApiScope(principal, "bots:read");
-        if (request.method !== "GET") return methodNotAllowed("GET");
+        if (request.method === "GET") {
+          await requireApiScope(principal, "bots:read");
+          const catalog = await skills.listCatalog(principal.tenantId);
+          return Response.json(catalog.map(skillSummary), { headers: { "cache-control": "no-store" } });
+        }
+        if (request.method !== "POST") return methodNotAllowed("GET, POST");
+        await requireApiScope(principal, "skills:publish");
+        const definition = validateSkillCatalogPublication(await readJsonBody(request));
         const catalog = await skills.listCatalog(principal.tenantId);
-        return Response.json(catalog.map(skillSummary), { headers: { "cache-control": "no-store" } });
+        validateSkillDefinitionForPublication({ ...definition, tenantId: principal.tenantId, enabled: true }, catalog);
+        await skills.publishCatalogSkill({ tenantId: principal.tenantId, definition });
+        return Response.json(
+          { skill: skillSummary({ ...definition, tenantId: principal.tenantId, enabled: true }) },
+          { status: 201, headers: { "cache-control": "no-store" } },
+        );
       }
 
       const botId = (botSkills?.[1] ?? botSkill?.[1]) as BotId | undefined;
@@ -39,12 +51,12 @@ export function createSkillsApiHandler(
 
       if (botSkills) {
         if (request.method === "GET") {
-          requireApiScope(principal, "bots:read");
+          await requireApiScope(principal, "bots:read");
           const installed = await skills.listInstalled(principal.tenantId, botId);
           return Response.json(installed.map(installedSummary), { headers: { "cache-control": "no-store" } });
         }
         if (request.method !== "POST") return methodNotAllowed("GET, POST");
-        requireApiScope(principal, "bots:write");
+        await requireApiScope(principal, "bots:write");
         const body = await readJsonBody(request);
         if (
           typeof body.skillId !== "string" ||
@@ -84,7 +96,7 @@ export function createSkillsApiHandler(
 
       const skillId = botSkill?.[2];
       if (!skillId) return undefined;
-      requireApiScope(principal, "bots:write");
+      await requireApiScope(principal, "bots:write");
       if (request.method === "DELETE") {
         await skills.uninstall({ tenantId: principal.tenantId, botId, skillId });
         return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
@@ -98,6 +110,7 @@ export function createSkillsApiHandler(
       return Response.json({ skillId, enabled: body.enabled }, { headers: { "cache-control": "no-store" } });
     } catch (cause) {
       if (cause instanceof AppError) {
+        await recordApiAuthorizationDenial(request, cause);
         return Response.json(
           { error: cause.code, message: cause.message },
           {
@@ -136,7 +149,7 @@ function skillSummary(skill: SkillDefinition) {
 function installedSummary(skill: InstalledSkill) {
   return {
     ...skillSummary(skill.definition),
-    enabled: skill.enabled,
+    enabled: skill.enabled && skill.definition.enabled,
     grantedPermissions: skill.grantedPermissions,
     hasCredential: typeof skill.configuration.credentialRef === "string",
     installedBy: skill.installedBy,

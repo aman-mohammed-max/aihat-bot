@@ -1,8 +1,9 @@
 import { AppError } from "./errors.js";
-import type { AgentRequest, AgentResponse, ConversationMessage, ModelToolCall } from "./types.js";
+import { validateStructuredOutputSchema } from "./structured-output.js";
+import type { AgentImageAttachment, AgentRequest, AgentResponse, ConversationMessage, ModelToolCall } from "./types.js";
 import type { AgentEngine, ConversationRepository } from "./ports.js";
 import type { ModelProviderRegistry } from "./model.js";
-import type { AgentToolRegistry } from "./tools.js";
+import { getToolAttachments, type AgentToolRegistry, type ToolContext } from "./tools.js";
 
 export interface AgentOrchestratorOptions {
   readonly providers: ModelProviderRegistry;
@@ -28,20 +29,48 @@ export class AgentOrchestrator implements AgentEngine {
     }
   }
 
-  async respond(request: AgentRequest): Promise<AgentResponse> {
-    if (request.messages.length === 0 || request.messages.some((message) => message.role !== "user")) {
+  async respond(
+    request: AgentRequest,
+    options?: { readonly onTextDelta?: (delta: string) => void },
+  ): Promise<AgentResponse> {
+    if (
+      request.messages.length === 0 ||
+      request.messages.some(
+        (message) =>
+          message.role !== "user" ||
+          (message.images !== undefined &&
+            (message.images.length < 1 ||
+              message.images.length > 4 ||
+              message.images.some((image) => !isValidImage(image.dataUrl)))),
+      )
+    ) {
       throw new AppError("VALIDATION_ERROR", "An agent turn must contain one or more new user messages only.", 400);
     }
     const provider = this.#providers.get(request.bot.model.providerId);
-    const context = {
+    const context: ToolContext = {
       tenantId: request.bot.tenantId,
       botId: request.bot.id,
       actorId: request.actorId,
+      ...(request.signal ? { signal: request.signal } : {}),
       ...(request.actorContext ?? {}),
     };
+    const executionId = request.executionId ?? crypto.randomUUID();
     const availableTools = await this.#tools.available(context);
     const skillInstructions = (await this.#tools.promptInstructions?.(context)) ?? [];
     const capabilities = provider.capabilities(request.bot.model);
+    if (options?.onTextDelta && !capabilities.streaming) {
+      throw new AppError("UNSUPPORTED_CAPABILITY", "Streaming is not verified for this model endpoint.", 501);
+    }
+    if (request.messages.some((message) => message.images?.length) && !capabilities.imageInput) {
+      throw new AppError("UNSUPPORTED_CAPABILITY", "The configured model does not support image input.", 501);
+    }
+    const responseSchema = request.responseSchema ? validateStructuredOutputSchema(request.responseSchema) : undefined;
+    if (responseSchema && options?.onTextDelta) {
+      throw new AppError("UNSUPPORTED_CAPABILITY", "Structured output is not supported for streaming requests.", 501);
+    }
+    if (responseSchema && !capabilities.structuredOutput) {
+      throw new AppError("UNSUPPORTED_CAPABILITY", "Structured output is not verified for this model endpoint.", 501);
+    }
     const advertisedTools = capabilities.toolCalling ? availableTools : [];
     const history = await this.#conversations.load(request.bot.tenantId, request.conversationId, 100);
     if (history.some((message) => message.role === "system")) {
@@ -65,10 +94,11 @@ export class AgentOrchestrator implements AgentEngine {
       ...history,
       ...request.messages,
     ];
-    const committedTurn: ConversationMessage[] = [...request.messages];
+    const committedTurn: ConversationMessage[] = request.messages.map(({ images: _images, ...message }) => message);
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let hasUsage = false;
+    const attachments: AgentImageAttachment[] = [];
 
     for (let round = 0; round <= this.#maxToolRounds; round += 1) {
       const turn = await provider.complete({
@@ -76,6 +106,9 @@ export class AgentOrchestrator implements AgentEngine {
         config: request.bot.model,
         messages,
         ...(advertisedTools.length ? { tools: advertisedTools } : {}),
+        ...(responseSchema ? { responseSchema } : {}),
+        ...(request.signal ? { signal: request.signal } : {}),
+        ...(options?.onTextDelta ? { onTextDelta: options.onTextDelta } : {}),
       });
       if (turn.usage) {
         hasUsage = true;
@@ -89,6 +122,8 @@ export class AgentOrchestrator implements AgentEngine {
         await this.#conversations.append(request.bot.tenantId, request.conversationId, committedTurn);
         return {
           message: turn.message,
+          ...(attachments.length ? { attachments } : {}),
+          ...(turn.structuredOutput === undefined ? {} : { structuredOutput: turn.structuredOutput }),
           ...(hasUsage ? { usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens } } : {}),
         };
       }
@@ -103,10 +138,20 @@ export class AgentOrchestrator implements AgentEngine {
       const assistantToolMessage = { ...turn.message, toolCalls: calls };
       messages.push(assistantToolMessage);
       committedTurn.push(assistantToolMessage);
-      for (const call of calls) {
+      for (const [callIndex, call] of calls.entries()) {
         let result: unknown;
         try {
-          result = await this.#tools.execute(context, call.name, call.arguments);
+          result = await this.#tools.execute(
+            {
+              ...context,
+              executionKey: await toolExecutionKey(request, executionId, round, callIndex),
+            },
+            call.name,
+            call.arguments,
+          );
+          for (const attachment of getToolAttachments(result)) {
+            if (attachments.length < 4) attachments.push(attachment);
+          }
         } catch (error) {
           // Do not send raw tool/provider errors back to the model; they may contain secrets.
           result = { error: error instanceof AppError ? error.code : "TOOL_FAILED" };
@@ -119,6 +164,32 @@ export class AgentOrchestrator implements AgentEngine {
 
     throw new AppError("INTERNAL_ERROR", "Agent orchestration terminated unexpectedly.", 500);
   }
+}
+
+async function toolExecutionKey(
+  request: AgentRequest,
+  executionId: string,
+  round: number,
+  callIndex: number,
+): Promise<string> {
+  const material = JSON.stringify({
+    tenantId: request.bot.tenantId,
+    botId: request.bot.id,
+    actorId: request.actorId,
+    executionId,
+    round,
+    callIndex,
+  });
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(material)));
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function isValidImage(dataUrl: string): boolean {
+  return (
+    typeof dataUrl === "string" &&
+    dataUrl.length <= 12 * 1024 * 1024 &&
+    /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(dataUrl)
+  );
 }
 
 function validateCalls(calls: readonly ModelToolCall[], allowed: ReadonlySet<string>): readonly ModelToolCall[] {

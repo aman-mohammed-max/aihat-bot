@@ -21,6 +21,6 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!!apps/cloudflare-runtime/worker-configuration.d.ts"]
+    "includes": ["**", "!!apps/cloudflare-runtime/worker-configuration.d.ts", "!!apps/dashboard/dist/**"]
   }
 }

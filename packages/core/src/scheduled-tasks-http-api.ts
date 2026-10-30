@@ -1,4 +1,4 @@
-import { requireApiScope } from "./api-auth.js";
+import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
 import type { ScheduledTaskService } from "./scheduled-tasks.js";
@@ -20,13 +20,13 @@ export function createScheduledTasksApiHandler(
       const principal = await authenticator.authenticate(request);
       const botId = (collection?.[1] ?? taskMatch?.[1]) as BotId;
       if (collection && request.method === "GET") {
-        requireApiScope(principal, "bots:read");
+        await requireApiScope(principal, "bots:read");
         const tasks = await service.list({ tenantId: principal.tenantId, ownerId: principal.ownerId, botId });
         return Response.json({ tasks: tasks.map(serializeTask) }, noStore);
       }
       if (collection && request.method === "POST") {
-        requireApiScope(principal, "bots:write");
-        requireApiScope(principal, "agent:run");
+        await requireApiScope(principal, "bots:write");
+        await requireApiScope(principal, "agent:run");
         const body = await readJsonBody(request);
         if (
           Object.keys(body).length !== 4 ||
@@ -49,7 +49,7 @@ export function createScheduledTasksApiHandler(
         return Response.json({ task: serializeTask(task) }, { ...noStore, status: 201 });
       }
       if (taskMatch && request.method === "GET") {
-        requireApiScope(principal, "bots:read");
+        await requireApiScope(principal, "bots:read");
         const task = await service.get({
           tenantId: principal.tenantId,
           ownerId: principal.ownerId,
@@ -59,7 +59,7 @@ export function createScheduledTasksApiHandler(
         return Response.json({ task: serializeTask(task) }, noStore);
       }
       if (taskMatch && request.method === "PATCH") {
-        requireApiScope(principal, "bots:write");
+        await requireApiScope(principal, "bots:write");
         const existing = await service.get({
           tenantId: principal.tenantId,
           ownerId: principal.ownerId,
@@ -79,7 +79,7 @@ export function createScheduledTasksApiHandler(
         return Response.json({ task: serializeTask(task) }, noStore);
       }
       if (taskMatch && request.method === "DELETE") {
-        requireApiScope(principal, "bots:write");
+        await requireApiScope(principal, "bots:write");
         const existing = await service.get({
           tenantId: principal.tenantId,
           ownerId: principal.ownerId,
@@ -97,6 +97,7 @@ export function createScheduledTasksApiHandler(
       return methodNotAllowed(collection ? "GET, POST" : "GET, PATCH, DELETE");
     } catch (cause) {
       if (cause instanceof AppError) {
+        await recordApiAuthorizationDenial(request, cause);
         return Response.json(
           { error: cause.code, message: cause.message },
           {

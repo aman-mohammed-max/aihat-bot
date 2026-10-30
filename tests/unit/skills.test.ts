@@ -2,10 +2,17 @@ import { describe, expect, test } from "bun:test";
 import {
   ApiTokenAuthenticator,
   createApiTokenMaterial,
+  createGlobalSkillCatalogAdminHandler,
   createSkillsApiHandler,
 } from "../../packages/core/src/index.js";
 import { SkillEngine } from "../../packages/core/src/skill-engine.js";
-import type { SecretStore, SkillRateLimiter, SkillRepository } from "../../packages/core/src/ports.js";
+import type {
+  SecretStore,
+  SecretWriter,
+  SkillRateLimiter,
+  SkillRepository,
+  WorkflowExecutionRepository,
+} from "../../packages/core/src/ports.js";
 import type {
   BotDefinition,
   BotId,
@@ -14,6 +21,7 @@ import type {
   TelegramDeploymentId,
   TenantId,
   UserId,
+  WorkflowExecution,
 } from "../../packages/core/src/types.js";
 
 const tenantId = "tenant-skills" as TenantId;
@@ -67,6 +75,10 @@ function skillRepository(installed: readonly InstalledSkill[]): SkillRepository 
   return {
     listCatalog: async () => [definition],
     getCatalogSkill: async () => definition,
+    listGlobalCatalog: async () => [],
+    publishGlobalCatalogSkill: async () => {},
+    setGlobalCatalogSkillEnabled: async () => {},
+    publishCatalogSkill: async () => {},
     listInstalled: async () => installed,
     install: async () => {},
     setEnabled: async () => {},
@@ -81,8 +93,220 @@ function rateLimiter(consume: SkillRateLimiter["consume"] = async () => true): S
 const secrets: SecretStore = { resolve: async () => "test-secret" };
 
 describe("skill engine", () => {
+  test("runs forward-only workflows with opaque checkpoints, child retries, and completed-call replay", async () => {
+    const workflowDefinition: SkillDefinition = {
+      ...definition,
+      id: "weather.workflow",
+      name: "Weather workflow",
+      executionType: "workflow",
+      inputSchema: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+        additionalProperties: false,
+      },
+      outputSchema: {
+        type: "object",
+        properties: { forecast: { type: "string" }, detail: { type: "string" } },
+        required: ["forecast", "detail"],
+        additionalProperties: false,
+      },
+      configuration: {
+        workflow: {
+          steps: [
+            {
+              id: "lookup",
+              type: "skill",
+              skillId: "weather.lookup",
+              input: { city: { $from: "input.city" } },
+              retry: { maxAttempts: 2 },
+            },
+            {
+              id: "branch",
+              type: "condition",
+              path: "steps.lookup.output.forecast",
+              operator: "equals",
+              value: "sunny",
+              ifTrue: "details",
+              ifFalse: "end",
+            },
+            {
+              id: "details",
+              type: "skill",
+              skillId: "weather.details",
+              input: {
+                city: { $from: "input.city" },
+                forecast: { $from: "steps.lookup.output.forecast" },
+              },
+            },
+          ],
+          output: {
+            forecast: { $from: "steps.lookup.output.forecast" },
+            detail: { $from: "steps.details.output.note" },
+          },
+        },
+      },
+      retryPolicy: { maxAttempts: 1, backoffMs: 0, idempotent: true, retryableStatusCodes: [] },
+    };
+    const lookup = installation({
+      definition: {
+        ...definition,
+        configuration: {
+          http: {
+            endpoint: "https://weather.example.test/lookup",
+            method: "POST",
+            idempotencyKeyHeader: "X-Idempotency-Key",
+          },
+        },
+      },
+    });
+    const detailsDefinition: SkillDefinition = {
+      ...definition,
+      id: "weather.details",
+      name: "Weather details",
+      executionType: "native",
+      inputSchema: {
+        type: "object",
+        properties: { city: { type: "string" }, forecast: { type: "string" } },
+        required: ["city", "forecast"],
+        additionalProperties: false,
+      },
+      outputSchema: { type: "object", properties: { note: { type: "string" } }, required: ["note"] },
+      retryPolicy: { maxAttempts: 1, backoffMs: 0, idempotent: true, retryableStatusCodes: [] },
+    };
+    const installed = [
+      installation({ definition: workflowDefinition }),
+      lookup,
+      installation({ definition: detailsDefinition }),
+    ];
+    const stateValues = new Map<string, string>();
+    let secretSequence = 0;
+    const secretWriter: SecretWriter & SecretStore = {
+      resolve: async (_tenantId, reference) => {
+        const value = stateValues.get(reference);
+        if (!value) throw new Error("missing encrypted workflow state");
+        return value;
+      },
+      put: async (_tenantId, plaintext) => {
+        const reference = `secret_${String(++secretSequence).padStart(32, "0")}`;
+        stateValues.set(reference, plaintext);
+        return reference;
+      },
+      delete: async (_tenantId, reference) => {
+        stateValues.delete(reference);
+      },
+    };
+    let stored: WorkflowExecution | undefined;
+    const workflowExecutions: WorkflowExecutionRepository = {
+      acquire: async (input) => {
+        if (stored?.status === "succeeded") return { state: "completed", execution: stored };
+        if (stored && stored.leaseUntil > input.now) return { state: "busy" };
+        if (stored) {
+          stored = {
+            ...stored,
+            leaseToken: input.leaseToken,
+            leaseUntil: input.leaseUntil,
+            expiresAt: input.expiresAt,
+            updatedAt: input.now,
+            version: stored.version + 1,
+          };
+        } else {
+          stored = {
+            tenantId: input.tenantId,
+            botId: input.botId,
+            skillId: input.skillId,
+            executionKey: input.executionKey,
+            stateRef: input.initialStateRef,
+            nextStep: 0,
+            version: 1,
+            status: "running",
+            leaseToken: input.leaseToken,
+            leaseUntil: input.leaseUntil,
+            expiresAt: input.expiresAt,
+            updatedAt: input.now,
+          };
+        }
+        return { state: "acquired", execution: stored };
+      },
+      checkpoint: async (input) => {
+        if (!stored || stored.version !== input.expectedVersion || stored.leaseToken !== input.leaseToken) return false;
+        stored = {
+          ...stored,
+          stateRef: input.stateRef,
+          nextStep: input.nextStep,
+          version: stored.version + 1,
+          leaseUntil: input.leaseUntil,
+          expiresAt: input.expiresAt,
+          updatedAt: input.now,
+        };
+        return true;
+      },
+      complete: async (input) => {
+        if (!stored || stored.version !== input.expectedVersion || stored.leaseToken !== input.leaseToken) return false;
+        const { leaseToken: _leaseToken, ...completed } = stored;
+        stored = {
+          ...completed,
+          stateRef: input.stateRef,
+          nextStep: input.nextStep,
+          version: stored.version + 1,
+          status: "succeeded",
+          leaseUntil: input.now,
+          expiresAt: input.expiresAt,
+          updatedAt: input.now,
+        };
+        return true;
+      },
+      release: async (input) => {
+        if (stored?.leaseToken === input.leaseToken) stored = { ...stored, leaseUntil: input.now };
+      },
+      purgeExpired: async () => [],
+    };
+    let lookupCalls = 0;
+    const idempotencyKeys: string[] = [];
+    let detailCalls = 0;
+    const engine = new SkillEngine({
+      skills: skillRepository(installed),
+      rateLimiter: rateLimiter(),
+      secrets: secretWriter,
+      secretWriter,
+      workflowExecutions,
+      allowedHttpOrigins: new Set(["https://weather.example.test"]),
+      fetch: async (_input, init) => {
+        lookupCalls += 1;
+        idempotencyKeys.push(new Headers(init?.headers).get("x-idempotency-key") ?? "");
+        if (lookupCalls === 1) throw new Error("retryable provider interruption");
+        return Response.json({ forecast: "sunny" });
+      },
+      nativeHandlers: new Map([
+        [
+          detailsDefinition.id,
+          async (_toolContext, childInput) => {
+            detailCalls += 1;
+            expect(childInput).toEqual({ city: "Oslo", forecast: "sunny" });
+            return { note: "Clear skies" };
+          },
+        ],
+      ]),
+    });
+    const [workflowTool] = await engine.available(context);
+    if (!workflowTool) throw new Error("Expected an available workflow tool.");
+    const replayContext = { ...context, executionKey: "d".repeat(64) };
+    const result = await engine.execute(replayContext, workflowTool.name, { city: "Oslo" });
+    expect(result).toEqual({ forecast: "sunny", detail: "Clear skies" });
+    expect(lookupCalls).toBe(2);
+    expect(new Set(idempotencyKeys).size).toBe(1);
+    expect(detailCalls).toBe(1);
+    expect(stored?.status).toBe("succeeded");
+    expect(JSON.stringify(stored)).not.toContain("Oslo");
+    expect(JSON.stringify(stored)).not.toContain("sunny");
+    await expect(engine.execute(replayContext, workflowTool.name, { city: "Oslo" })).resolves.toEqual(result);
+    expect(lookupCalls).toBe(2);
+    expect(detailCalls).toBe(1);
+  });
+
   test("requires a per-user grant before exposing or executing a Telegram skill", async () => {
     let allowed = false;
+    const permissionOutcomes: string[] = [];
     const deploymentId = "dep_123e4567-e89b-12d3-a456-426614174000" as TelegramDeploymentId;
     const engine = new SkillEngine({
       skills: skillRepository([installation()]),
@@ -95,6 +319,11 @@ describe("skill engine", () => {
           input.deploymentId === deploymentId &&
           input.telegramUserId === 789 &&
           input.toolRef === "skill:weather.lookup",
+      },
+      authorizationAudit: {
+        recordPermissionDecision: async (input) => {
+          permissionOutcomes.push(input.outcome);
+        },
       },
       fetch: async () => Response.json({ forecast: "sunny" }),
     });
@@ -110,15 +339,18 @@ describe("skill engine", () => {
     await expect(engine.execute(telegramContext, apiTool.name, { city: "Oslo" })).rejects.toMatchObject({
       code: "FORBIDDEN",
     });
+    expect(permissionOutcomes).toContain("denied");
     allowed = true;
     expect(await engine.available(telegramContext)).toEqual([apiTool]);
     await expect(engine.execute(telegramContext, apiTool.name, { city: "Oslo" })).resolves.toEqual({
       forecast: "sunny",
     });
+    expect(permissionOutcomes).toContain("allowed");
     allowed = false;
     await expect(engine.execute(telegramContext, apiTool.name, { city: "Oslo" })).rejects.toMatchObject({
       code: "FORBIDDEN",
     });
+    expect(permissionOutcomes.at(-1)).toBe("denied");
   });
 
   test("advertises only enabled, fully granted skills on deployment-approved origins", async () => {
@@ -283,6 +515,8 @@ describe("skill management API", () => {
         findActive: async () => principal,
         create: async () => {},
         revoke: async () => {},
+        consumeApiRequest: async () => true,
+        recordApiMutation: async () => {},
       }),
       { get: async () => bot, saveDraft: async () => {} },
       {
@@ -334,5 +568,240 @@ describe("skill management API", () => {
       }),
     );
     expect(plaintextRejected?.status).toBe(400);
+  });
+
+  test("publishes validated skills only with the dedicated scope and binds them to the active tenant", async () => {
+    const token = await createApiTokenMaterial();
+    let scopes = ["bots:read"];
+    const principal = {
+      tenantId,
+      ownerId,
+      tokenId: "token_publish",
+      get scopes() {
+        return scopes;
+      },
+    };
+    const published: unknown[] = [];
+    const baseSkills = skillRepository([]);
+    const handler = createSkillsApiHandler(
+      new ApiTokenAuthenticator({
+        findActive: async () => principal,
+        create: async () => {},
+        revoke: async () => {},
+        consumeApiRequest: async () => true,
+        recordApiMutation: async () => {},
+      }),
+      { get: async () => undefined, saveDraft: async () => {} },
+      {
+        ...baseSkills,
+        listCatalog: async () => [],
+        publishCatalogSkill: async (input) => {
+          published.push(input);
+        },
+      },
+      secrets,
+    );
+    const endpoint = "https://factory.example.test/v1/skills";
+    const definition = {
+      id: "workspace.instructions.v1",
+      name: "Workspace instructions",
+      version: "1.0.0",
+      author: "Workspace team",
+      category: "productivity",
+      description: "Adds owner-authored instructions to a bot.",
+      executionType: "prompt",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      outputSchema: { type: "object", properties: {}, additionalProperties: false },
+      requiredPermissions: [],
+      configuration: { instructions: "Keep answers concise." },
+    };
+    const headers = { authorization: `Bearer ${token.token}`, "content-type": "application/json" };
+    const denied = await handler(new Request(endpoint, { method: "POST", headers, body: JSON.stringify(definition) }));
+    expect(denied?.status).toBe(403);
+    expect(published).toHaveLength(0);
+
+    scopes = ["skills:publish"];
+    const accepted = await handler(
+      new Request(endpoint, { method: "POST", headers, body: JSON.stringify(definition) }),
+    );
+    expect(accepted?.status).toBe(201);
+    expect(published).toMatchObject([{ tenantId, definition: { id: definition.id } }]);
+    const acceptedBody = (await accepted?.json()) as { skill: Record<string, unknown> };
+    expect(acceptedBody.skill).toMatchObject({ id: definition.id, enabled: true });
+    expect(acceptedBody.skill).not.toHaveProperty("tenantId");
+
+    const unsupported = await handler(
+      new Request(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...definition, id: "workspace.native.v1", executionType: "native" }),
+      }),
+    );
+    expect(unsupported?.status).toBe(400);
+    expect(published).toHaveLength(1);
+  });
+
+  test("rejects workflow publishing when a child is missing or not idempotent", async () => {
+    const token = await createApiTokenMaterial();
+    const principal = { tenantId, ownerId, tokenId: "token_workflow", scopes: ["skills:publish"] };
+    const baseSkills = skillRepository([]);
+    const handler = createSkillsApiHandler(
+      new ApiTokenAuthenticator({
+        findActive: async () => principal,
+        create: async () => {},
+        revoke: async () => {},
+        consumeApiRequest: async () => true,
+        recordApiMutation: async () => {},
+      }),
+      { get: async () => undefined, saveDraft: async () => {} },
+      { ...baseSkills, listCatalog: async () => [], publishCatalogSkill: async () => {} },
+      secrets,
+    );
+    const definition = {
+      id: "workspace.workflow.v1",
+      name: "Workspace workflow",
+      version: "1.0.0",
+      author: "Workspace team",
+      category: "productivity",
+      description: "Combines existing approved tools.",
+      executionType: "workflow",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      outputSchema: { type: "object", properties: {}, additionalProperties: false },
+      requiredPermissions: [],
+      configuration: { workflow: { steps: [{ id: "first", type: "skill", skillId: "missing.child" }] } },
+    };
+    const response = await handler(
+      new Request("https://factory.example.test/v1/skills", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+        body: JSON.stringify(definition),
+      }),
+    );
+    expect(response?.status).toBe(400);
+  });
+
+  test("reports a globally disabled catalog skill as unavailable even when its bot installation remains enabled", async () => {
+    const token = await createApiTokenMaterial();
+    const principal = { tenantId, ownerId, tokenId: "token_global_disabled", scopes: ["bots:read"] };
+    const disabledDefinition = { ...definition, enabled: false };
+    const bot: BotDefinition = {
+      id: botId,
+      tenantId,
+      ownerId,
+      name: "Bot",
+      description: "Test bot",
+      systemPrompt: "Help.",
+      model: { providerId: "mock", model: "mock" },
+      visibility: "private",
+      status: "draft",
+      version: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const handler = createSkillsApiHandler(
+      new ApiTokenAuthenticator({
+        findActive: async () => principal,
+        create: async () => {},
+        revoke: async () => {},
+        consumeApiRequest: async () => true,
+        recordApiMutation: async () => {},
+      }),
+      { get: async () => bot, saveDraft: async () => {} },
+      skillRepository([installation({ definition: disabledDefinition })]),
+      secrets,
+    );
+    const response = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}/skills`, {
+        headers: { authorization: `Bearer ${token.token}` },
+      }),
+    );
+    expect(response?.status).toBe(200);
+    expect(await response?.json()).toMatchObject([{ id: definition.id, enabled: false }]);
+  });
+
+  test("requires operator authorization to curate the global catalog and supports disabling entries", async () => {
+    const token = "global-catalog-admin-token-".padEnd(48, "g");
+    const definition = {
+      id: "global.instructions.v1",
+      name: "Global instructions",
+      version: "1.0.0",
+      author: "Platform team",
+      category: "productivity",
+      description: "Adds reusable platform-reviewed instructions.",
+      executionType: "prompt",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      outputSchema: { type: "object", properties: {}, additionalProperties: false },
+      requiredPermissions: [],
+      configuration: { instructions: "Use the approved shared guidance." },
+    };
+    const baseSkills = skillRepository([]);
+    let published: SkillDefinition | undefined;
+    let enabled = true;
+    const handler = createGlobalSkillCatalogAdminHandler({
+      authorizationToken: token,
+      skills: {
+        ...baseSkills,
+        listGlobalCatalog: async () => (published ? [{ ...published, enabled }] : []),
+        publishGlobalCatalogSkill: async (input) => {
+          published = { ...input.definition, tenantId: null, enabled: true };
+        },
+        setGlobalCatalogSkillEnabled: async (skillId, value) => {
+          if (!published || published.id !== skillId) throw new Error("missing global skill");
+          enabled = value;
+        },
+      },
+    });
+    const endpoint = "https://factory.example.test/_operator/skills";
+    const denied = await handler(
+      new Request(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${"x".repeat(48)}`, "content-type": "application/json" },
+        body: JSON.stringify(definition),
+      }),
+    );
+    expect(denied?.status).toBe(401);
+    expect(published).toBeUndefined();
+
+    const accepted = await handler(
+      new Request(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(definition),
+      }),
+    );
+    expect(accepted?.status).toBe(201);
+    expect(published).toMatchObject({ id: definition.id, tenantId: null });
+
+    const privateChildWorkflow = {
+      ...definition,
+      id: "global.workflow.v1",
+      name: "Global workflow",
+      executionType: "workflow",
+      configuration: {
+        workflow: { steps: [{ id: "private", type: "skill", skillId: "workspace.private.v1" }] },
+      },
+    };
+    const privateChildRejected = await handler(
+      new Request(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(privateChildWorkflow),
+      }),
+    );
+    expect(privateChildRejected?.status).toBe(400);
+    expect(published?.id).toBe(definition.id);
+
+    const disabled = await handler(
+      new Request(`${endpoint}/${definition.id}`, {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      }),
+    );
+    expect(disabled?.status).toBe(200);
+    expect(await disabled?.json()).toEqual({ skillId: definition.id, enabled: false });
+
+    const catalog = await handler(new Request(endpoint, { headers: { authorization: `Bearer ${token}` } }));
+    expect(await catalog?.json()).toMatchObject([{ id: definition.id, enabled: false }]);
   });
 });

@@ -1,4 +1,4 @@
-import { API_TOKEN_SCOPES, createApiTokenMaterial, requireApiScope } from "./api-auth.js";
+import { recordApiAuthorizationDenial, API_TOKEN_SCOPES, createApiTokenMaterial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator, ApiTokenScope } from "./api-auth.js";
 import { AppError } from "./errors.js";
 import type { ApiTokenRepository } from "./ports.js";
@@ -30,7 +30,7 @@ export function createManagementApiHandler(
         );
       }
 
-      requireApiScope(principal, "tokens:manage");
+      await requireApiScope(principal, "tokens:manage");
       if (isTokenCollection) {
         if (request.method !== "POST") return methodNotAllowed("POST");
         const input = await readTokenRequest(request);
@@ -71,6 +71,7 @@ export function createManagementApiHandler(
       return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
     } catch (cause) {
       if (cause instanceof AppError) {
+        await recordApiAuthorizationDenial(request, cause);
         return Response.json(
           { error: cause.code, message: cause.message },
           {

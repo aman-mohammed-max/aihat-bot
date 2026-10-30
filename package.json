@@ -14,14 +14,19 @@
     "format:check": "biome format packages apps tests package.json tsconfig.json biome.json",
     "lint": "biome lint packages apps tests",
     "test": "bun test",
-    "build:bun": "bun build packages/core/src/index.ts apps/bun-runtime/src/index.ts apps/bun-runtime/src/migrate.ts apps/bun-runtime/src/sqlite-store.ts apps/bun-runtime/src/file-object-store.ts apps/bun-runtime/src/capabilities.ts apps/bun-runtime/src/bootstrap.ts --target=bun --outdir dist",
+    "benchmark": "bun tests/performance/agent-throughput.ts",
+    "build:bun": "bun build packages/core/src/index.ts apps/bun-runtime/src/index.ts apps/bun-runtime/src/migrate.ts apps/bun-runtime/src/sqlite-store.ts apps/bun-runtime/src/file-object-store.ts apps/bun-runtime/src/capabilities.ts apps/bun-runtime/src/bootstrap.ts apps/bun-runtime/src/rotate-secrets.ts --target=bun --outdir dist",
     "build:cloudflare": "bun run --cwd apps/cloudflare-runtime build",
+    "build:dashboard": "bun build apps/dashboard/src/main.ts --target=browser --outdir apps/dashboard/dist/assets && cp apps/dashboard/index.html apps/dashboard/dist/index.html",
     "build": "bun run build:bun && bun run build:cloudflare",
-    "dev:bun": "bun --watch apps/bun-runtime/src/index.ts",
-    "start:bun": "bun apps/bun-runtime/src/index.ts",
+    "dev:bun": "bun run build:dashboard && bun --watch apps/bun-runtime/src/index.ts",
+    "start:bun": "bun run build:dashboard && bun apps/bun-runtime/src/index.ts",
     "migrate:bun": "bun apps/bun-runtime/src/migrate.ts",
+    "rotate-secrets:bun": "bun apps/bun-runtime/src/rotate-secrets.ts",
+    "rotate-secrets:cloudflare": "bun apps/cloudflare-runtime/src/rotate-secrets.ts",
     "bootstrap:bun": "bun apps/bun-runtime/src/bootstrap.ts",
-    "dev:cloudflare": "bun run --cwd apps/cloudflare-runtime dev"
+    "dev:cloudflare": "bun run --cwd apps/cloudflare-runtime dev",
+    "telegram:register-master": "bun apps/bun-runtime/src/register-master-webhook.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",
