@@ -77,6 +77,54 @@ jobs:
           ghcr.io/google/osv-scanner@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0
           scan source --lockfile /src/bun.lock
 
+  secret-scan:
+    name: Scan Git history for secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out full Git history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Scan history with Gitleaks
+        run: >-
+          docker run --rm
+          --volume "${GITHUB_WORKSPACE}:/src:ro"
+          --workdir /src
+          ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git . --config /src/.gitleaks.toml --redact --no-banner
+
+      - name: Test OpenRouter credential detection
+        run: |
+          python3 - "${RUNNER_TEMP}" <<'PY'
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          positive = root / "gitleaks-positive"
+          negative = root / "gitleaks-negative"
+          positive.mkdir()
+          negative.mkdir()
+          (positive / "fixture.txt").write_text("token=sk-or-v1-" + "a" * 64 + "\n")
+          (negative / "fixture.txt").write_text("example=sk-or-v1-placeholder\n")
+          PY
+          if docker run --rm \
+            --volume "${RUNNER_TEMP}/gitleaks-positive:/scan:ro" \
+            --volume "${GITHUB_WORKSPACE}/.gitleaks.toml:/config/gitleaks.toml:ro" \
+            --workdir /tmp \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            dir /scan --config /config/gitleaks.toml --redact --no-banner; then
+            echo "Gitleaks did not detect the OpenRouter key fixture." >&2
+            exit 1
+          fi
+          docker run --rm \
+            --volume "${RUNNER_TEMP}/gitleaks-negative:/scan:ro" \
+            --volume "${GITHUB_WORKSPACE}/.gitleaks.toml:/config/gitleaks.toml:ro" \
+            --workdir /tmp \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            dir /scan --config /config/gitleaks.toml --redact --no-banner >/dev/null
+
   container-image:
     name: Build and scan Bun image
     runs-on: ubuntu-24.04
