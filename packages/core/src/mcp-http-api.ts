@@ -202,6 +202,8 @@ function serverSummary(server: McpServerConnection) {
     name: server.name,
     endpoint: server.endpoint,
     status: server.status,
+    reconnectAttempts: server.reconnectAttempts ?? 0,
+    ...(server.reconnectAfter ? { reconnectAfter: server.reconnectAfter } : {}),
     hasCredential: Boolean(server.credentialRef),
     authenticationMode: server.authenticationMode ?? (server.credentialRef ? "bearer" : "none"),
     createdAt: server.createdAt,

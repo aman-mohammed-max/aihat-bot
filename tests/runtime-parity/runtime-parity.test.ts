@@ -34,6 +34,122 @@ const weatherEndpoint = "https://weather.example.test/lookup";
 const mcpEndpoint = "https://mcp.example.test/mcp";
 
 describe("Bun and Cloudflare runtime repository parity", () => {
+  test("MCP reconnect leases, retry times, and attempt counts persist consistently", async () => {
+    const bunDatabase = openSqliteDatabase(":memory:");
+    const cloudflareDatabase = openSqliteDatabase(":memory:");
+    const bunRepositories = new BunSqliteRepositories(bunDatabase);
+    const cloudflareRepositories = new CloudflareD1Repositories(
+      new SqliteD1(cloudflareDatabase) as unknown as D1Database,
+    );
+    try {
+      seedTenant(bunDatabase);
+      seedTenant(cloudflareDatabase);
+      const repositories = [bunRepositories, cloudflareRepositories];
+      const botIds = await Promise.all(
+        repositories.map((repository) =>
+          repository.createDraft({
+            tenantId,
+            ownerId,
+            idempotencyKey: "mcp-reconnect-parity",
+            answers: creationAnswers(),
+          }),
+        ),
+      );
+      const snapshots = await Promise.all(
+        repositories.map(async (repository, index) => {
+          const botId = botIds[index];
+          if (!botId) throw new Error("MCP parity bot was not created.");
+          const serverId = "mcp_reconnect_parity";
+          await repository.mcp.createServer({
+            id: serverId,
+            tenantId,
+            botId,
+            name: "Reconnect parity server",
+            endpoint: mcpEndpoint,
+            installedBy: ownerId,
+          });
+          const now = "2026-01-01T00:00:00.000Z";
+          const retryAfter = "2026-01-01T00:00:15.000Z";
+          await repository.mcp.setServerStatus({
+            tenantId,
+            botId,
+            serverId,
+            status: "unhealthy",
+            reconnectAfter: retryAfter,
+          });
+          const lease = {
+            tenantId,
+            botId,
+            serverId,
+            now: retryAfter,
+            leaseUntil: "2026-01-01T00:00:20.000Z",
+            leaseToken: "lease-first",
+            maxAttempts: 5,
+          };
+          const firstClaim = await repository.mcp.claimServerReconnect(lease);
+          const competingClaim = await repository.mcp.claimServerReconnect({ ...lease, leaseToken: "lease-competing" });
+          const wrongLeaseRelease = await repository.mcp.failServerReconnect({
+            tenantId,
+            botId,
+            serverId,
+            attempt: 1,
+            leaseToken: "lease-competing",
+            now,
+          });
+          const retryAt = "2026-01-01T00:00:45.000Z";
+          const failedAttemptRelease = await repository.mcp.failServerReconnect({
+            tenantId,
+            botId,
+            serverId,
+            attempt: 1,
+            leaseToken: "lease-first",
+            retryAfter: retryAt,
+            now,
+          });
+          const earlyClaim = await repository.mcp.claimServerReconnect({
+            ...lease,
+            now: "2026-01-01T00:00:44.999Z",
+            leaseToken: "lease-early",
+          });
+          const retryClaim = await repository.mcp.claimServerReconnect({
+            ...lease,
+            now: retryAt,
+            leaseUntil: "2026-01-01T00:00:50.000Z",
+            leaseToken: "lease-second",
+          });
+          await repository.mcp.setServerStatus({ tenantId, botId, serverId, status: "connected" });
+          const server = await repository.mcp.getServer(tenantId, botId, serverId);
+          return {
+            firstClaim,
+            competingClaim,
+            wrongLeaseRelease,
+            failedAttemptRelease,
+            earlyClaim,
+            retryClaim,
+            finalServer: {
+              status: server?.status,
+              reconnectAttempts: server?.reconnectAttempts,
+              reconnectAfter: server?.reconnectAfter,
+            },
+          };
+        }),
+      );
+      expect(snapshots[0]).toEqual(snapshots[1]);
+      expect(snapshots[0]).toEqual({
+        firstClaim: 1,
+        competingClaim: undefined,
+        wrongLeaseRelease: false,
+        failedAttemptRelease: true,
+        earlyClaim: undefined,
+        retryClaim: 2,
+        finalServer: { status: "connected", reconnectAttempts: 0, reconnectAfter: undefined },
+      });
+    } finally {
+      bunDatabase.close();
+      cloudflareDatabase.close();
+    }
+  });
+
   test("keeps a privately listed bot unlisted while allowing explicitly granted users to run it", async () => {
     const bunDatabase = openSqliteDatabase(":memory:");
     const cloudflareDatabase = openSqliteDatabase(":memory:");

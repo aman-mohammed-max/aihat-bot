@@ -133,6 +133,8 @@ export interface McpServer {
   name: string;
   endpoint: string;
   status: "disconnected" | "connected" | "unhealthy" | "disabled";
+  reconnectAttempts: number;
+  reconnectAfter?: string;
   hasCredential: boolean;
   authenticationMode: "none" | "bearer" | "oauth_client_credentials" | "oauth_authorization_code";
   createdAt: string;

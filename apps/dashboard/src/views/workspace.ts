@@ -307,7 +307,14 @@ export function mcpServerCard(server: McpServer, tools: import("../types.js").Mc
         : server.authenticationMode === "bearer"
           ? "Bearer token"
           : "No authentication";
+  const reconnectStatus =
+    server.status !== "unhealthy"
+      ? ""
+      : server.reconnectAttempts >= 5
+        ? "Automatic reconnects exhausted; connect manually."
+        : `Automatic attempt ${Math.min(server.reconnectAttempts + 1, 5)} of 5 runs on a later bot request${server.reconnectAfter ? ` after ${formatDate(server.reconnectAfter)}` : ""}.`;
   return `<article class="server-card"><div class="server-main"><div class="server-symbol">${icon("plug", 19)}</div><div class="server-info"><div class="server-title"><h3>${escapeHtml(server.name)}</h3>${statusPill(server.status)}</div><code class="server-endpoint">${escapeHtml(server.endpoint)}</code><small>${escapeHtml(authLabel)} · ${server.hasCredential ? "encrypted" : "no credential"} · added ${escapeHtml(formatDate(server.createdAt))}</small></div><div class="server-actions">${server.status === "connected" ? button("Discover again", `mcp-connect:${server.id}`, "secondary", "spark") : server.authenticationMode === "oauth_authorization_code" ? button("Connect & discover", `mcp-oauth-start:${server.id}`, "primary", "plug") : button("Connect & discover", `mcp-connect:${server.id}`, "primary", "plug")}${button("Remove", `mcp-delete:${server.id}`, "danger-outline", "trash")}</div></div>
+    ${reconnectStatus ? `<div class="tools-empty">${escapeHtml(reconnectStatus)}</div>` : ""}
     ${tools.length ? `<div class="mcp-tools"><div class="eyebrow">DISCOVERED TOOLS · ${tools.length}</div>${tools.map((tool) => `<div class="mcp-tool-row"><div><b>${escapeHtml(tool.name)}</b><small>${escapeHtml(tool.description || "No description supplied by this MCP server.")}</small></div><span class="scope-tag">${tool.enabled ? "Enabled" : "Disabled"}</span><button class="button button-${tool.enabled ? "secondary" : "primary"} button-small" data-action="toggle-mcp-tool" data-server-id="${escapeHtml(server.id)}" data-tool-name="${escapeHtml(tool.name)}" data-enabled="${tool.enabled ? "false" : "true"}">${tool.enabled ? "Disable" : "Review & enable"}</button></div>`).join("")}</div>` : server.status === "connected" ? `<div class="tools-empty">Tools are not loaded yet. Select “Discover again” to refresh the server catalog.</div>` : ""}</article>`;
 }
 

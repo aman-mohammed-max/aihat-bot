@@ -1027,11 +1027,27 @@ describe("MCP manager", () => {
       }),
     );
     expect(patch?.status).toBe(200);
+    const reconnectAfter = "2026-10-31T00:00:15.000Z";
+    await state.repository.setServerStatus({
+      tenantId,
+      botId,
+      serverId: created.server.id,
+      status: "unhealthy",
+      reconnectAfter,
+    });
     const list = await handler(new Request(collection, { headers: { authorization: `Bearer ${token.token}` } }));
-    const servers = (await list?.json()) as { id: string; status: string; hasCredential: boolean }[];
+    const servers = (await list?.json()) as {
+      id: string;
+      status: string;
+      hasCredential: boolean;
+      reconnectAttempts: number;
+      reconnectAfter?: string;
+    }[];
     expect(servers.find((server) => server.id === created.server.id)).toMatchObject({
-      status: "connected",
+      status: "unhealthy",
       hasCredential: false,
+      reconnectAttempts: 0,
+      reconnectAfter,
     });
     expect(servers.find((server) => server.id !== created.server.id)).toMatchObject({
       status: "disconnected",
