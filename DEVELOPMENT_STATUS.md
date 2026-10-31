@@ -81,6 +81,7 @@ Phase 9 — production readiness verification. The Bun and Cloudflare runtimes, 
 - Added persisted schedule/job adapters in Bun SQLite and D1, stable job IDs, job claims with expiring leases, persisted model results, bounded retry backoff, pause/resume, and task completion/failure state.
 - Added an owner-only retry route and dashboard action for failed schedules. It atomically requeues the latest failed job, resets its attempt counter, and keeps any saved model result; the UI warns that Telegram delivery can be duplicated after an ambiguous timeout. Bun and D1 repository parity plus authenticated API tests cover recovery.
 - Added shared scheduled-task execution through the existing agent engine, Telegram delivery, Bun's persistent job poller, and Cloudflare Durable Object alarm plus Queue consumer processing.
+- Made Bun's scheduled-task poller single-flight and drainable: SIGINT/SIGTERM stops new polling, waits for the active durable batch, then closes SQLite. Batch failures are logged without stopping future polls.
 - Added schedule creation/list/run recovery tests, including retrying a failed Telegram delivery from the saved model result without calling the model again.
 - Added MCP protocol tests for allowlist-before-secret behavior, discovery defaults, grants, schema checks, bearer routing, redirect rejection, unhealthy states, and D1 schema-change invalidation.
 - Added a shared agent instruction that treats tool names, descriptions, schemas, and outputs as untrusted data, plus strict Worker-compatible JSON Schema validation that rejects external schema references.
@@ -174,11 +175,11 @@ Phase 9 — production readiness verification. The Bun and Cloudflare runtimes, 
 ## Validation
 
 - Unit tests executed: `bun test`.
-- Latest full `bun test`: 208 passed, 1,615 assertions, 0 failed.
+- Latest full `bun test`: 211 passed, 1,623 assertions, 0 failed.
 - `git diff --check`: passed.
-- Latest `bun run check`: passed, including Wrangler type generation, both TypeScript configurations, and Biome lint (zero warnings, 15 informational notices).
-- Latest `bun run format:check`: passed for 158 files.
-- Bun and Cloudflare builds, including the Wrangler development dry-run, passed. Latest hosted CI run `41193796518` passed all four jobs for commit `28ad8c2`.
+- Latest `bun run check`: passed on the current working tree, including Wrangler type generation, both TypeScript configurations, and Biome lint (zero warnings, 15 informational notices).
+- Latest `bun run format:check`: passed for 160 files.
+- Bun and Cloudflare builds, including the Wrangler development dry-run, passed on the current working tree. Hosted CI run `41193796518` passed all four jobs for the preceding app commit `28ad8c2`; the Bun poller drain change has not yet run in hosted CI.
 - Development Worker version `9d204bae-91ae-4d08-b1ec-20a90ea23e8d` passed live `/health`, `/ready`, `/capabilities`, `/miniapp/`, `/miniapp/assets/main.js`, and public-chat checks. `fileMalwareScanning` remains false and browser sign-in remains disabled pending operator configuration.
 - The phase-specific entries below record earlier migration, smoke, and integration checks.
 - The Telegram-blue dashboard bundle built successfully; the Mini App remains available at `/miniapp/` and shows the current host URL with BotFather setup steps.
@@ -218,3 +219,4 @@ Phase 9 — production readiness verification. The Bun and Cloudflare runtimes, 
 
 - Isolated sandbox adapter deployment (2026-10-31): commit `20f463d` passed local typecheck/lint, formatting, 205 tests/1,598 assertions, and Bun/Cloudflare builds. Worker version `eae593e6-ed4b-420e-9fdb-acb909567a5f` passed live health/readiness/capability, Mini App, and public chat checks; capabilities continue to report `arbitraryCodeExecution: false`. No D1 migration was required. Hosted CI run `41193330632` passed all four jobs for this commit.
 - Dashboard dialog accessibility deployment (2026-10-31): commit `28ad8c2` passed hosted CI run `41193796518`. `bun test` passes 208 tests and 1,615 assertions, including search labels/live-result semantics, arrow-key wrapping, and focus-loop boundaries; `bun run check`, formatting (158 files), Bun/Cloudflare builds, and `git diff --check` passed. Worker version `9d204bae-91ae-4d08-b1ec-20a90ea23e8d` is live. `/health`, `/ready`, `/capabilities`, `/miniapp/`, `/miniapp/assets/main.js`, `/miniapp/assets/main.css`, and `/chat/smoke-bot` returned HTTP 200. The deployed JavaScript bundle contains the search label, live results, arrow-key handling, and dialog focus wrapping. `arbitraryCodeExecution` and `fileMalwareScanning` remain false.
+- Bun scheduled-worker shutdown verification (2026-10-31): a persistent scheduled-job batch now drains before SQLite closes on SIGINT/SIGTERM, with single-flight polling and continued polling after logged batch errors. Focused tests pass (3 tests, 8 assertions); full `bun test` passes 211 tests and 1,623 assertions. `bun run check`, `bun run format:check` (160 files), Bun/Cloudflare builds including Wrangler development dry-run, and `git diff --check` pass. This Bun-only change is not deployed to the development Cloudflare Worker.

@@ -61,6 +61,7 @@ import { createOptionalClamDGateway } from "./clamav-gateway.js";
 import { BunSqliteRepositories } from "./sqlite-store.js";
 import { BunFileObjectStore } from "./file-object-store.js";
 import { BunSqliteUploadedFileRepository } from "./uploaded-file-repository.js";
+import { startPersistentPoller } from "./persistent-poller.js";
 
 const config = parseBunRuntimeConfig(process.env);
 const logger = new JsonLogger(config.logLevel);
@@ -465,25 +466,20 @@ async function serveMiniApp(request: Request, url: URL): Promise<Response | unde
 
 logger.info("bun_runtime_started", { host: config.host, port: config.port, environment: config.environment });
 
-let scheduledBatchRunning = false;
-const scheduledWorkerTimer = setInterval(() => {
-  if (scheduledBatchRunning || stopping) return;
-  scheduledBatchRunning = true;
-  void scheduledTaskRunner
-    .runDueBatch(new Date().toISOString(), 10)
-    .catch((error: unknown) => logger.error("scheduled_task_batch_failed", { error }))
-    .finally(() => {
-      scheduledBatchRunning = false;
-    });
-}, 5_000);
+const scheduledWorker = startPersistentPoller({
+  intervalMs: 5_000,
+  run: () => scheduledTaskRunner.runDueBatch(new Date().toISOString(), 10),
+  onError: (error) => logger.error("scheduled_task_batch_failed", { error }),
+});
 
 let stopping = false;
 async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
   logger.info("bun_runtime_stopping", { signal });
-  clearInterval(scheduledWorkerTimer);
-  await server.stop(true);
+  const scheduledWorkerShutdown = scheduledWorker.stop();
+  const httpServerShutdown = server.stop(true);
+  await Promise.all([scheduledWorkerShutdown, httpServerShutdown]);
   db.close();
   logger.info("bun_runtime_stopped");
 }
