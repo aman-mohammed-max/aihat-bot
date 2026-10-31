@@ -358,6 +358,7 @@ interface WorkflowExecutionRow {
 interface ToolExecutionRow {
   tenant_id: string;
   bot_id: string;
+  conversation_id: string | null;
   execution_key: string;
   tool_name: string;
   input_hash: string;
@@ -4726,6 +4727,7 @@ export class BunSqliteRepositories
   async acquireToolExecution(input: {
     readonly tenantId: TenantId;
     readonly botId: BotId;
+    readonly conversationId?: ConversationId;
     readonly executionKey: string;
     readonly toolName: string;
     readonly inputHash: string;
@@ -4739,7 +4741,7 @@ export class BunSqliteRepositories
       const select = () =>
         this.#db
           .query<ToolExecutionRow, typeof key>(`
-            SELECT tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
+            SELECT tenant_id, bot_id, conversation_id, execution_key, tool_name, input_hash, status, result_ref,
                    lease_token, lease_until, expires_at, updated_at, recovery_status, ambiguous_at
             FROM tool_executions WHERE tenant_id = ? AND bot_id = ? AND execution_key = ?
           `)
@@ -4749,13 +4751,14 @@ export class BunSqliteRepositories
         this.#db
           .query(`
             INSERT INTO tool_executions (
-              tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
+              tenant_id, bot_id, conversation_id, execution_key, tool_name, input_hash, status, result_ref,
               lease_token, lease_until, expires_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, ?, ?, ?, ?)
           `)
           .run(
             input.tenantId,
             input.botId,
+            input.conversationId ?? null,
             input.executionKey,
             input.toolName,
             input.inputHash,
@@ -4769,6 +4772,9 @@ export class BunSqliteRepositories
       if (row.tool_name !== input.toolName || row.input_hash !== input.inputHash) {
         throw new AppError("CONFLICT", "Tool execution identity was reused with different input.", 409);
       }
+      if (row.expires_at > input.now && row.conversation_id !== (input.conversationId ?? null)) {
+        throw new AppError("CONFLICT", "Tool execution identity belongs to a different conversation.", 409);
+      }
       if (row.status === "succeeded" && row.expires_at > input.now) {
         if (!row.result_ref) throw new AppError("INTERNAL_ERROR", "Completed tool result is missing.", 500);
         return { state: "completed", resultRef: row.result_ref } as const;
@@ -4779,11 +4785,19 @@ export class BunSqliteRepositories
         this.#db
           .query(`
             UPDATE tool_executions
-            SET status = 'running', result_ref = NULL, lease_token = ?, lease_until = ?,
+            SET conversation_id = ?, status = 'running', result_ref = NULL, lease_token = ?, lease_until = ?,
                 expires_at = ?, updated_at = ?, recovery_status = 'none', ambiguous_at = NULL
             WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND expires_at <= ?
           `)
-          .run(input.leaseToken, input.leaseUntil, input.expiresAt, input.now, ...key, input.now);
+          .run(
+            input.conversationId ?? null,
+            input.leaseToken,
+            input.leaseUntil,
+            input.expiresAt,
+            input.now,
+            ...key,
+            input.now,
+          );
       } else if (row.status === "running" && row.lease_until <= input.now) {
         if (row.recovery_status === "closed") return { state: "closed" } as const;
         if (row.recovery_status === "ambiguous") return { state: "ambiguous" } as const;
@@ -4988,7 +5002,7 @@ export class BunSqliteRepositories
     const purge = this.#db.transaction(() => {
       const rows = this.#db
         .query<ToolExecutionRow, [string, string, number]>(`
-          SELECT tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
+          SELECT tenant_id, bot_id, conversation_id, execution_key, tool_name, input_hash, status, result_ref,
                  lease_token, lease_until, expires_at, updated_at, recovery_status, ambiguous_at
           FROM tool_executions WHERE tenant_id = ? AND expires_at <= ? ORDER BY expires_at LIMIT ?
         `)

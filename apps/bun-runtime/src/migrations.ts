@@ -167,6 +167,11 @@ const migrations: readonly Migration[] = [
     name: "network_request_limits",
     sql: readFileSync(findMigration("0031_network_request_limits.sql"), "utf8"),
   },
+  {
+    version: 32,
+    name: "conversation_tool_execution_retention",
+    sql: readFileSync(findMigration("0032_conversation_tool_execution_retention.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {

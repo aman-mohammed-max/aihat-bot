@@ -354,6 +354,7 @@ interface WorkflowExecutionRow {
 interface ToolExecutionRow {
   tenant_id: string;
   bot_id: string;
+  conversation_id: string | null;
   execution_key: string;
   tool_name: string;
   input_hash: string;
@@ -5220,6 +5221,7 @@ export class CloudflareD1Repositories
   async acquireToolExecution(input: {
     readonly tenantId: TenantId;
     readonly botId: BotId;
+    readonly conversationId?: ConversationId;
     readonly executionKey: string;
     readonly toolName: string;
     readonly inputHash: string;
@@ -5231,7 +5233,7 @@ export class CloudflareD1Repositories
     const select = () =>
       this.db
         .prepare(`
-          SELECT tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
+          SELECT tenant_id, bot_id, conversation_id, execution_key, tool_name, input_hash, status, result_ref,
                  lease_token, lease_until, expires_at, updated_at, recovery_status, ambiguous_at
           FROM tool_executions WHERE tenant_id = ? AND bot_id = ? AND execution_key = ?
         `)
@@ -5243,14 +5245,15 @@ export class CloudflareD1Repositories
       const inserted = await this.db
         .prepare(`
           INSERT INTO tool_executions (
-            tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
+            tenant_id, bot_id, conversation_id, execution_key, tool_name, input_hash, status, result_ref,
             lease_token, lease_until, expires_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, ?, ?, ?, ?)
           ON CONFLICT (tenant_id, bot_id, execution_key) DO NOTHING
         `)
         .bind(
           input.tenantId,
           input.botId,
+          input.conversationId ?? null,
           input.executionKey,
           input.toolName,
           input.inputHash,
@@ -5269,6 +5272,9 @@ export class CloudflareD1Repositories
     if (row.tool_name !== input.toolName || row.input_hash !== input.inputHash) {
       throw new AppError("CONFLICT", "Tool execution identity was reused with different input.", 409);
     }
+    if (row.expires_at > input.now && row.conversation_id !== (input.conversationId ?? null)) {
+      throw new AppError("CONFLICT", "Tool execution identity belongs to a different conversation.", 409);
+    }
     if (row.status === "succeeded" && row.expires_at > input.now) {
       if (!row.result_ref) throw new AppError("INTERNAL_ERROR", "Completed tool result is missing.", 500);
       return { state: "completed", resultRef: row.result_ref };
@@ -5280,11 +5286,12 @@ export class CloudflareD1Repositories
       const update = await this.db
         .prepare(`
           UPDATE tool_executions
-          SET status = 'running', result_ref = NULL, lease_token = ?, lease_until = ?, expires_at = ?, updated_at = ?,
+          SET conversation_id = ?, status = 'running', result_ref = NULL, lease_token = ?, lease_until = ?, expires_at = ?, updated_at = ?,
               recovery_status = 'none', ambiguous_at = NULL
           WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND expires_at <= ?
         `)
         .bind(
+          input.conversationId ?? null,
           input.leaseToken,
           input.leaseUntil,
           input.expiresAt,
@@ -5512,7 +5519,7 @@ export class CloudflareD1Repositories
     }
     const selected = await this.db
       .prepare(`
-        SELECT tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
+        SELECT tenant_id, bot_id, conversation_id, execution_key, tool_name, input_hash, status, result_ref,
                lease_token, lease_until, expires_at, updated_at, recovery_status, ambiguous_at
         FROM tool_executions WHERE tenant_id = ? AND expires_at <= ? ORDER BY expires_at LIMIT ?
       `)

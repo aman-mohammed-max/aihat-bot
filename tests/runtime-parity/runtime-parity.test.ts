@@ -35,7 +35,7 @@ const weatherEndpoint = "https://weather.example.test/lookup";
 const mcpEndpoint = "https://mcp.example.test/mcp";
 
 describe("Bun and Cloudflare runtime repository parity", () => {
-  test("conversation deletion is owner-scoped and cascades messages identically", async () => {
+  test("conversation deletion is owner-scoped and removes tool replay data identically", async () => {
     const bunDatabase = openSqliteDatabase(":memory:");
     const cloudflareDatabase = openSqliteDatabase(":memory:");
     const bunRepositories = new BunSqliteRepositories(bunDatabase);
@@ -75,6 +75,93 @@ describe("Bun and Cloudflare runtime repository parity", () => {
           return repository.append(tenantId, conversationId, [{ role: "user", content: "Persisted conversation." }]);
         }),
       );
+      const secondaryConversationIds = await Promise.all(
+        repositories.map((repository, index) => {
+          const botId = botIds[index];
+          if (!botId) throw new Error("Conversation deletion parity bot was not created.");
+          return repository.getOrCreateApiConversation({
+            tenantId,
+            botId,
+            actorId: ownerId,
+            conversationKey: "conversation-deletion-parity-secondary",
+          });
+        }),
+      );
+      const resultRef = `secret_${"e".repeat(32)}`;
+      const executionKey = "f".repeat(64);
+      const leaseTokens = [crypto.randomUUID(), crypto.randomUUID()];
+      await Promise.all(
+        repositories.map((repository) =>
+          repository.secretRecords.create({
+            tenantId,
+            reference: resultRef,
+            keyId: "test-key",
+            nonce: "nonce",
+            ciphertext: "ciphertext",
+            version: 1,
+            createdAt,
+          }),
+        ),
+      );
+      await Promise.all(
+        repositories.map(async (repository, index) => {
+          const botId = botIds[index];
+          const conversationId = conversationIds[index];
+          const leaseToken = leaseTokens[index];
+          if (!botId || !conversationId || !leaseToken)
+            throw new Error("Conversation tool replay parity data is incomplete.");
+          const acquired = await repository.toolExecutions.acquire({
+            tenantId,
+            botId,
+            conversationId,
+            executionKey,
+            toolName: "test.lookup",
+            inputHash: "a".repeat(64),
+            leaseToken,
+            now: createdAt,
+            leaseUntil: "2026-10-30T00:02:30.000Z",
+            expiresAt: "2026-11-06T00:00:00.000Z",
+          });
+          if (acquired.state !== "acquired") throw new Error("Tool replay lease could not be acquired.");
+          const completed = await repository.toolExecutions.complete({
+            tenantId,
+            botId,
+            executionKey,
+            leaseToken,
+            resultRef,
+            now: createdAt,
+            expiresAt: "2026-11-06T00:00:00.000Z",
+          });
+          if (!completed) throw new Error("Tool replay result could not be saved.");
+        }),
+      );
+      const crossConversationResults = await Promise.all(
+        repositories.map(async (repository, index) => {
+          const botId = botIds[index];
+          const conversationId = secondaryConversationIds[index];
+          const leaseToken = leaseTokens[index];
+          if (!botId || !conversationId || !leaseToken)
+            throw new Error("Conversation tool replay parity data is incomplete.");
+          try {
+            await repository.toolExecutions.acquire({
+              tenantId,
+              botId,
+              conversationId,
+              executionKey,
+              toolName: "test.lookup",
+              inputHash: "a".repeat(64),
+              leaseToken,
+              now: createdAt,
+              leaseUntil: "2026-10-30T00:02:30.000Z",
+              expiresAt: "2026-11-06T00:00:00.000Z",
+            });
+            return "unexpectedly_acquired";
+          } catch (error) {
+            return error instanceof AppError ? error.code : "unexpected_error";
+          }
+        }),
+      );
+      expect(crossConversationResults).toEqual(["CONFLICT", "CONFLICT"]);
       const unauthorizedResults = await Promise.all(
         repositories.map((repository, index) => {
           const botId = botIds[index];
@@ -96,6 +183,20 @@ describe("Bun and Cloudflare runtime repository parity", () => {
             .get(conversationIds[index] ?? "")?.count,
       );
       expect(protectedCounts).toEqual([1, 1]);
+      const protectedReplayRows = [bunDatabase, cloudflareDatabase].map(
+        (database) =>
+          database
+            .query<{ count: number }, [string]>("SELECT count(*) AS count FROM tool_executions WHERE result_ref = ?")
+            .get(resultRef)?.count,
+      );
+      expect(protectedReplayRows).toEqual([1, 1]);
+      const protectedSecrets = [bunDatabase, cloudflareDatabase].map(
+        (database) =>
+          database
+            .query<{ count: number }, [string]>("SELECT count(*) AS count FROM encrypted_secrets WHERE reference = ?")
+            .get(resultRef)?.count,
+      );
+      expect(protectedSecrets).toEqual([1, 1]);
 
       const deletedResults = await Promise.all(
         repositories.map((repository, index) => {
@@ -113,6 +214,20 @@ describe("Bun and Cloudflare runtime repository parity", () => {
             .get(conversationIds[index] ?? "")?.count,
       );
       expect(remainingCounts).toEqual([0, 0]);
+      const remainingReplayRows = [bunDatabase, cloudflareDatabase].map(
+        (database) =>
+          database
+            .query<{ count: number }, [string]>("SELECT count(*) AS count FROM tool_executions WHERE result_ref = ?")
+            .get(resultRef)?.count,
+      );
+      expect(remainingReplayRows).toEqual([0, 0]);
+      const remainingSecrets = [bunDatabase, cloudflareDatabase].map(
+        (database) =>
+          database
+            .query<{ count: number }, [string]>("SELECT count(*) AS count FROM encrypted_secrets WHERE reference = ?")
+            .get(resultRef)?.count,
+      );
+      expect(remainingSecrets).toEqual([0, 0]);
     } finally {
       bunDatabase.close();
       cloudflareDatabase.close();

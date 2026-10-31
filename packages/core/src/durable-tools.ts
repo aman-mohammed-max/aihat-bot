@@ -64,6 +64,7 @@ export class DurableToolRegistry implements AgentToolRegistry {
     const acquired = await this.#executions.acquire({
       tenantId: context.tenantId,
       botId: context.botId,
+      ...(context.conversationId ? { conversationId: context.conversationId } : {}),
       executionKey,
       toolName: name,
       inputHash,

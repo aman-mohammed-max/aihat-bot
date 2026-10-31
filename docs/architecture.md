@@ -63,7 +63,7 @@ The Cloudflare runtime uses Wrangler 4.156.0 and has development, staging, and p
 
 ## Conversation history deletion
 
-Owners can delete a conversation with `DELETE /v1/bots/{botId}/conversations/{conversationId}` using a `bots:write` token. Both SQLite and D1 scope the delete to the tenant, bot, conversation, and bot owner in one statement; the existing foreign key cascades deletion to stored messages. The Cloudflare conversation coordinator stores only a temporary turn lease, not history, and clears expired leases with its alarm.
+Owners can delete a conversation with `DELETE /v1/bots/{botId}/conversations/{conversationId}` using a `bots:write` token. Both SQLite and D1 scope the delete to the tenant, bot, conversation, and bot owner in one statement; foreign keys cascade deletion to stored messages and conversation-linked tool execution records. An `AFTER DELETE` trigger removes encrypted result envelopes when their replay records are removed. Pre-migration replay rows lack a conversation ID and remain under the existing seven-day expiry. Tool execution identities are rejected if reused from another conversation. The Cloudflare conversation coordinator stores only a temporary turn lease, not history, and clears released or expired leases.
 
 ## Retry policy and observability
 

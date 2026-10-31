@@ -1,5 +1,13 @@
 import { AppError } from "./errors.js";
-import type { AgentActorContext, AgentImageAttachment, ModelToolDefinition, TenantId, BotId, UserId } from "./types.js";
+import type {
+  AgentActorContext,
+  AgentImageAttachment,
+  BotId,
+  ConversationId,
+  ModelToolDefinition,
+  TenantId,
+  UserId,
+} from "./types.js";
 
 const toolResultAttachments = new WeakMap<object, readonly AgentImageAttachment[]>();
 
@@ -18,6 +26,7 @@ export interface ToolContext extends AgentActorContext {
   readonly tenantId: TenantId;
   readonly botId: BotId;
   readonly actorId: UserId;
+  readonly conversationId?: ConversationId;
   readonly signal?: AbortSignal;
   /** Stable for one model-issued tool call and reused when an API request or webhook is retried. */
   readonly executionKey?: string;

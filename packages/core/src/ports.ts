@@ -1025,6 +1025,7 @@ export interface ToolExecutionRepository {
   acquire(input: {
     readonly tenantId: TenantId;
     readonly botId: BotId;
+    readonly conversationId?: ConversationId;
     readonly executionKey: string;
     readonly toolName: string;
     readonly inputHash: string;

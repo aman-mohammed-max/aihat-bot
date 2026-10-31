@@ -61,6 +61,7 @@ export class AgentOrchestrator implements AgentEngine {
       tenantId: request.bot.tenantId,
       botId: request.bot.id,
       actorId: request.actorId,
+      conversationId: request.conversationId,
       ...(request.signal ? { signal: request.signal } : {}),
       ...(request.actorContext ?? {}),
     };
