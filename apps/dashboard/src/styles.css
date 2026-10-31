@@ -5226,3 +5226,33 @@ kbd {
     font-size: 8px;
   }
 }
+.ownership-transfer-panel {
+  border-color: color-mix(in srgb, var(--danger, #ef6b78) 28%, var(--line, #22313f));
+}
+
+.transfer-pending {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line, #22313f);
+  border-radius: 12px;
+  background: var(--surface-raised, #101c27);
+}
+
+.transfer-pending > div,
+.one-time-invitation > div {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.transfer-pending small,
+.ownership-transfer-panel .one-time-invitation small {
+  color: var(--text-muted, #8a9aa9);
+}
+
+.ownership-transfer-panel .one-time-invitation {
+  margin-top: 14px;
+}

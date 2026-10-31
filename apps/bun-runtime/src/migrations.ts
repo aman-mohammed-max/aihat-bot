@@ -132,6 +132,11 @@ const migrations: readonly Migration[] = [
     name: "model_retry_analytics",
     sql: readFileSync(findMigration("0024_model_retry_analytics.sql"), "utf8"),
   },
+  {
+    version: 25,
+    name: "bot_ownership_transfers",
+    sql: readFileSync(findMigration("0025_bot_ownership_transfers.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {

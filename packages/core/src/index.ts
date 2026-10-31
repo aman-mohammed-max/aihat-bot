@@ -13,6 +13,7 @@ export * from "./agent.js";
 export * from "./agent-runtime.js";
 export * from "./bot-factory.js";
 export * from "./bot-management.js";
+export * from "./bot-ownership-transfers-http-api.js";
 export * from "./bot-credential-approvals.js";
 export * from "./creation-approvals.js";
 export * from "./encrypted-secrets.js";

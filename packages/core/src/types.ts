@@ -215,6 +215,21 @@ export interface TenantInvitation {
   readonly acceptedAt?: string;
 }
 
+export type BotOwnershipTransferStatus = "pending" | "accepted" | "revoked" | "expired";
+
+/** Public transfer metadata. Transfer tokens and token hashes never appear in this type. */
+export interface BotOwnershipTransfer {
+  readonly id: string;
+  readonly botId: BotId;
+  readonly fromOwnerId: UserId;
+  readonly toOwnerId: UserId;
+  readonly status: BotOwnershipTransferStatus;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly acceptedAt?: string;
+  readonly revokedAt?: string;
+}
+
 export interface TenantWorkspace {
   readonly tenantId: TenantId;
   readonly name: string;

@@ -19,6 +19,7 @@ import {
   hasVerifiedStreamingOrigin,
   createManagementApiHandler,
   createBotManagementApiHandler,
+  createBotOwnershipTransfersApiHandler,
   createSkillsApiHandler,
   createGlobalSkillCatalogAdminHandler,
   createMcpApiHandler,
@@ -243,6 +244,7 @@ const botManagementApi = createBotManagementApiHandler(
   botCredentialApprovals,
   secretStore,
 );
+const botOwnershipTransfersApi = createBotOwnershipTransfersApiHandler(authenticator, repositories);
 const conversationHistoryApi = createConversationHistoryApiHandler(authenticator, repositories);
 const usageApi = createUsageApiHandler(authenticator, repositories);
 const auditLogApi = createAuditLogApiHandler(authenticator, repositories);
@@ -294,6 +296,8 @@ const server = Bun.serve({
     if (uploadedFilesResponse) return uploadedFilesResponse;
     const botManagementResponse = await botManagementApi(request);
     if (botManagementResponse) return botManagementResponse;
+    const ownershipTransferResponse = await botOwnershipTransfersApi(request);
+    if (ownershipTransferResponse) return ownershipTransferResponse;
     const botAccessResponse = await botAccessApi(request);
     if (botAccessResponse) return botAccessResponse;
     const skillsResponse = await skillsApi(request);

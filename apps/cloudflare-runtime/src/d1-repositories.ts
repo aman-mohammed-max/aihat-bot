@@ -70,6 +70,7 @@ import type {
   TenantInvitation,
   TenantRole,
   TenantWorkspace,
+  BotOwnershipTransfer,
   MasterBotRepository,
   MasterBotReply,
   MasterBotSession,
@@ -81,6 +82,7 @@ import type {
   ToolExecutionRecovery,
   ToolExecutionRepository,
   TenantMembershipRepository,
+  BotOwnershipTransferRepository,
 } from "@aihat/core";
 
 interface BotRow {
@@ -370,6 +372,18 @@ interface TenantInvitationRow {
   accepted_at: string | null;
 }
 
+interface BotOwnershipTransferRow {
+  id: string;
+  bot_id: string;
+  from_owner_id: string;
+  to_owner_id: string;
+  status: BotOwnershipTransfer["status"];
+  created_at: string;
+  expires_at: string;
+  accepted_at: string | null;
+  revoked_at: string | null;
+}
+
 /** D1 implementation of the same tenant-scoped contracts used by Bun SQLite. */
 export class CloudflareD1Repositories
   implements
@@ -385,7 +399,8 @@ export class CloudflareD1Repositories
     ScheduledTaskRepository,
     UsageRepository,
     MemoryRepository,
-    BotDraftPublisher
+    BotDraftPublisher,
+    BotOwnershipTransferRepository
 {
   readonly sessions: CreationSessionRepository;
   readonly creationApprovals: CreationApprovalRepository;
@@ -1100,6 +1115,419 @@ export class CloudflareD1Repositories
         .bind(input.tenantId, input.ownerId, input.botId),
     ]);
     if (results[1]?.meta.changes !== 1) throw new AppError("CONFLICT", "Bot changed before it could be deleted.", 409);
+  }
+
+  async create(input: {
+    tenantId: TenantId;
+    botId: BotId;
+    fromOwnerId: UserId;
+    toOwnerId: UserId;
+    transferId: string;
+    tokenHash: string;
+    createdAt: string;
+    expiresAt: string;
+  }): Promise<BotOwnershipTransfer> {
+    await this.db
+      .prepare(`
+        UPDATE bot_ownership_transfers SET status = 'expired', token_hash = NULL
+        WHERE tenant_id = ? AND bot_id = ? AND status = 'pending' AND expires_at <= ?
+      `)
+      .bind(input.tenantId, input.botId, input.createdAt)
+      .run();
+    const bot = await this.db
+      .prepare("SELECT owner_id FROM bots WHERE tenant_id = ? AND id = ?")
+      .bind(input.tenantId, input.botId)
+      .first<{ owner_id: string }>();
+    if (!bot || bot.owner_id !== input.fromOwnerId) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+    if (input.fromOwnerId === input.toOwnerId) {
+      throw new AppError("VALIDATION_ERROR", "Choose another active workspace member.", 400);
+    }
+    const recipient = await this.db
+      .prepare("SELECT status FROM tenant_memberships WHERE tenant_id = ? AND user_id = ?")
+      .bind(input.tenantId, input.toOwnerId)
+      .first<{ status: string }>();
+    if (recipient?.status !== "active") {
+      throw new AppError("NOT_FOUND", "The recipient must be an active member of this workspace.", 404);
+    }
+    const pending = await this.db
+      .prepare("SELECT id FROM bot_ownership_transfers WHERE tenant_id = ? AND bot_id = ? AND status = 'pending'")
+      .bind(input.tenantId, input.botId)
+      .first<{ id: string }>();
+    if (pending) throw new AppError("CONFLICT", "This bot already has a pending ownership transfer.", 409);
+    try {
+      const results = await this.db.batch([
+        this.db
+          .prepare(`
+            INSERT INTO bot_ownership_transfers (
+              id, tenant_id, bot_id, from_owner_id, to_owner_id, token_hash, status, created_at, expires_at
+            )
+            SELECT ?, ?, ?, ?, ?, ?, 'pending', ?, ?
+            WHERE EXISTS (SELECT 1 FROM bots WHERE tenant_id = ? AND id = ? AND owner_id = ?)
+              AND EXISTS (SELECT 1 FROM tenant_memberships WHERE tenant_id = ? AND user_id = ? AND status = 'active')
+              AND NOT EXISTS (
+                SELECT 1 FROM bot_ownership_transfers WHERE tenant_id = ? AND bot_id = ? AND status = 'pending'
+              )
+          `)
+          .bind(
+            input.transferId,
+            input.tenantId,
+            input.botId,
+            input.fromOwnerId,
+            input.toOwnerId,
+            input.tokenHash,
+            input.createdAt,
+            input.expiresAt,
+            input.tenantId,
+            input.botId,
+            input.fromOwnerId,
+            input.tenantId,
+            input.toOwnerId,
+            input.tenantId,
+            input.botId,
+          ),
+        this.db
+          .prepare(`
+            INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+            SELECT ?, ?, ?, 'bot.ownership_transfer.created', 'bot', ?, ?, ?
+            WHERE EXISTS (SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND status = 'pending')
+          `)
+          .bind(
+            crypto.randomUUID(),
+            input.tenantId,
+            input.fromOwnerId,
+            input.botId,
+            JSON.stringify({ transferId: input.transferId, toOwnerId: input.toOwnerId }),
+            input.createdAt,
+            input.transferId,
+          ),
+      ]);
+      if (results[0]?.meta.changes !== 1) {
+        throw new AppError("CONFLICT", "Bot ownership changed before the transfer could be created.", 409);
+      }
+    } catch (cause) {
+      if (cause instanceof AppError) throw cause;
+      const message = String(cause).toLowerCase();
+      if (message.includes("unique") || message.includes("constraint")) {
+        throw new AppError("CONFLICT", "This bot already has a pending ownership transfer.", 409, { cause });
+      }
+      throw cause;
+    }
+    return {
+      id: input.transferId,
+      botId: input.botId,
+      fromOwnerId: input.fromOwnerId,
+      toOwnerId: input.toOwnerId,
+      status: "pending",
+      createdAt: input.createdAt,
+      expiresAt: input.expiresAt,
+    };
+  }
+
+  async getPending(input: {
+    tenantId: TenantId;
+    botId: BotId;
+    ownerId: UserId;
+    now: string;
+  }): Promise<BotOwnershipTransfer | undefined> {
+    const row = await this.db
+      .prepare(`
+        SELECT x.id, x.bot_id, x.from_owner_id, x.to_owner_id, x.status, x.created_at, x.expires_at,
+               x.accepted_at, x.revoked_at
+        FROM bot_ownership_transfers AS x
+        WHERE x.tenant_id = ? AND x.bot_id = ? AND x.from_owner_id = ? AND x.status = 'pending' AND x.expires_at > ?
+          AND EXISTS (
+            SELECT 1 FROM bots AS b WHERE b.tenant_id = x.tenant_id AND b.id = x.bot_id AND b.owner_id = x.from_owner_id
+          )
+      `)
+      .bind(input.tenantId, input.botId, input.ownerId, input.now)
+      .first<BotOwnershipTransferRow>();
+    return row ? mapBotOwnershipTransfer(row) : undefined;
+  }
+
+  async revoke(input: {
+    tenantId: TenantId;
+    botId: BotId;
+    ownerId: UserId;
+    transferId: string;
+    now: string;
+  }): Promise<BotOwnershipTransfer> {
+    const row = await this.db
+      .prepare(`
+        SELECT id, bot_id, from_owner_id, to_owner_id, status, created_at, expires_at, accepted_at, revoked_at
+        FROM bot_ownership_transfers
+        WHERE tenant_id = ? AND bot_id = ? AND from_owner_id = ? AND id = ?
+      `)
+      .bind(input.tenantId, input.botId, input.ownerId, input.transferId)
+      .first<BotOwnershipTransferRow>();
+    if (!row) throw new AppError("NOT_FOUND", "Ownership transfer was not found.", 404);
+    const bot = await this.db
+      .prepare("SELECT owner_id FROM bots WHERE tenant_id = ? AND id = ?")
+      .bind(input.tenantId, input.botId)
+      .first<{ owner_id: string }>();
+    if (!bot || bot.owner_id !== input.ownerId) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+    if (row.status === "pending" && row.expires_at <= input.now) {
+      await this.db
+        .prepare(
+          "UPDATE bot_ownership_transfers SET status = 'expired', token_hash = NULL WHERE id = ? AND status = 'pending'",
+        )
+        .bind(row.id)
+        .run();
+      return { ...mapBotOwnershipTransfer(row), status: "expired" };
+    }
+    if (row.status === "revoked") return mapBotOwnershipTransfer(row);
+    if (row.status !== "pending") throw new AppError("CONFLICT", "Ownership transfer is no longer pending.", 409);
+    const results = await this.db.batch([
+      this.db
+        .prepare(`
+          UPDATE bot_ownership_transfers SET status = 'revoked', token_hash = NULL, revoked_at = ?
+          WHERE id = ? AND tenant_id = ? AND status = 'pending' AND expires_at > ?
+            AND EXISTS (SELECT 1 FROM bots WHERE tenant_id = ? AND id = ? AND owner_id = ?)
+        `)
+        .bind(input.now, row.id, input.tenantId, input.now, input.tenantId, input.botId, input.ownerId),
+      this.db
+        .prepare(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          SELECT ?, ?, ?, 'bot.ownership_transfer.revoked', 'bot', ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND status = 'revoked' AND revoked_at = ?)
+        `)
+        .bind(
+          crypto.randomUUID(),
+          input.tenantId,
+          input.ownerId,
+          input.botId,
+          JSON.stringify({ transferId: input.transferId, toOwnerId: row.to_owner_id }),
+          input.now,
+          row.id,
+          input.now,
+        ),
+    ]);
+    if (results[0]?.meta.changes !== 1)
+      throw new AppError("CONFLICT", "Ownership transfer changed before revocation.", 409);
+    return { ...mapBotOwnershipTransfer(row), status: "revoked", revokedAt: input.now };
+  }
+
+  async accept(input: {
+    tenantId: TenantId;
+    tokenHash: string;
+    recipientId: UserId;
+    now: string;
+  }): Promise<BotOwnershipTransfer> {
+    const row = await this.db
+      .prepare(`
+        SELECT id, bot_id, from_owner_id, to_owner_id, status, created_at, expires_at, accepted_at, revoked_at
+        FROM bot_ownership_transfers
+        WHERE tenant_id = ? AND token_hash = ? AND to_owner_id = ? AND status = 'pending' AND expires_at > ?
+      `)
+      .bind(input.tenantId, input.tokenHash, input.recipientId, input.now)
+      .first<BotOwnershipTransferRow>();
+    if (!row) throw new AppError("NOT_FOUND", "Transfer is invalid, expired, or not addressed to this account.", 404);
+    const recipient = await this.db
+      .prepare("SELECT status FROM tenant_memberships WHERE tenant_id = ? AND user_id = ?")
+      .bind(input.tenantId, input.recipientId)
+      .first<{ status: string }>();
+    if (recipient?.status !== "active") {
+      throw new AppError("FORBIDDEN", "Join this workspace before accepting its bot transfer.", 403);
+    }
+    const running = await this.db
+      .prepare(`
+        SELECT jobs.id FROM jobs
+        JOIN scheduled_tasks ON scheduled_tasks.tenant_id = jobs.tenant_id
+          AND json_extract(jobs.payload_json, '$.taskId') = scheduled_tasks.id
+        WHERE jobs.tenant_id = ? AND scheduled_tasks.bot_id = ?
+          AND jobs.kind = 'scheduled_task' AND jobs.status = 'running' LIMIT 1
+      `)
+      .bind(input.tenantId, row.bot_id)
+      .first<{ id: string }>();
+    if (running) {
+      throw new AppError(
+        "CONFLICT",
+        "A scheduled run is active. Wait for it to finish before accepting the transfer.",
+        409,
+      );
+    }
+    const results = await this.db.batch([
+      this.db
+        .prepare(`
+          UPDATE bots SET owner_id = ?, updated_at = ?
+          WHERE tenant_id = ? AND id = ? AND owner_id = ?
+            AND EXISTS (SELECT 1 FROM tenant_memberships WHERE tenant_id = ? AND user_id = ? AND status = 'active')
+            AND EXISTS (
+              SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND tenant_id = ? AND token_hash = ?
+                AND status = 'pending' AND expires_at > ?
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM jobs
+              JOIN scheduled_tasks ON scheduled_tasks.tenant_id = jobs.tenant_id
+                AND json_extract(jobs.payload_json, '$.taskId') = scheduled_tasks.id
+              WHERE jobs.tenant_id = ? AND scheduled_tasks.bot_id = ?
+                AND jobs.kind = 'scheduled_task' AND jobs.status = 'running'
+            )
+        `)
+        .bind(
+          input.recipientId,
+          input.now,
+          input.tenantId,
+          row.bot_id,
+          row.from_owner_id,
+          input.tenantId,
+          input.recipientId,
+          row.id,
+          input.tenantId,
+          input.tokenHash,
+          input.now,
+          input.tenantId,
+          row.bot_id,
+        ),
+      this.db
+        .prepare(`
+          DELETE FROM creation_approvals
+          WHERE tenant_id = ? AND session_id IN (
+            SELECT id FROM factory_sessions WHERE tenant_id = ? AND bot_id = ?
+          )
+            AND EXISTS (SELECT 1 FROM bots WHERE tenant_id = ? AND id = ? AND owner_id = ?)
+            AND EXISTS (SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND status = 'pending' AND token_hash = ?)
+        `)
+        .bind(
+          input.tenantId,
+          input.tenantId,
+          row.bot_id,
+          input.tenantId,
+          row.bot_id,
+          input.recipientId,
+          row.id,
+          input.tokenHash,
+        ),
+      this.db
+        .prepare(`
+          UPDATE factory_sessions SET owner_id = ?, updated_at = ?
+          WHERE tenant_id = ? AND bot_id = ? AND owner_id = ?
+            AND EXISTS (SELECT 1 FROM bots WHERE tenant_id = ? AND id = ? AND owner_id = ?)
+            AND EXISTS (SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND status = 'pending' AND token_hash = ?)
+        `)
+        .bind(
+          input.recipientId,
+          input.now,
+          input.tenantId,
+          row.bot_id,
+          row.from_owner_id,
+          input.tenantId,
+          row.bot_id,
+          input.recipientId,
+          row.id,
+          input.tokenHash,
+        ),
+      this.db
+        .prepare(`
+          UPDATE scheduled_tasks
+          SET owner_id = ?, status = CASE WHEN status = 'active' THEN 'paused' ELSE status END,
+              next_run_at = CASE WHEN status = 'active' THEN NULL ELSE next_run_at END, updated_at = ?
+          WHERE tenant_id = ? AND bot_id = ?
+            AND EXISTS (SELECT 1 FROM bots WHERE tenant_id = ? AND id = ? AND owner_id = ?)
+            AND EXISTS (SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND status = 'pending' AND token_hash = ?)
+        `)
+        .bind(
+          input.recipientId,
+          input.now,
+          input.tenantId,
+          row.bot_id,
+          input.tenantId,
+          row.bot_id,
+          input.recipientId,
+          row.id,
+          input.tokenHash,
+        ),
+      this.db
+        .prepare(`
+          UPDATE jobs SET status = 'cancelled', lease_until = NULL, updated_at = ?
+          WHERE tenant_id = ? AND kind = 'scheduled_task' AND status IN ('queued', 'retrying')
+            AND json_extract(payload_json, '$.taskId') IN (
+              SELECT id FROM scheduled_tasks WHERE tenant_id = ? AND bot_id = ?
+            )
+            AND EXISTS (SELECT 1 FROM bots WHERE tenant_id = ? AND id = ? AND owner_id = ?)
+            AND EXISTS (SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND status = 'pending' AND token_hash = ?)
+        `)
+        .bind(
+          input.now,
+          input.tenantId,
+          input.tenantId,
+          row.bot_id,
+          input.tenantId,
+          row.bot_id,
+          input.recipientId,
+          row.id,
+          input.tokenHash,
+        ),
+      this.db
+        .prepare(`
+          UPDATE bot_access_grants SET status = 'revoked', invitation_token_hash = NULL
+          WHERE tenant_id = ? AND bot_id = ? AND user_id = ? AND status = 'active'
+            AND EXISTS (SELECT 1 FROM bots WHERE tenant_id = ? AND id = ? AND owner_id = ?)
+            AND EXISTS (SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND status = 'pending' AND token_hash = ?)
+        `)
+        .bind(
+          input.tenantId,
+          row.bot_id,
+          row.from_owner_id,
+          input.tenantId,
+          row.bot_id,
+          input.recipientId,
+          row.id,
+          input.tokenHash,
+        ),
+      this.db
+        .prepare(`
+          UPDATE bot_ownership_transfers SET status = 'accepted', token_hash = NULL, accepted_at = ?
+          WHERE id = ? AND tenant_id = ? AND token_hash = ? AND status = 'pending' AND expires_at > ?
+            AND EXISTS (SELECT 1 FROM bots WHERE tenant_id = ? AND id = ? AND owner_id = ?)
+        `)
+        .bind(
+          input.now,
+          row.id,
+          input.tenantId,
+          input.tokenHash,
+          input.now,
+          input.tenantId,
+          row.bot_id,
+          input.recipientId,
+        ),
+      this.db
+        .prepare(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          SELECT ?, ?, ?, 'bot.ownership_transfer.accepted', 'bot', ?, ?, ?
+          WHERE EXISTS (SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND status = 'accepted' AND accepted_at = ?)
+        `)
+        .bind(
+          crypto.randomUUID(),
+          input.tenantId,
+          input.recipientId,
+          row.bot_id,
+          JSON.stringify({ transferId: row.id, fromOwnerId: row.from_owner_id }),
+          input.now,
+          row.id,
+          input.now,
+        ),
+    ]);
+    if (results[0]?.meta.changes !== 1 || results[6]?.meta.changes !== 1) {
+      const activeRun = await this.db
+        .prepare(`
+          SELECT jobs.id FROM jobs
+          JOIN scheduled_tasks ON scheduled_tasks.tenant_id = jobs.tenant_id
+            AND json_extract(jobs.payload_json, '$.taskId') = scheduled_tasks.id
+          WHERE jobs.tenant_id = ? AND scheduled_tasks.bot_id = ?
+            AND jobs.kind = 'scheduled_task' AND jobs.status = 'running' LIMIT 1
+        `)
+        .bind(input.tenantId, row.bot_id)
+        .first<{ id: string }>();
+      if (activeRun) {
+        throw new AppError(
+          "CONFLICT",
+          "A scheduled run is active. Wait for it to finish before accepting the transfer.",
+          409,
+        );
+      }
+      throw new AppError("CONFLICT", "Bot ownership changed before this transfer was accepted.", 409);
+    }
+    return { ...mapBotOwnershipTransfer(row), status: "accepted", acceptedAt: input.now };
   }
 
   async saveDraft(bot: BotDefinition): Promise<void> {
@@ -4979,6 +5407,20 @@ function mapTenantInvitation(row: TenantInvitationRow, now: string): TenantInvit
     expiresAt: row.expires_at,
     ...(row.accepted_by === null ? {} : { acceptedBy: row.accepted_by as UserId }),
     ...(row.accepted_at === null ? {} : { acceptedAt: row.accepted_at }),
+  };
+}
+
+function mapBotOwnershipTransfer(row: BotOwnershipTransferRow): BotOwnershipTransfer {
+  return {
+    id: row.id,
+    botId: row.bot_id as BotId,
+    fromOwnerId: row.from_owner_id as UserId,
+    toOwnerId: row.to_owner_id as UserId,
+    status: row.status,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    ...(row.accepted_at === null ? {} : { acceptedAt: row.accepted_at }),
+    ...(row.revoked_at === null ? {} : { revokedAt: row.revoked_at }),
   };
 }
 

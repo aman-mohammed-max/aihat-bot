@@ -83,6 +83,18 @@ export interface BotVersion {
   current: boolean;
 }
 
+export interface BotOwnershipTransfer {
+  id: string;
+  botId: string;
+  fromOwnerId: string;
+  toOwnerId: string;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt?: string;
+  revokedAt?: string;
+}
+
 export interface Skill {
   id: string;
   name: string;

@@ -39,6 +39,7 @@ import type {
   TenantInvitation,
   TenantRole,
   TenantWorkspace,
+  BotOwnershipTransfer,
 } from "./types.js";
 
 export interface BotRepository {
@@ -72,6 +73,39 @@ export interface BotManagementRepository {
     readonly disabled: boolean;
   }): Promise<void>;
   deleteOwned(input: { readonly tenantId: TenantId; readonly ownerId: UserId; readonly botId: BotId }): Promise<void>;
+}
+
+/** Consent-based transfer of a bot to another active member of the same tenant. */
+export interface BotOwnershipTransferRepository {
+  create(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly fromOwnerId: UserId;
+    readonly toOwnerId: UserId;
+    readonly transferId: string;
+    readonly tokenHash: string;
+    readonly createdAt: string;
+    readonly expiresAt: string;
+  }): Promise<BotOwnershipTransfer>;
+  getPending(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly ownerId: UserId;
+    readonly now: string;
+  }): Promise<BotOwnershipTransfer | undefined>;
+  revoke(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly ownerId: UserId;
+    readonly transferId: string;
+    readonly now: string;
+  }): Promise<BotOwnershipTransfer>;
+  accept(input: {
+    readonly tenantId: TenantId;
+    readonly tokenHash: string;
+    readonly recipientId: UserId;
+    readonly now: string;
+  }): Promise<BotOwnershipTransfer>;
 }
 
 export interface BotCredentialApprovalRepository {

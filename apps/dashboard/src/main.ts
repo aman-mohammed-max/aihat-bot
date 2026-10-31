@@ -19,6 +19,7 @@ import type {
   TelegramSettings,
   TenantMember,
   TenantInvitation,
+  BotOwnershipTransfer,
   WorkspaceMembership,
   UsageSummary,
   UploadedFile,
@@ -372,7 +373,7 @@ async function loadBotResources(botId: string): Promise<void> {
   }
   activeBotResourcesId = botId;
   const base = `/v1/bots/${encodeURIComponent(botId)}`;
-  const [bot, telegram, skills, servers, tasks, files, toolRecoveries] = await Promise.allSettled([
+  const [bot, telegram, skills, servers, tasks, files, toolRecoveries, ownershipTransfer] = await Promise.allSettled([
     api<Bot>(base),
     api<TelegramSettings>(`${base}/telegram`),
     api<Skill[]>(`${base}/skills`),
@@ -380,6 +381,7 @@ async function loadBotResources(botId: string): Promise<void> {
     api<{ tasks: ScheduledTask[] }>(`${base}/scheduled-tasks`),
     api<{ items: UploadedFile[] }>(`${base}/files`),
     api<{ recoveries: ToolExecutionRecovery[] }>(`${base}/tool-executions`),
+    api<{ item: BotOwnershipTransfer | null }>(`${base}/ownership-transfer`),
   ]);
   state.pageError = undefined;
   if (bot.status === "fulfilled") state.activeBot = bot.value;
@@ -393,6 +395,8 @@ async function loadBotResources(botId: string): Promise<void> {
   state.tasks = tasks.status === "fulfilled" ? tasks.value.tasks : [];
   state.uploadedFiles = files.status === "fulfilled" ? files.value.items : [];
   state.toolRecoveries = toolRecoveries.status === "fulfilled" ? toolRecoveries.value.recoveries : [];
+  state.botOwnershipTransfer =
+    ownershipTransfer.status === "fulfilled" ? { item: ownershipTransfer.value.item } : { item: null };
   const tools = await Promise.all(
     state.servers
       .filter((server) => server.status === "connected")
@@ -555,6 +559,10 @@ async function handleClick(event: MouseEvent): Promise<void> {
       await copyText(state.newWorkspaceInvitation?.url ?? "", "Workspace invitation link copied");
     } else if (action === "copy-workspace-invitation-token") {
       await copyText(state.newWorkspaceInvitation?.token ?? "", "Workspace invitation token copied");
+    } else if (action === "copy-bot-ownership-token") {
+      await copyText(state.botOwnershipTransfer.token ?? "", "Ownership transfer token copied");
+    } else if (action === "revoke-bot-ownership-transfer") {
+      await revokeBotOwnershipTransfer(target.dataset.transferId ?? "");
     } else if (action === "revoke-workspace-invitation") {
       await revokeWorkspaceInvitation(target.dataset.invitationId ?? "");
     } else if (action === "deactivate-tenant-member") await deactivateTenantMember(target.dataset.userId ?? "");
@@ -643,6 +651,14 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
         break;
       case "workspace-invitation-accept-form":
         await acceptWorkspaceInvitation(String(data.get("token") ?? "").trim());
+        form.reset();
+        break;
+      case "bot-ownership-transfer-form":
+        await createBotOwnershipTransfer(data);
+        form.reset();
+        break;
+      case "bot-transfer-accept-form":
+        await acceptBotOwnershipTransfer(String(data.get("token") ?? "").trim());
         form.reset();
         break;
       case "tenant-member-role-form":
@@ -1925,6 +1941,70 @@ async function reactivateTenantMember(userId: string, role: string): Promise<voi
   });
   await loadTenantMembers();
   showToast("Member reactivated. Create a new API token for them.");
+}
+
+async function createBotOwnershipTransfer(data: FormData): Promise<void> {
+  const bot = requireActiveBot();
+  const targetUserId = String(data.get("targetUserId") ?? "").trim();
+  if (!targetUserId) throw new Error("Choose an active workspace member first.");
+  const confirmed = await askConfirmation(
+    "Offer this bot to a new owner?",
+    `Only ${targetUserId} can accept. Ownership changes after acceptance, and scheduled tasks will pause for review.`,
+    "Create transfer token",
+    true,
+  );
+  if (!confirmed) return;
+  const result = await api<{ item: BotOwnershipTransfer; token: string }>(`${botBase(bot.id)}/ownership-transfer`, {
+    method: "POST",
+    body: jsonBody({ targetUserId }),
+  });
+  state.botOwnershipTransfer = {
+    item: result.item,
+    token: result.token,
+  };
+  render();
+  showToast("Ownership transfer created. Copy the one-time token to the recipient.");
+}
+
+async function revokeBotOwnershipTransfer(transferId: string): Promise<void> {
+  const bot = requireActiveBot();
+  if (!transferId) throw new Error("Choose a pending ownership transfer first.");
+  const confirmed = await askConfirmation(
+    "Revoke this ownership transfer?",
+    "The one-time token will stop working immediately.",
+    "Revoke transfer",
+    true,
+  );
+  if (!confirmed) return;
+  await api(`${botBase(bot.id)}/ownership-transfer/${encodeURIComponent(transferId)}`, { method: "DELETE" });
+  const refreshed = await api<{ item: BotOwnershipTransfer | null }>(`${botBase(bot.id)}/ownership-transfer`);
+  state.botOwnershipTransfer = refreshed;
+  render();
+  showToast("Ownership transfer revoked");
+}
+
+async function acceptBotOwnershipTransfer(token: string): Promise<void> {
+  if (!/^ahf_transfer_[A-Za-z0-9_-]{43}$/.test(token)) {
+    throw new Error("Enter a valid ownership transfer token.");
+  }
+  if (
+    !(await askConfirmation(
+      "Accept bot ownership?",
+      "You will become the bot owner. Existing scheduled tasks will be paused so you can review their recipients.",
+      "Accept ownership",
+    ))
+  ) {
+    return;
+  }
+  const accepted = await api<{ item: BotOwnershipTransfer }>("/v1/bot-transfers/accept", {
+    method: "POST",
+    body: jsonBody({ token }),
+  });
+  state.botOwnershipTransfer = { item: null };
+  await loadWorkspace();
+  activeBotResourcesId = "";
+  navigate(`bot/${accepted.item.botId}/overview`);
+  showToast("Bot ownership accepted. Review and resume scheduled tasks as needed.");
 }
 
 async function sendChat(data: FormData): Promise<void> {

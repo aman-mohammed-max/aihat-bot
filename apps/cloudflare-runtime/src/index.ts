@@ -22,6 +22,7 @@ import {
   hasVerifiedStreamingOrigin,
   createManagementApiHandler,
   createBotManagementApiHandler,
+  createBotOwnershipTransfersApiHandler,
   createSkillsApiHandler,
   createMcpApiHandler,
   TelegramManager,
@@ -190,6 +191,8 @@ export default {
       secretStore,
     )(request);
     if (botManagementResponse) return botManagementResponse;
+    const ownershipTransferResponse = await createBotOwnershipTransfersApiHandler(authenticator, d1)(request);
+    if (ownershipTransferResponse) return ownershipTransferResponse;
     const memoryService = createEncryptedMemoryService(d1, secretStore);
     const memoryResponse = await createMemoryApiHandler(authenticator, memoryService)(request);
     if (memoryResponse) return memoryResponse;

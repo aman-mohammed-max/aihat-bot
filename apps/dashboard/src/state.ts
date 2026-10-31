@@ -23,6 +23,7 @@ import type {
   UsageSummary,
   UploadedFile,
   ToolExecutionRecovery,
+  BotOwnershipTransfer,
 } from "./types.js";
 
 export interface ChatLine {
@@ -42,6 +43,7 @@ export interface UiState {
   catalog: Skill[];
   capabilities?: RuntimeCapabilities | undefined;
   activeBot?: Bot | undefined;
+  botOwnershipTransfer: { item: BotOwnershipTransfer | null; token?: string };
   telegram?: TelegramSettings | undefined;
   installedSkills: Skill[];
   servers: McpServer[];
@@ -112,6 +114,7 @@ export function createInitialState(): UiState {
     factoryAssistantBusy: false,
     factoryAssistantIdea: "",
     botAccess: undefined,
+    botOwnershipTransfer: { item: null },
     invitationToken: undefined,
     chatLines: [],
     selectedGrantRefs: [],
