@@ -132,7 +132,7 @@ docker compose up --build -d
 docker compose logs -f aihat-bot-factory
 ```
 
-The image builds the Bun runtime in a multi-stage build and runs it as an unprivileged user. Compose keeps SQLite data in the `aihat_data` volume, exposes port 3000 by default, and applies a read-only root filesystem with a writable data volume. The container does not require Cloudflare services. API access still requires bootstrapping an owner token with `docker compose exec aihat-bot-factory bun dist/apps/bun-runtime/src/bootstrap.js "My workspace" owner-subject factory:read,factory:write,bots:read,bots:write,agent:run,tokens:manage,members:manage`.
+The image builds the Bun runtime in a multi-stage build and runs it as an unprivileged user. Compose keeps SQLite data in the `aihat_data` volume, binds port 3000 to `127.0.0.1` by default, and applies a read-only root filesystem with a writable data volume. Set `BIND_ADDRESS` deliberately if a different host binding is required. The container does not require Cloudflare services. API access still requires bootstrapping an owner token with `docker compose exec aihat-bot-factory bun dist/apps/bun-runtime/src/bootstrap.js "My workspace" owner-subject factory:read,factory:write,bots:read,bots:write,agent:run,tokens:manage,members:manage`.
 
 To enable local malware scanning, set `CLAMAV_HOST=clamav` in `.env` and start the optional scanner profile:
 
@@ -143,4 +143,13 @@ docker compose ps clamav
 
 Wait until the ClamAV service is healthy before uploading files. The daemon port is available only on the private Compose network; do not publish it to the host or Internet. This adapter is for Bun. Cloudflare continues to use the HTTPS scanner gateway contract below.
 
-The Bun runtime can also expose ClamAV as that gateway for a Cloudflare Worker. Set `FILE_SCANNER_GATEWAY_TOKEN` to a high-entropy value in the Bun `.env`, keep the Bun service behind a TLS reverse proxy, and expose only `/internal/file-scan` to the Worker. Restrict that proxy route to the Worker/network where possible. In the Worker environment, set `FILE_SCANNER_ENDPOINT` to the full HTTPS route, set `FILE_SCANNER_ALLOWED_ORIGINS` to its exact HTTPS origin, and store the same token with `wrangler secret put FILE_SCANNER_TOKEN --env development`. The gateway bounds file bodies at 25 MiB, accepts four concurrent scans, and returns a transient `503` while at capacity. The token is never returned by the gateway. Do not publish ClamAV's unauthenticated TCP port.
+The Compose stack can expose ClamAV to a Cloudflare Worker through Caddy with automatic HTTPS. Point a public DNS hostname at the Docker host, allow inbound ports 80 and 443, and set `CLAMAV_HOST=clamav`, `FILE_SCANNER_GATEWAY_DOMAIN` to that hostname, and `FILE_SCANNER_GATEWAY_TOKEN` to a random value of at least 32 characters in the private `.env`. Start both profiles:
+
+```sh
+docker compose --profile clamav --profile scanner-gateway up --build -d
+docker compose ps clamav scanner-gateway-proxy
+```
+
+Caddy forwards only `POST /internal/file-scan`; other paths and methods receive 404. The Bun port stays on localhost by default, and ClamAV's unauthenticated TCP port remains private to the Compose network. Caddy stores its certificate and configuration data in named volumes. If ports 80/443 are already owned by another proxy, keep the Bun port private and configure that proxy to forward only this exact scanner route over HTTPS.
+
+In the selected Cloudflare environment, set `FILE_SCANNER_ENDPOINT` to `https://<FILE_SCANNER_GATEWAY_DOMAIN>/internal/file-scan`, set `FILE_SCANNER_ALLOWED_ORIGINS` to `https://<FILE_SCANNER_GATEWAY_DOMAIN>`, and store the same token only as the `FILE_SCANNER_TOKEN` Worker secret (for development, `wrangler secret put FILE_SCANNER_TOKEN --env development`). The gateway bounds bodies at 25 MiB, accepts four concurrent scans, and returns a transient `503` while at capacity. The token is never returned by the gateway. Do not publish ClamAV's unauthenticated TCP port.

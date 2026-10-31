@@ -16,7 +16,7 @@ services:
       CLAMAV_PORT: ${CLAMAV_PORT:-3310}
       CLAMAV_TIMEOUT_MS: ${CLAMAV_TIMEOUT_MS:-30000}
     ports:
-      - "${PORT:-3000}:3000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"
     volumes:
       - aihat_data:/data
     init: true
@@ -44,6 +44,33 @@ services:
       retries: 5
       start_period: 300s
 
+  scanner-gateway-proxy:
+    profiles: ["scanner-gateway"]
+    image: caddy:2.11.4-alpine
+    environment:
+      FILE_SCANNER_GATEWAY_DOMAIN: ${FILE_SCANNER_GATEWAY_DOMAIN:-localhost}
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+      - "${CADDY_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      aihat-bot-factory:
+        condition: service_started
+      clamav:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   aihat_data:
   clamav_signatures:
+  caddy_data:
+  caddy_config:

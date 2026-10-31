@@ -1,0 +1,12 @@
+{$FILE_SCANNER_GATEWAY_DOMAIN} {
+	@scanner {
+		method POST
+		path /internal/file-scan
+	}
+	handle @scanner {
+		reverse_proxy aihat-bot-factory:3000
+	}
+	handle {
+		respond "Not found" 404
+	}
+}
