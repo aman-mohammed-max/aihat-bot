@@ -144,6 +144,7 @@ Phase 9 — production readiness verification. The Bun and Cloudflare runtimes, 
 - Added migration `0027_native_text_statistics.sql` and a shared registry for reviewed, code-registered TypeScript skills. The built-in text statistics skill uses the normal installation, input/output schema, timeout, rate-limit, bot permission, and Telegram actor-grant checks in both runtimes. Global native metadata must exactly match a registered handler; arbitrary tenant code and sandbox execution remain unsupported.
 - Added an optional `IsolatedSkillExecutor` port for reviewed immutable sandbox artifacts. It receives only validated input, tenant/bot/skill identity, a timeout, and cancellation signal; it receives no source text, secrets, environment, or host handles. Neither runtime injects an adapter, sandbox definitions remain unavailable, and `arbitraryCodeExecution` stays false.
 - Added shared dashboard HTML security headers for both runtimes: a restrictive Content Security Policy, `X-Content-Type-Options`, no-referrer/no-store behavior, and Telegram-compatible `Cross-Origin-Opener-Policy: same-origin-allow-popups`. The policy allows only bundled assets, Telegram login scripts, Google Fonts, and HTTPS/data image URLs; unit coverage verifies the policy and body preservation.
+- Improved keyboard accessibility in workspace dialogs: search now has an explicit screen-reader label and live results, Arrow Up/Down navigation wraps through result buttons, Tab remains inside search/confirmation dialogs, Escape closes or cancels them, and confirmations focus Cancel first and restore focus when closed.
 
 ## Remaining work
 
@@ -173,10 +174,10 @@ Phase 9 — production readiness verification. The Bun and Cloudflare runtimes, 
 ## Validation
 
 - Unit tests executed: `bun test`.
-- Latest full `bun test`: 205 passed, 1,598 assertions, 0 failed.
+- Latest full `bun test`: 208 passed, 1,615 assertions, 0 failed.
 - `git diff --check`: passed.
 - Latest `bun run check`: passed, including Wrangler type generation, both TypeScript configurations, and Biome lint (zero warnings, 15 informational notices).
-- Latest `bun run format:check`: passed for 156 files.
+- Latest `bun run format:check`: passed for 158 files.
 - Bun and Cloudflare builds, including the Wrangler development dry-run, passed. Latest hosted CI run `41193330632` passed all four jobs for commit `20f463d`.
 - Development Worker version `eae593e6-ed4b-420e-9fdb-acb909567a5f` passed live `/health`, `/ready`, `/capabilities`, `/miniapp/`, and public-chat checks. `fileMalwareScanning` remains false and browser sign-in remains disabled pending operator configuration.
 - The phase-specific entries below record earlier migration, smoke, and integration checks.
@@ -216,3 +217,4 @@ Phase 9 — production readiness verification. The Bun and Cloudflare runtimes, 
 - Optional sandbox adapter design verification (2026-10-31): `bun test` passes 205 tests and 1,598 assertions, including checks that sandbox tools are hidden without an adapter, execute only through an injected adapter for a supported skill/version, and return `UNSUPPORTED_CAPABILITY` without one. `bun run check`, `bun run format:check`, Bun and Cloudflare builds, and `git diff --check` pass. No runtime adapter is configured and no code execution capability is advertised.
 
 - Isolated sandbox adapter deployment (2026-10-31): commit `20f463d` passed local typecheck/lint, formatting, 205 tests/1,598 assertions, and Bun/Cloudflare builds. Worker version `eae593e6-ed4b-420e-9fdb-acb909567a5f` passed live health/readiness/capability, Mini App, and public chat checks; capabilities continue to report `arbitraryCodeExecution: false`. No D1 migration was required. Hosted CI run `41193330632` passed all four jobs for this commit.
+- Dashboard dialog accessibility verification (2026-10-31): `bun test` passes 208 tests and 1,615 assertions, including search labels/live-result semantics, arrow-key wrapping, and focus-loop boundaries. `bun run check`, formatting (158 files), Bun/Cloudflare builds, and `git diff --check` pass. The keyboard/focus changes are ready for development deployment after CI.

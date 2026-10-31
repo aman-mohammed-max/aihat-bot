@@ -28,6 +28,7 @@ import type {
   PublicChatBot,
 } from "./types.js";
 import { escapeHtml, icon } from "./view-utils.js";
+import { dialogFocusWrapTarget, nextSearchFocusIndex, renderSearchDialog } from "./dialog-accessibility.js";
 import { botManagementView } from "./views/bot.js";
 import { factoryView } from "./views/factory.js";
 import { loginView, pageTitle, shell } from "./views/shell.js";
@@ -103,6 +104,7 @@ let activeBotVersionsId = "";
 let activeConversationBotId = "";
 let activeMemoryBotId = "";
 let searchOpen = false;
+let searchReturnFocus: HTMLElement | null = null;
 let telegramLoginClientId = "";
 configureTokenReader(() => accessToken);
 
@@ -117,11 +119,45 @@ app.addEventListener("change", (event) => void handleChange(event));
 app.addEventListener("input", handleInput);
 window.addEventListener("hashchange", () => void applyRoute());
 window.addEventListener("keydown", (event) => {
+  const confirmationDialog = document.querySelector<HTMLElement>("#modal-layer:not([hidden]) .confirm-dialog");
+  if (confirmationDialog) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      confirmationDialog.querySelector<HTMLElement>('[data-confirm="no"]')?.click();
+      return;
+    }
+    if (event.key === "Tab") trapDialogFocus(confirmationDialog, event);
+    return;
+  }
+
+  if (searchOpen) {
+    const searchDialog = document.querySelector<HTMLElement>("#search-layer:not([hidden]) .search-dialog");
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSearch();
+      return;
+    }
+    if (event.key === "Tab" && searchDialog) {
+      trapDialogFocus(searchDialog, event);
+      return;
+    }
+    if ((event.key === "ArrowUp" || event.key === "ArrowDown") && searchDialog) {
+      const results = Array.from(searchDialog.querySelectorAll<HTMLElement>(".search-result"));
+      const currentIndex = results.indexOf(document.activeElement as HTMLElement);
+      const nextIndex = nextSearchFocusIndex(currentIndex, results.length, event.key);
+      if (nextIndex !== undefined) {
+        event.preventDefault();
+        results[nextIndex]?.focus();
+      }
+      return;
+    }
+  }
+
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
-    openSearch();
+    if (searchOpen) closeSearch();
+    else openSearch();
   }
-  if (event.key === "Escape") closeSearch();
 });
 
 void boot();
@@ -2404,6 +2440,11 @@ async function copyText(value: string, message: string): Promise<void> {
 }
 
 function openSearch(): void {
+  if (!document.getElementById("search-layer")) return;
+  if (!searchOpen) {
+    const active = document.activeElement;
+    searchReturnFocus = active instanceof HTMLElement ? active : null;
+  }
   searchOpen = true;
   render();
   renderSearch();
@@ -2411,16 +2452,21 @@ function openSearch(): void {
 }
 
 function closeSearch(): void {
+  if (!searchOpen) return;
   searchOpen = false;
   const layer = document.getElementById("search-layer");
   if (layer) layer.hidden = true;
+  const returnFocus = searchReturnFocus;
+  searchReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
+  else app.querySelector<HTMLElement>('[data-action="open-search"]')?.focus();
 }
 
 function renderSearch(): void {
   const layer = document.getElementById("search-layer");
   if (!layer) return;
   layer.hidden = false;
-  layer.innerHTML = `<div class="search-backdrop" data-action="dismiss-search"></div><section class="search-dialog" role="dialog" aria-modal="true" aria-label="Search workspace"><div class="search-dialog-input">${icon("search", 19)}<input id="workspace-search" type="search" placeholder="Search bots and pages…" autocomplete="off" /><kbd>ESC</kbd></div><div class="search-results" id="search-results"></div><div class="search-hint"><span>↑↓ to navigate</span><span>Enter to open</span><span>ESC to close</span></div></section>`;
+  layer.innerHTML = renderSearchDialog();
   updateSearchResults("");
 }
 
@@ -2465,17 +2511,32 @@ function updateSearchResults(query: string): void {
 function askConfirmation(title: string, description: string, confirmLabel: string, danger = false): Promise<boolean> {
   const layer = document.getElementById("modal-layer");
   if (!layer) return Promise.resolve(false);
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   layer.hidden = false;
   layer.innerHTML = `<div class="modal-backdrop"></div><section class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-description"><span class="confirm-icon ${danger ? "danger" : ""}">${icon(danger ? "shield" : "spark", 22)}</span><h2 id="confirm-title">${escapeHtml(title)}</h2><p id="confirm-description">${escapeHtml(description)}</p><div class="confirm-actions"><button class="button button-secondary" data-confirm="no">Cancel</button><button class="button ${danger ? "button-danger" : "button-primary"}" data-confirm="yes">${escapeHtml(confirmLabel)}</button></div></section>`;
   return new Promise((resolve) => {
     const finish = (result: boolean) => {
       layer.hidden = true;
       layer.replaceChildren();
+      if (previousFocus?.isConnected) previousFocus.focus();
       resolve(result);
     };
     layer.querySelector('[data-confirm="no"]')?.addEventListener("click", () => finish(false), { once: true });
     layer.querySelector('[data-confirm="yes"]')?.addEventListener("click", () => finish(true), { once: true });
     layer.querySelector(".modal-backdrop")?.addEventListener("click", () => finish(false), { once: true });
-    layer.querySelector<HTMLElement>('[data-confirm="yes"]')?.focus();
+    layer.querySelector<HTMLElement>('[data-confirm="no"]')?.focus();
   });
+}
+
+function trapDialogFocus(dialog: HTMLElement, event: KeyboardEvent): void {
+  const focusable = Array.from(
+    dialog.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+  const currentIndex = focusable.indexOf(document.activeElement as HTMLElement);
+  const targetIndex = dialogFocusWrapTarget(currentIndex, focusable.length, event.shiftKey);
+  if (targetIndex === undefined) return;
+  event.preventDefault();
+  focusable[targetIndex]?.focus();
 }
