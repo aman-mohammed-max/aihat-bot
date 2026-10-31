@@ -43,6 +43,7 @@ import {
   ScheduledTaskService,
   ScheduledTaskRunner,
   createScheduledTasksApiHandler,
+  createToolExecutionRecoveryApiHandler,
   CombinedToolRegistry,
   DurableToolRegistry,
   McpManager,
@@ -302,6 +303,11 @@ export default {
     if (telegramResponse) return telegramResponse;
     const scheduledTasksResponse = await createScheduledTasksApiHandler(authenticator, scheduledTaskService)(request);
     if (scheduledTasksResponse) return scheduledTasksResponse;
+    const toolExecutionRecoveryResponse = await createToolExecutionRecoveryApiHandler(
+      authenticator,
+      d1.toolExecutions,
+    )(request);
+    if (toolExecutionRecoveryResponse) return toolExecutionRecoveryResponse;
     const botAccessResponse = await createBotAccessApiHandler({
       authenticator,
       access: d1,

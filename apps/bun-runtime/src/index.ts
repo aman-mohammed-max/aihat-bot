@@ -43,6 +43,7 @@ import {
   ScheduledTaskService,
   ScheduledTaskRunner,
   createScheduledTasksApiHandler,
+  createToolExecutionRecoveryApiHandler,
   CombinedToolRegistry,
   DurableToolRegistry,
   McpManager,
@@ -239,6 +240,7 @@ const globalSkillCatalogAdminApi = createGlobalSkillCatalogAdminHandler({
 const mcpApi = createMcpApiHandler(authenticator, repositories, mcpManager);
 const telegramApi = createTelegramManagementApiHandler(authenticator, repositories, repositories, telegram);
 const scheduledTasksApi = createScheduledTasksApiHandler(authenticator, scheduledTaskService);
+const toolExecutionRecoveryApi = createToolExecutionRecoveryApiHandler(authenticator, repositories.toolExecutions);
 const telegramWebhook = createTelegramWebhookHandler(telegram);
 
 const server = Bun.serve({
@@ -284,6 +286,8 @@ const server = Bun.serve({
     if (telegramResponse) return telegramResponse;
     const scheduledTasksResponse = await scheduledTasksApi(request);
     if (scheduledTasksResponse) return scheduledTasksResponse;
+    const toolExecutionRecoveryResponse = await toolExecutionRecoveryApi(request);
+    if (toolExecutionRecoveryResponse) return toolExecutionRecoveryResponse;
     const factoryResponse = await factoryApi(request);
     if (factoryResponse) return factoryResponse;
     const agentResponse = await agentApi(request);

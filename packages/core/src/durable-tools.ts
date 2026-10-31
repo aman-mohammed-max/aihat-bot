@@ -75,6 +75,16 @@ export class DurableToolRegistry implements AgentToolRegistry {
     if (acquired.state === "busy") {
       throw new AppError("DEPENDENCY_UNAVAILABLE", "This tool call is already running.", 503);
     }
+    if (acquired.state === "ambiguous") {
+      throw new AppError(
+        "CONFLICT",
+        "This tool call may already have taken effect. Review Tool recovery before retrying it.",
+        409,
+      );
+    }
+    if (acquired.state === "closed") {
+      throw new AppError("CONFLICT", "This tool call was closed during recovery and cannot be retried.", 409);
+    }
     if (acquired.state === "completed") {
       const stored = await this.#readResult(context.tenantId, acquired.resultRef);
       return restoreResult(stored);

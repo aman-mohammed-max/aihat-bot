@@ -49,3 +49,4 @@ export * from "./memory-http-api.js";
 export * from "./file-scanner.js";
 export * from "./uploaded-files.js";
 export * from "./uploaded-files-http-api.js";
+export * from "./tool-execution-recovery-http-api.js";

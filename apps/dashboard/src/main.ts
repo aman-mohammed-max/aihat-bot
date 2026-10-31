@@ -22,6 +22,7 @@ import type {
   WorkspaceMembership,
   UsageSummary,
   UploadedFile,
+  ToolExecutionRecovery,
 } from "./types.js";
 import { escapeHtml, icon } from "./view-utils.js";
 import { botManagementView } from "./views/bot.js";
@@ -295,18 +296,20 @@ async function loadBotResources(botId: string): Promise<void> {
     state.memoryRecords = [];
     state.botVersions = [];
     state.uploadedFiles = [];
+    state.toolRecoveries = [];
     state.botAccess = undefined;
     state.invitationToken = undefined;
   }
   activeBotResourcesId = botId;
   const base = `/v1/bots/${encodeURIComponent(botId)}`;
-  const [bot, telegram, skills, servers, tasks, files] = await Promise.allSettled([
+  const [bot, telegram, skills, servers, tasks, files, toolRecoveries] = await Promise.allSettled([
     api<Bot>(base),
     api<TelegramSettings>(`${base}/telegram`),
     api<Skill[]>(`${base}/skills`),
     api<McpServer[]>(`${base}/mcp-servers`),
     api<{ tasks: ScheduledTask[] }>(`${base}/scheduled-tasks`),
     api<{ items: UploadedFile[] }>(`${base}/files`),
+    api<{ recoveries: ToolExecutionRecovery[] }>(`${base}/tool-executions`),
   ]);
   state.pageError = undefined;
   if (bot.status === "fulfilled") state.activeBot = bot.value;
@@ -319,6 +322,7 @@ async function loadBotResources(botId: string): Promise<void> {
   state.servers = servers.status === "fulfilled" ? servers.value : [];
   state.tasks = tasks.status === "fulfilled" ? tasks.value.tasks : [];
   state.uploadedFiles = files.status === "fulfilled" ? files.value.items : [];
+  state.toolRecoveries = toolRecoveries.status === "fulfilled" ? toolRecoveries.value.recoveries : [];
   const tools = await Promise.all(
     state.servers
       .filter((server) => server.status === "connected")
@@ -516,7 +520,10 @@ async function handleClick(event: MouseEvent): Promise<void> {
     else if (action === "scan-uploaded-file") await scanUploadedFile(target.dataset.fileId ?? "");
     else if (action === "delete-uploaded-file") await deleteUploadedFile(target.dataset.fileId ?? "");
     else if (action === "download-uploaded-file") await downloadUploadedFile(target.dataset.fileId ?? "");
-    else if (action.startsWith("mcp-connect:")) await connectMcp(action.slice("mcp-connect:".length));
+    else if (action === "reload-tool-recoveries") await loadToolRecoveries(requireActiveBot().id);
+    else if (action === "resolve-tool-recovery") {
+      await resolveToolRecovery(target.dataset.executionKey ?? "", target.dataset.resolution ?? "");
+    } else if (action.startsWith("mcp-connect:")) await connectMcp(action.slice("mcp-connect:".length));
     else if (action.startsWith("mcp-delete:")) await deleteMcp(action.slice("mcp-delete:".length));
     else if (action === "toggle-mcp-tool") await toggleMcpTool(target);
     else if (action === "toggle-skill") await toggleSkill(target);
@@ -1230,6 +1237,43 @@ async function downloadUploadedFile(fileId: string): Promise<void> {
 async function loadUploadedFiles(botId: string): Promise<void> {
   const result = await api<{ items: UploadedFile[] }>(`${botBase(botId)}/files`);
   state.uploadedFiles = result.items;
+}
+
+async function loadToolRecoveries(botId: string): Promise<void> {
+  const result = await api<{ recoveries: ToolExecutionRecovery[] }>(`${botBase(botId)}/tool-executions`);
+  state.toolRecoveries = result.recoveries;
+  render();
+}
+
+async function resolveToolRecovery(executionKey: string, resolution: string): Promise<void> {
+  const bot = requireActiveBot();
+  if (!/^[a-f0-9]{64}$/.test(executionKey) || (resolution !== "retry" && resolution !== "close")) {
+    throw new Error("Choose a valid tool recovery action.");
+  }
+  if (resolution === "retry") {
+    const approved = await askConfirmation(
+      "Approve this tool call to run again?",
+      "Check the external service first. It may already have completed the action, and retrying can duplicate its effect. The original request must be replayed with the same key; this approval does not launch it by itself.",
+      "Approve retry",
+      true,
+    );
+    if (!approved) return;
+  } else if (
+    !(await askConfirmation(
+      "Close this uncertain tool call?",
+      "This prevents the original request from running this tool call again with the same key.",
+      "Close call",
+      true,
+    ))
+  ) {
+    return;
+  }
+  await api(`${botBase(bot.id)}/tool-executions/${encodeURIComponent(executionKey)}/resolve`, {
+    method: "POST",
+    body: jsonBody({ resolution }),
+  });
+  await loadToolRecoveries(bot.id);
+  showToast(resolution === "retry" ? "Retry approved" : "Tool call closed");
 }
 
 function supportedUploadedFileType(file: File): string {

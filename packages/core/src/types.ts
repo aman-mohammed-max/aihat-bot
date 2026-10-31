@@ -391,7 +391,18 @@ export type WorkflowExecutionAcquisition =
 export type ToolExecutionAcquisition =
   | { readonly state: "acquired"; readonly leaseToken: string; readonly replacedResultRef?: string }
   | { readonly state: "busy" }
+  | { readonly state: "ambiguous" }
+  | { readonly state: "closed" }
   | { readonly state: "completed"; readonly resultRef: string };
+
+export interface ToolExecutionRecovery {
+  readonly botId: BotId;
+  readonly executionKey: string;
+  readonly toolName: string;
+  readonly status: "ambiguous" | "retry_approved";
+  readonly ambiguousAt: string;
+  readonly updatedAt: string;
+}
 
 export type McpServerStatus = "disconnected" | "connected" | "unhealthy" | "disabled";
 

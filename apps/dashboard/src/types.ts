@@ -151,6 +151,15 @@ export interface UploadedFile {
   updatedAt: string;
 }
 
+export interface ToolExecutionRecovery {
+  botId: string;
+  executionKey: string;
+  toolName: string;
+  status: "ambiguous" | "retry_approved";
+  ambiguousAt: string;
+  updatedAt: string;
+}
+
 export interface ConversationSummary {
   id: string;
   platform: "internal" | "telegram" | "web_chat" | "api";

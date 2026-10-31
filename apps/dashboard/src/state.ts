@@ -22,6 +22,7 @@ import type {
   WorkspaceMembership,
   UsageSummary,
   UploadedFile,
+  ToolExecutionRecovery,
 } from "./types.js";
 
 export interface ChatLine {
@@ -47,6 +48,7 @@ export interface UiState {
   toolsByServer: Record<string, McpTool[]>;
   tasks: ScheduledTask[];
   uploadedFiles: UploadedFile[];
+  toolRecoveries: ToolExecutionRecovery[];
   conversations: ConversationSummary[];
   conversationMessages: StoredConversationMessage[];
   selectedConversationId?: string | undefined;
@@ -96,6 +98,7 @@ export function createInitialState(): UiState {
     toolsByServer: {},
     tasks: [],
     uploadedFiles: [],
+    toolRecoveries: [],
     conversations: [],
     conversationMessages: [],
     conversationHasMore: false,

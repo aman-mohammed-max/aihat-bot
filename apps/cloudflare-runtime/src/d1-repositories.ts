@@ -78,6 +78,7 @@ import type {
   WorkflowExecutionAcquisition,
   WorkflowExecutionRepository,
   ToolExecutionAcquisition,
+  ToolExecutionRecovery,
   ToolExecutionRepository,
   TenantMembershipRepository,
 } from "@aihat/core";
@@ -324,6 +325,8 @@ interface ToolExecutionRow {
   tool_name: string;
   input_hash: string;
   status: "running" | "succeeded";
+  recovery_status: "none" | "ambiguous" | "retry_approved" | "closed";
+  ambiguous_at: string | null;
   result_ref: string | null;
   lease_token: string | null;
   lease_until: string;
@@ -449,6 +452,8 @@ export class CloudflareD1Repositories
       acquire: (input) => this.acquireToolExecution(input),
       complete: (input) => this.completeToolExecution(input),
       release: (input) => this.releaseToolExecution(input),
+      listOwnedRecoveries: (input) => this.listOwnedToolExecutionRecoveries(input),
+      resolveOwnedRecovery: (input) => this.resolveOwnedToolExecutionRecovery(input),
       purgeExpired: (tenantId, now, limit) => this.purgeToolExecutions(tenantId, now, limit),
     };
     this.tenantMembers = {
@@ -4170,7 +4175,7 @@ export class CloudflareD1Repositories
       this.db
         .prepare(`
           SELECT tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
-                 lease_token, lease_until, expires_at, updated_at
+                 lease_token, lease_until, expires_at, updated_at, recovery_status, ambiguous_at
           FROM tool_executions WHERE tenant_id = ? AND bot_id = ? AND execution_key = ?
         `)
         .bind(input.tenantId, input.botId, input.executionKey)
@@ -4218,7 +4223,8 @@ export class CloudflareD1Repositories
       const update = await this.db
         .prepare(`
           UPDATE tool_executions
-          SET status = 'running', result_ref = NULL, lease_token = ?, lease_until = ?, expires_at = ?, updated_at = ?
+          SET status = 'running', result_ref = NULL, lease_token = ?, lease_until = ?, expires_at = ?, updated_at = ?,
+              recovery_status = 'none', ambiguous_at = NULL
           WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND expires_at <= ?
         `)
         .bind(
@@ -4234,11 +4240,32 @@ export class CloudflareD1Repositories
         .run();
       updateChanges = update.meta.changes;
     } else if (row.status === "running" && row.lease_until <= input.now) {
+      if (row.recovery_status === "closed") return { state: "closed" };
+      if (row.recovery_status === "ambiguous") return { state: "ambiguous" };
+      if (row.recovery_status === "none") {
+        await this.db
+          .prepare(`
+            UPDATE tool_executions SET recovery_status = 'ambiguous', ambiguous_at = COALESCE(ambiguous_at, ?),
+              lease_until = ?, updated_at = ?
+            WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND status = 'running'
+              AND recovery_status = 'none' AND lease_until <= ? AND expires_at > ?
+          `)
+          .bind(input.now, input.now, input.now, input.tenantId, input.botId, input.executionKey, input.now, input.now)
+          .run();
+        row = await select();
+        if (row?.recovery_status === "ambiguous") return { state: "ambiguous" };
+        if (row?.recovery_status === "closed") return { state: "closed" };
+        if (row?.status === "succeeded" && row.result_ref && row.expires_at > input.now) {
+          return { state: "completed", resultRef: row.result_ref };
+        }
+        return { state: "busy" };
+      }
       const update = await this.db
         .prepare(`
-          UPDATE tool_executions SET lease_token = ?, lease_until = ?, expires_at = ?, updated_at = ?
+          UPDATE tool_executions SET lease_token = ?, lease_until = ?, expires_at = ?, updated_at = ?,
+            recovery_status = 'none', ambiguous_at = NULL
           WHERE tenant_id = ? AND bot_id = ? AND execution_key = ?
-            AND status = 'running' AND lease_until <= ? AND expires_at > ?
+            AND status = 'running' AND recovery_status = 'retry_approved' AND lease_until <= ? AND expires_at > ?
         `)
         .bind(
           input.leaseToken,
@@ -4283,7 +4310,8 @@ export class CloudflareD1Repositories
       .prepare(`
         UPDATE tool_executions
         SET status = 'succeeded', result_ref = ?, lease_token = NULL, lease_until = ?, expires_at = ?, updated_at = ?
-        WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND status = 'running' AND lease_token = ?
+        WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND status = 'running'
+          AND recovery_status = 'none' AND lease_token = ?
       `)
       .bind(
         input.resultRef,
@@ -4308,11 +4336,117 @@ export class CloudflareD1Repositories
   }): Promise<void> {
     await this.db
       .prepare(`
-        UPDATE tool_executions SET lease_until = ?, updated_at = ?
-        WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND status = 'running' AND lease_token = ?
+        UPDATE tool_executions SET recovery_status = 'ambiguous', ambiguous_at = COALESCE(ambiguous_at, ?),
+          lease_until = ?, updated_at = ?
+        WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND status = 'running'
+          AND recovery_status = 'none' AND lease_token = ?
       `)
-      .bind(input.now, input.now, input.tenantId, input.botId, input.executionKey, input.leaseToken)
+      .bind(input.now, input.now, input.now, input.tenantId, input.botId, input.executionKey, input.leaseToken)
       .run();
+  }
+
+  async listOwnedToolExecutionRecoveries(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly now: string;
+    readonly limit: number;
+  }): Promise<readonly ToolExecutionRecovery[]> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+      throw new AppError("VALIDATION_ERROR", "Tool recovery page size is invalid.", 400);
+    }
+    await this.db
+      .prepare(`
+        UPDATE tool_executions SET recovery_status = 'ambiguous',
+          ambiguous_at = COALESCE(ambiguous_at, ?), updated_at = ?
+        WHERE tenant_id = ? AND bot_id = ? AND status = 'running' AND recovery_status = 'none'
+          AND lease_until <= ? AND expires_at > ?
+          AND EXISTS (SELECT 1 FROM bots WHERE bots.tenant_id = tool_executions.tenant_id
+            AND bots.id = tool_executions.bot_id AND bots.owner_id = ?)
+      `)
+      .bind(input.now, input.now, input.tenantId, input.botId, input.now, input.now, input.ownerId)
+      .run();
+    const rows = await this.db
+      .prepare(`
+        SELECT execution.bot_id, execution.execution_key, execution.tool_name,
+               execution.recovery_status, execution.ambiguous_at, execution.updated_at
+        FROM tool_executions AS execution
+        JOIN bots ON bots.tenant_id = execution.tenant_id AND bots.id = execution.bot_id
+        WHERE execution.tenant_id = ? AND bots.owner_id = ? AND execution.bot_id = ?
+          AND execution.status = 'running' AND execution.recovery_status IN ('ambiguous', 'retry_approved')
+          AND execution.expires_at > ?
+        ORDER BY execution.ambiguous_at ASC, execution.execution_key ASC LIMIT ?
+      `)
+      .bind(input.tenantId, input.ownerId, input.botId, input.now, input.limit)
+      .all<{
+        bot_id: string;
+        execution_key: string;
+        tool_name: string;
+        recovery_status: ToolExecutionRecovery["status"];
+        ambiguous_at: string | null;
+        updated_at: string;
+      }>();
+    return rows.results.map(mapToolExecutionRecovery);
+  }
+
+  async resolveOwnedToolExecutionRecovery(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly executionKey: string;
+    readonly resolution: "retry" | "close";
+    readonly now: string;
+  }): Promise<"retry_approved" | "closed" | undefined> {
+    const prior = await this.db
+      .prepare(`
+        SELECT execution.tool_name
+        FROM tool_executions AS execution
+        JOIN bots ON bots.tenant_id = execution.tenant_id AND bots.id = execution.bot_id
+        WHERE execution.tenant_id = ? AND bots.owner_id = ? AND execution.bot_id = ?
+          AND execution.execution_key = ? AND execution.status = 'running'
+          AND execution.recovery_status = 'ambiguous' AND execution.lease_until <= ?
+          AND execution.expires_at > ?
+      `)
+      .bind(input.tenantId, input.ownerId, input.botId, input.executionKey, input.now, input.now)
+      .first<{ tool_name: string }>();
+    if (!prior) return undefined;
+    const status = input.resolution === "retry" ? "retry_approved" : "closed";
+    const auditAction = input.resolution === "retry" ? "tool.execution_retry_approved" : "tool.execution_closed";
+    const [update] = await this.db.batch([
+      this.db
+        .prepare(`
+          UPDATE tool_executions SET recovery_status = ?, updated_at = ?
+          WHERE tenant_id = ? AND bot_id = ? AND execution_key = ? AND status = 'running'
+            AND recovery_status = 'ambiguous' AND lease_until <= ? AND expires_at > ?
+            AND EXISTS (SELECT 1 FROM bots WHERE bots.tenant_id = tool_executions.tenant_id
+              AND bots.id = tool_executions.bot_id AND bots.owner_id = ?)
+        `)
+        .bind(status, input.now, input.tenantId, input.botId, input.executionKey, input.now, input.now, input.ownerId),
+      this.db
+        .prepare(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          SELECT ?, ?, ?, ?, 'tool_execution', ?, ?, ?
+          WHERE changes() = 1 AND EXISTS (
+            SELECT 1 FROM tool_executions WHERE tenant_id = ? AND bot_id = ? AND execution_key = ?
+              AND recovery_status = ? AND updated_at = ?
+          )
+        `)
+        .bind(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.tenantId,
+          input.ownerId,
+          auditAction,
+          input.executionKey,
+          JSON.stringify({ botId: input.botId, toolName: prior.tool_name, resolution: input.resolution }),
+          input.now,
+          input.tenantId,
+          input.botId,
+          input.executionKey,
+          status,
+          input.now,
+        ),
+    ]);
+    return update?.meta.changes === 1 ? status : undefined;
   }
 
   async purgeToolExecutions(tenantId: TenantId, now: string, limit: number): Promise<readonly string[]> {
@@ -4322,7 +4456,7 @@ export class CloudflareD1Repositories
     const selected = await this.db
       .prepare(`
         SELECT tenant_id, bot_id, execution_key, tool_name, input_hash, status, result_ref,
-               lease_token, lease_until, expires_at, updated_at
+               lease_token, lease_until, expires_at, updated_at, recovery_status, ambiguous_at
         FROM tool_executions WHERE tenant_id = ? AND expires_at <= ? ORDER BY expires_at LIMIT ?
       `)
       .bind(tenantId, now, limit)
@@ -4870,6 +5004,25 @@ function mapScheduledTask(row: ScheduledTaskRow): ScheduledTask {
 
 function isScheduledTaskId(value: string): boolean {
   return /^task_[a-f0-9]{32}$/.test(value);
+}
+
+function mapToolExecutionRecovery(row: {
+  bot_id: string;
+  execution_key: string;
+  tool_name: string;
+  recovery_status: ToolExecutionRecovery["status"];
+  ambiguous_at: string | null;
+  updated_at: string;
+}): ToolExecutionRecovery {
+  if (!row.ambiguous_at) throw new AppError("INTERNAL_ERROR", "Tool recovery timestamp is missing.", 500);
+  return {
+    botId: row.bot_id as BotId,
+    executionKey: row.execution_key,
+    toolName: row.tool_name,
+    status: row.recovery_status,
+    ambiguousAt: row.ambiguous_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function validateTelegramUserId(value: number): void {

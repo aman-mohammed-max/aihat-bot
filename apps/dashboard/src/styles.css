@@ -594,6 +594,11 @@ kbd {
   border-color: rgba(64, 156, 198, 0.22);
   background: rgba(31, 114, 151, 0.13);
 }
+.alert-warning {
+  color: #ffe1ad;
+  border-color: rgba(221, 162, 65, 0.28);
+  background: rgba(151, 95, 28, 0.16);
+}
 .alert code,
 .field-hint code,
 .field code {
@@ -4750,6 +4755,49 @@ kbd {
   width: 32px;
   height: 32px;
 }
+.tool-recovery-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  background: rgba(18, 34, 49, 0.76);
+}
+.tool-recovery-icon {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  display: grid;
+  place-items: center;
+  color: #f5bb67;
+  border: 1px solid rgba(245, 187, 103, 0.19);
+  border-radius: 10px;
+  background: rgba(185, 124, 45, 0.12);
+}
+.tool-recovery-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 4px;
+}
+.tool-recovery-copy b {
+  color: var(--text);
+  font-size: 11px;
+}
+.tool-recovery-copy small {
+  color: var(--muted);
+  font-size: 9px;
+}
+.tool-recovery-copy code {
+  color: #9edbf5;
+}
+.tool-recovery-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 @media (max-width: 620px) {
   .uploaded-file-row {
     align-items: flex-start;
@@ -4761,6 +4809,18 @@ kbd {
   .uploaded-file-actions {
     width: 100%;
     justify-content: flex-end;
+  }
+  .tool-recovery-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .tool-recovery-row > .status-pill {
+    margin-left: auto;
+  }
+  .tool-recovery-actions,
+  .tool-recovery-row > .field-hint {
+    width: 100%;
+    margin-left: 47px;
   }
 }
 .botfather-launch-copy {

@@ -32,6 +32,7 @@ import type {
   AuditLogEvent,
   WorkflowExecutionAcquisition,
   ToolExecutionAcquisition,
+  ToolExecutionRecovery,
   TenantMember,
   TenantInvitation,
   TenantRole,
@@ -937,6 +938,21 @@ export interface ToolExecutionRepository {
     readonly leaseToken: string;
     readonly now: string;
   }): Promise<void>;
+  listOwnedRecoveries(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly now: string;
+    readonly limit: number;
+  }): Promise<readonly ToolExecutionRecovery[]>;
+  resolveOwnedRecovery(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly executionKey: string;
+    readonly resolution: "retry" | "close";
+    readonly now: string;
+  }): Promise<"retry_approved" | "closed" | undefined>;
   purgeExpired(tenantId: TenantId, now: string, limit: number): Promise<readonly string[]>;
 }
 

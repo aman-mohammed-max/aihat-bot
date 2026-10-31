@@ -20,6 +20,7 @@ export function botManagementView(state: UiState): string {
     ["skills", "Skills", "spark"],
     ["mcp", "MCP tools", "plug"],
     ["automation", "Automation", "clock"],
+    ["tool-recovery", "Tool recovery", "shield"],
   ];
   const tabMarkup = tabs
     .map(
@@ -56,9 +57,21 @@ function renderBotTab(state: UiState, bot: Bot): string {
       return mcpTab(state);
     case "automation":
       return automationTab(state, bot);
+    case "tool-recovery":
+      return toolRecoveryTab(state, bot);
     default:
       return overviewTab(state, bot);
   }
+}
+
+function toolRecoveryTab(state: UiState, bot: Bot): string {
+  const records = state.toolRecoveries
+    .map((recovery) => {
+      const approved = recovery.status === "retry_approved";
+      return `<article class="tool-recovery-row"><div class="tool-recovery-icon">${icon(approved ? "clock" : "shield", 18)}</div><div class="tool-recovery-copy"><b>${escapeHtml(recovery.toolName)}</b><small>Key <code title="${escapeHtml(recovery.executionKey)}">${escapeHtml(recovery.executionKey.slice(0, 16))}…</code></small><small>Needs review since ${escapeHtml(formatDate(recovery.ambiguousAt))}</small></div><span class="status-pill ${approved ? "status-paused" : "status-failed"}"><span class="status-dot"></span>${approved ? "Retry approved" : "Review needed"}</span>${approved ? `<span class="field-hint">Waiting for the original request to retry with this key.</span>` : `<div class="tool-recovery-actions"><button class="button button-danger-outline button-small" data-action="resolve-tool-recovery" data-resolution="retry" data-execution-key="${escapeHtml(recovery.executionKey)}">Approve retry</button><button class="button button-secondary button-small" data-action="resolve-tool-recovery" data-resolution="close" data-execution-key="${escapeHtml(recovery.executionKey)}">Close</button></div>`}</article>`;
+    })
+    .join("");
+  return `<section class="panel form-panel"><div class="panel-heading"><div><div class="eyebrow">REMOTE ACTIONS</div><h2>Review uncertain tool calls</h2><p class="panel-subtitle">A timeout can happen after an external service already accepted an action. Calls that could not save a result are paused here for your review.</p></div><span class="quiet-badge">${state.toolRecoveries.length} pending</span></div><div class="alert alert-warning compact-alert">Before approving a retry, check the connected service for the action. Approving may repeat a payment, message, or other external effect. Closing blocks this request from running again. This screen never stores or shows tool input or output.</div></section><section class="panel uploaded-files-panel"><div class="panel-heading"><div><div class="eyebrow">${escapeHtml(bot.name)}</div><h2>Tool execution recovery</h2></div><button class="button button-secondary button-small" data-action="reload-tool-recoveries">Refresh</button></div>${records || `<div class="tools-empty">No tool calls need recovery.</div>`}</section>`;
 }
 
 function filesTab(state: UiState, bot: Bot): string {
