@@ -20,6 +20,16 @@ Inspect Cloudflare request errors with `wrangler tail --env=""` from `apps/cloud
 - Telegram launch data is time limited and one use. Close and reopen the Mini App to get fresh launch data if authentication reports stale or replayed data.
 - A signed first launch creates the Telegram user's personal workspace. If `/ready` is healthy but sign-in fails, check the Worker logs for a sanitized auth failure and verify the bot token; do not copy `initData` into support logs.
 
+## Telegram browser sign-in
+
+Browser sign-in uses Telegram's OIDC ID token flow and is separate from Mini App `initData` authentication. To enable it for the development Worker:
+
+- In the [Telegram Login documentation](https://core.telegram.org/bots/telegram-login), open the `@BotFather` mini app, select `@aihatfactorybot`, then **Login Widget**. Add `https://aihat-bot-factory.work-fdc.workers.dev` as an allowed website origin. Telegram only processes logins from URLs registered there.
+- Copy the numeric Client ID shown by BotFather to `TELEGRAM_LOGIN_CLIENT_ID` in the development `wrangler.jsonc` variables. For a local Bun browser session, set the same variable in the ignored `.env` file.
+- Keep Telegram's signing algorithm set to **RS256**; the current ID-token verifier rejects other algorithms.
+- Rebuild and deploy the development Worker, then verify `GET /v1/auth/telegram/browser-config` returns `enabled: true` and the configured Client ID. The sign-in button appears on the dashboard and public Web Chat login pages.
+- Do not set `Cross-Origin-Opener-Policy: same-origin`; Telegram's popup login library requires popups to communicate with the opener. If a COOP policy is added, use `same-origin-allow-popups` as described in Telegram's [login library guidance](https://core.telegram.org/bots/telegram-login#callback-data).
+
 ## Master bot commands
 
 The Mini App sign-in does not require the master bot webhook. To use `/create`, `/continue`, and other text commands, configure `TELEGRAM_MASTER_WEBHOOK_SECRET` and `TELEGRAM_WEBHOOK_BASE_URL`, then run `bun run telegram:register-master` with those values and the master bot token in the Bun environment. The registration command calls Telegram `setWebhook`; a Telegram bot can have only one webhook, so inspect its existing integration before registering this app.

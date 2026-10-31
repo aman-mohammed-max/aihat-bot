@@ -147,7 +147,7 @@ Core runtime expansion and tenant collaboration: verified-origin streaming and s
 
 - Configure the HTTPS malware-scanner gateway for Cloudflare deployments. The optional Compose Caddy profile provides TLS and exposes only the authenticated scan route; the operator still needs public DNS with ports 80/443, a private `FILE_SCANNER_GATEWAY_TOKEN`, and matching Worker endpoint, exact-origin allowlist, and `FILE_SCANNER_TOKEN` secret. The development Worker remains unconfigured, so its dashboard uploads stay quarantined and Telegram attachments, including PDF/DOCX files, are refused.
 - Complete staging/production setup: run the new provisioner only when those environments are approved for resource creation, configure their secrets and variables, then deploy and verify each Worker. Configure the development Worker host in BotFather for Mini App testing.
-- Configure the development `TELEGRAM_LOGIN_CLIENT_ID` and BotFather's authorized HTTPS origin to enable browser sign-in; it is deliberately disabled while the Wrangler variable is empty.
+- Configure development browser sign-in: register `https://aihat-bot-factory.work-fdc.workers.dev` in `@BotFather` → the bot's **Login Widget** allowed URLs, copy the displayed numeric Client ID into `TELEGRAM_LOGIN_CLIENT_ID`, keep RS256 signing enabled, then deploy and verify the browser-config endpoint. The Wrangler variable remains empty, so browser sign-in is disabled. Steps are documented in [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Known issues and constraints
 
