@@ -11,6 +11,7 @@ import {
   CreationApprovalService,
   FactoryAssistant,
   OpenAICompatibleAudioTranscriber,
+  isTelegramAudioTranscriptionAvailable,
   ProviderCapabilityTools,
   EncryptedSecretStore,
   createSecretRotationApiHandler,
@@ -94,6 +95,7 @@ export const runtimeCapabilities = {
     modelStructuredOutput: false,
     telegram: true,
     telegramMasterBot: false,
+    telegramAudioTranscription: false,
     mcp: true,
     mcpOAuth: true,
     mcpOAuthAuthorizationCode: true,
@@ -410,6 +412,11 @@ export default {
           telegramMiniAppAuth: Boolean(telegramMasterBotToken),
           telegramMasterBot: Boolean(masterBot),
           fileMalwareScanning: Boolean(malwareScanner),
+          telegramAudioTranscription: isTelegramAudioTranscriptionAvailable({
+            telegramWebhookConfigured: Boolean(env.TELEGRAM_WEBHOOK_BASE_URL.trim()),
+            malwareScannerConfigured: Boolean(malwareScanner),
+            allowedProviderOrigins: modelAllowedOrigins,
+          }),
           modelStreaming: hasVerifiedStreamingOrigin(
             new Set(
               env.MODEL_ALLOWED_ORIGINS.split(",")

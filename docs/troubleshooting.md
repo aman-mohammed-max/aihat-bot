@@ -65,6 +65,7 @@ Approved senders are limited to 30 messages per minute by default. Set `TELEGRAM
 
 ## Telegram audio transcription
 
+- Check `GET /capabilities`: `telegramAudioTranscription` is `true` only when customer Telegram webhooks, malware scanning, and at least one HTTPS model origin are configured. A bot still needs its own selected audio model.
 - Audio support is optional per bot. Select an audio transcription model in the factory or bot settings; the configured provider must expose an OpenAI-compatible `/audio/transcriptions` route.
 - Add the provider's exact HTTPS origin to `MODEL_ALLOWED_ORIGINS`. The provider uses the bot's encrypted model credential. The origin check runs before that credential is resolved.
 - Audio is limited to 10 MiB and 10 minutes and must pass malware scanning. If scanning is missing or unavailable, transcription fails closed; see [File scanning](#file-scanning).

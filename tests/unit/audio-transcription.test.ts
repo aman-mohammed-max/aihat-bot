@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { OpenAICompatibleAudioTranscriber } from "../../packages/core/src/audio-transcription.js";
+import {
+  isTelegramAudioTranscriptionAvailable,
+  OpenAICompatibleAudioTranscriber,
+} from "../../packages/core/src/audio-transcription.js";
 import type { TenantId } from "../../packages/core/src/types.js";
 
 const tenantId = "tenant-audio" as TenantId;
@@ -15,6 +18,24 @@ function model(audioModel = "whisper-1") {
 }
 
 describe("OpenAI-compatible audio transcription", () => {
+  test("advertises audio only when Telegram, scanning, and HTTPS model egress are configured", () => {
+    const required = {
+      telegramWebhookConfigured: true,
+      malwareScannerConfigured: true,
+      allowedProviderOrigins: new Set(["https://provider.example.test/v1"]),
+    };
+    expect(isTelegramAudioTranscriptionAvailable(required)).toBe(true);
+    expect(isTelegramAudioTranscriptionAvailable({ ...required, telegramWebhookConfigured: false })).toBe(false);
+    expect(isTelegramAudioTranscriptionAvailable({ ...required, malwareScannerConfigured: false })).toBe(false);
+    expect(isTelegramAudioTranscriptionAvailable({ ...required, allowedProviderOrigins: new Set() })).toBe(false);
+    expect(
+      isTelegramAudioTranscriptionAvailable({
+        ...required,
+        allowedProviderOrigins: new Set(["http://provider.example.test/v1"]),
+      }),
+    ).toBe(false);
+  });
+
   test("sends bounded audio as multipart to the allowlisted transcription route", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const transcriber = new OpenAICompatibleAudioTranscriber({

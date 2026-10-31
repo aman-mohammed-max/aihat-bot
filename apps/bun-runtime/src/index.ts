@@ -9,6 +9,7 @@ import {
   CreationApprovalService,
   FactoryAssistant,
   OpenAICompatibleAudioTranscriber,
+  isTelegramAudioTranscriptionAvailable,
   ProviderCapabilityTools,
   EncryptedSecretStore,
   BotCredentialApprovalService,
@@ -393,6 +394,11 @@ const server = Bun.serve({
           telegramMiniAppAuth: Boolean(telegramMasterBotToken),
           telegramMasterBot: Boolean(telegramMasterBot),
           fileMalwareScanning: Boolean(malwareScanner),
+          telegramAudioTranscription: isTelegramAudioTranscriptionAvailable({
+            telegramWebhookConfigured: Boolean(telegramWebhookBaseUrl.trim()),
+            malwareScannerConfigured: Boolean(malwareScanner),
+            allowedProviderOrigins: modelAllowedOrigins,
+          }),
           modelStreaming: hasVerifiedStreamingOrigin(
             new Set(
               (process.env.MODEL_ALLOWED_ORIGINS ?? "")

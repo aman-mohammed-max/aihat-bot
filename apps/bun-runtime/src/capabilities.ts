@@ -25,6 +25,7 @@ export const runtimeCapabilities: RuntimeCapabilities = {
     modelStructuredOutput: false,
     telegram: true,
     telegramMasterBot: false,
+    telegramAudioTranscription: false,
     mcp: true,
     mcpOAuth: true,
     mcpOAuthAuthorizationCode: true,

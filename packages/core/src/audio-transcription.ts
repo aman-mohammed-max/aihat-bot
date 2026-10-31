@@ -7,6 +7,22 @@ export const TRANSCRIBED_AUDIO_MAX_CHARS = 60_000;
 
 const MAX_RESPONSE_BYTES = 128 * 1024;
 
+export function isTelegramAudioTranscriptionAvailable(input: {
+  readonly telegramWebhookConfigured: boolean;
+  readonly malwareScannerConfigured: boolean;
+  readonly allowedProviderOrigins: ReadonlySet<string>;
+}): boolean {
+  if (!input.telegramWebhookConfigured || !input.malwareScannerConfigured) return false;
+  return [...input.allowedProviderOrigins].some((origin) => {
+    try {
+      const url = new URL(origin);
+      return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash;
+    } catch {
+      return false;
+    }
+  });
+}
+
 export interface AudioTranscriber {
   transcribe(input: {
     readonly tenantId: TenantId;
