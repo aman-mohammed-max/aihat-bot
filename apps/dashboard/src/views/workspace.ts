@@ -66,6 +66,60 @@ export function botsView(state: UiState): string {
     ${bots.length ? `<section class="bot-card-grid" id="bot-card-grid">${bots.map((bot) => botCard(bot)).join("")}</section>` : `<section class="panel empty-panel">${emptyState("bots", "Nothing on the roster yet", "Your bots will show up here. Start with a name and a clear purpose.", "Create your first bot", "navigate-create")}</section>`}`;
 }
 
+export function modelProvidersView(state: UiState): string {
+  const bots = state.bots
+    .filter((bot) => !bot.collaboratorRole)
+    .sort((left, right) => left.name.localeCompare(right.name));
+  const groups = new Map<string, { providerId: string; endpoint: string; bots: Bot[] }>();
+  for (const bot of bots) {
+    const endpoint = bot.model.endpoint?.trim() ?? "";
+    const key = JSON.stringify([bot.model.providerId, endpoint]);
+    const group = groups.get(key) ?? { providerId: bot.model.providerId, endpoint, bots: [] };
+    group.bots.push(bot);
+    groups.set(key, group);
+  }
+  const providers = [...groups.values()].sort((left, right) =>
+    `${left.providerId}\u0000${left.endpoint}`.localeCompare(`${right.providerId}\u0000${right.endpoint}`),
+  );
+  const credentialedBots = bots.filter((bot) => bot.model.hasCredential).length;
+
+  return `<section class="panel intro-panel"><div class="intro-icon intro-blue">${icon("sliders", 21)}</div><div class="intro-copy"><div class="eyebrow">MODEL PROVIDERS</div><h2>Models configured for your bots.</h2><p>Provider IDs, endpoints, model roles, and credential status are shown per bot. Update a bot’s provider settings or rotate its credential from that bot’s configuration.</p></div><span class="quiet-badge">${bots.length} ${bots.length === 1 ? "owned bot" : "owned bots"}</span></section>
+    <section class="stat-grid" aria-label="Model provider totals">
+      ${statCard("Provider configurations", providers.length, "Provider and endpoint pairs", "sliders", "blue")}
+      ${statCard("Configured bots", bots.length, "Bots you own", "bots", "mint")}
+      ${statCard("Encrypted credentials", credentialedBots, "Bots with a saved provider key", "key", "violet")}
+      ${statCard("No saved key", bots.length - credentialedBots, "Bots without a stored provider key", "shield", "amber")}
+    </section>
+    ${
+      providers.length
+        ? `<div class="model-provider-list">${providers
+            .map((provider) => {
+              const credentialCount = provider.bots.filter((bot) => bot.model.hasCredential).length;
+              const botRows = provider.bots
+                .map((bot) => {
+                  const models = [
+                    ["Chat", bot.model.model],
+                    ["Image", bot.model.imageModel],
+                    ["Search", bot.model.searchModel],
+                    ["Audio", bot.model.audioModel],
+                  ] as const;
+                  const configuredModels = models
+                    .filter(([, model]) => Boolean(model))
+                    .map(
+                      ([role, model]) =>
+                        `<span class="provider-model-chip"><b>${role}</b><code>${escapeHtml(model)}</code></span>`,
+                    )
+                    .join("");
+                  return `<article class="model-provider-bot"><div class="model-provider-bot-head"><div><h3>${escapeHtml(bot.name)}</h3><span class="provider-credential-state">${bot.model.hasCredential ? "Credential encrypted" : "No credential saved"}</span></div><button class="button button-secondary button-small" data-route="bot/${escapeHtml(bot.id)}/configuration">Manage settings</button></div><div class="provider-models" aria-label="${escapeHtml(bot.name)} model roles">${configuredModels}</div></article>`;
+                })
+                .join("");
+              return `<section class="panel model-provider-card"><div class="panel-heading"><div><div class="eyebrow">PROVIDER CONFIGURATION</div><h2>${escapeHtml(provider.providerId)}</h2><p class="panel-subtitle"><span class="provider-endpoint-label">API endpoint</span> <code class="provider-endpoint">${escapeHtml(provider.endpoint || "Provider default")}</code></p></div><span class="quiet-badge">${credentialCount}/${provider.bots.length} have keys</span></div><div class="model-provider-bots" aria-label="Bots using ${escapeHtml(provider.providerId)}">${botRows}</div></section>`;
+            })
+            .join("")}</div>`
+        : `<section class="panel empty-panel">${emptyState("sliders", "No model providers configured", "Create a bot to choose a provider, endpoint, models, and credential for its AI requests.", "Create a bot", "navigate-create")}</section>`
+    }`;
+}
+
 export function skillMarketplaceView(state: UiState): string {
   const bots = state.bots.filter((bot) => !bot.collaboratorRole);
   const selectedBotId = bots.find((bot) => bot.id === state.botId)?.id ?? bots[0]?.id ?? "";

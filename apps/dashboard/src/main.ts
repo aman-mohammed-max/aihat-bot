@@ -38,6 +38,7 @@ import {
   automationWorkspaceView,
   botsView,
   dashboardView,
+  modelProvidersView,
   mcpWorkspaceView,
   securityView,
   skillMarketplaceView,
@@ -621,6 +622,9 @@ function render(): void {
   switch (state.page) {
     case "bots":
       body = botsView(state);
+      break;
+    case "models":
+      body = modelProvidersView(state);
       break;
     case "create":
       body = factoryView(

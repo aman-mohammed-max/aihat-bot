@@ -4,6 +4,7 @@ import { button, escapeHtml, icon } from "../view-utils.js";
 const navigation = [
   { id: "dashboard", label: "Overview", glyph: "home" },
   { id: "bots", label: "Bots", glyph: "bots", count: true },
+  { id: "models", label: "Model providers", mobileLabel: "Models", glyph: "sliders" },
   { id: "skills", label: "Skills", glyph: "spark" },
   { id: "mcp", label: "MCP servers", glyph: "plug" },
   { id: "automation", label: "Automation", glyph: "clock" },
@@ -74,10 +75,10 @@ export function shell(state: UiState, title: string, subtitle: string, content: 
         ${content}
       </div></div>
       <nav class="mobile-nav" aria-label="Mobile workspace">${navigation
-        .filter((item) => ["dashboard", "bots", "skills", "mcp", "usage"].includes(item.id))
+        .filter((item) => ["dashboard", "bots", "models", "mcp"].includes(item.id))
         .map(
           (item) =>
-            `<button class="mobile-nav-item ${active === item.id ? "active" : ""}" data-route="${item.id}">${icon(item.glyph, 20)}<span>${item.label}</span></button>`,
+            `<button class="mobile-nav-item ${active === item.id ? "active" : ""}" data-route="${item.id}" ${active === item.id ? 'aria-current="page"' : ""}>${icon(item.glyph, 20)}<span>${item.mobileLabel ?? item.label}</span></button>`,
         )
         .join("")}<button class="mobile-nav-item" data-route="api">${icon("key", 20)}<span>Access</span></button></nav>
     </main>
@@ -91,6 +92,7 @@ export function pageTitle(page: string, botName?: string): { title: string; subt
   const labels: Record<string, [string, string]> = {
     dashboard: ["Overview", "Create, configure, and launch your Telegram bots."],
     bots: ["Bots", "Manage your bots and the bots shared with you."],
+    models: ["Model providers", "Review the model providers and model choices configured for your bots."],
     create: ["Create a bot", "A guided setup for a purpose-built Telegram assistant."],
     skills: ["Skills marketplace", "Install reviewed capabilities on the bots you own."],
     mcp: ["MCP connections", "Connect remote tools and grant each one deliberately."],
