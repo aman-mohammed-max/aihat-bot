@@ -9,9 +9,9 @@
     "types": "wrangler types",
     "typecheck": "wrangler types && tsc -p tsconfig.json --noEmit",
     "build": "bun run --cwd ../.. build:dashboard && wrangler deploy --dry-run --env=\"\"",
-    "deploy:development": "wrangler deploy --env=\"\"",
-    "deploy:staging": "wrangler deploy --env staging",
-    "deploy:production": "wrangler deploy --env production"
+    "deploy:development": "bun run --cwd ../.. build:dashboard && wrangler deploy --env=\"\"",
+    "deploy:staging": "bun run --cwd ../.. build:dashboard && wrangler deploy --env staging",
+    "deploy:production": "bun run --cwd ../.. build:dashboard && wrangler deploy --env production"
   },
   "dependencies": {
     "@aihat/core": "workspace:*"
