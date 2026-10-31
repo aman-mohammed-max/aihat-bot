@@ -1,19 +1,19 @@
 /* biome-ignore-all lint/style/noDescendingSpecificity: Component styles intentionally target distinct native elements such as buttons, SVGs, and labels. */
 
-@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Geist:wght@400;500;600;700;800&family=Manrope:wght@500;600;700;800&display=swap");
 
 :root {
   color-scheme: dark;
-  --page: #09131d;
-  --sidebar: #0b1825;
-  --surface: #111f2b;
-  --surface-raised: #192b39;
-  --surface-high: #213746;
-  --line: #2d465a;
-  --line-soft: rgba(150, 191, 218, 0.13);
-  --text: #edf7fc;
-  --text-soft: #b8cbd8;
-  --muted: #8097a8;
+  --page: #0e0f11;
+  --sidebar: #111214;
+  --surface: #17191c;
+  --surface-raised: #1e2125;
+  --surface-high: #282b30;
+  --line: #35383d;
+  --line-soft: rgba(236, 237, 239, 0.09);
+  --text: #ecedef;
+  --text-soft: #c9ccd1;
+  --muted: #9ba0a8;
   --blue: #229ed9;
   --blue-bright: #6dcafa;
   --blue-dark: #147fb6;
@@ -23,7 +23,7 @@
   --danger: #f28186;
   --radius: 16px;
   --shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
-  font-family: "DM Sans", "Segoe UI", sans-serif;
+  font-family: "Geist", "DM Sans", "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -74,7 +74,7 @@ kbd {
   min-height: 100vh;
   display: grid;
   grid-template-columns: 254px minmax(0, 1fr);
-  background: radial-gradient(ellipse at 73% -15%, rgba(38, 112, 155, 0.12), transparent 45%), var(--page);
+  background: radial-gradient(ellipse at 73% -15%, rgba(34, 158, 217, 0.1), transparent 45%), var(--page);
 }
 .sidebar {
   position: fixed;
@@ -84,8 +84,8 @@ kbd {
   display: flex;
   flex-direction: column;
   padding: 22px 14px 14px;
-  background: linear-gradient(180deg, #0e1a28 0%, #0c1723 100%);
-  border-right: 1px solid rgba(91, 135, 168, 0.15);
+  background: linear-gradient(180deg, #121416 0%, #0e0f11 100%);
+  border-right: 1px solid rgba(236, 237, 239, 0.08);
 }
 .sidebar-top {
   display: grid;
@@ -4398,12 +4398,12 @@ kbd {
 /* Telegram-blue BotFather workspace skin */
 .workspace-frame {
   grid-template-columns: 272px minmax(0, 1fr);
-  background: radial-gradient(ellipse at 70% -12%, rgba(34, 158, 217, 0.13), transparent 43%), var(--page);
+  background: radial-gradient(ellipse at 70% -12%, rgba(34, 158, 217, 0.1), transparent 43%), var(--page);
 }
 .sidebar {
   width: 272px;
-  background: linear-gradient(180deg, #102135 0%, #0b1725 100%);
-  border-right-color: rgba(137, 183, 215, 0.13);
+  background: linear-gradient(180deg, #121416 0%, #0e0f11 100%);
+  border-right-color: rgba(236, 237, 239, 0.08);
 }
 .brand-mark {
   color: #08243a;
@@ -4415,22 +4415,25 @@ kbd {
 }
 .workspace-switcher,
 .search-trigger {
-  border-color: rgba(137, 183, 215, 0.12);
-  background-color: rgba(220, 241, 255, 0.035);
+  border-color: rgba(236, 237, 239, 0.08);
+  background-color: #17191c;
+}
+.search-trigger {
+  background: #17191c;
 }
 .nav-item {
   min-height: 43px;
-  color: #9aafbf;
+  color: #9ba0a8;
 }
 .nav-item:hover {
-  color: #e5f4fc;
-  background: rgba(113, 180, 213, 0.08);
+  color: #ecedef;
+  background: rgba(236, 237, 239, 0.055);
 }
 .nav-item.active {
   color: #c5efff;
-  background: linear-gradient(90deg, rgba(34, 158, 217, 0.2), rgba(34, 158, 217, 0.06));
-  border-color: rgba(93, 191, 231, 0.16);
-  box-shadow: inset 2px 0 0 #54c2f3;
+  background: linear-gradient(90deg, rgba(34, 158, 217, 0.22), rgba(34, 158, 217, 0.07));
+  border-color: rgba(93, 191, 231, 0.18);
+  box-shadow: inset 2px 0 0 #229ed9;
 }
 .nav-item.active svg,
 .text-button,
@@ -4442,7 +4445,7 @@ kbd {
   background: rgba(34, 158, 217, 0.13);
 }
 .sidebar-help {
-  background: linear-gradient(115deg, rgba(34, 158, 217, 0.14), rgba(186, 224, 112, 0.05));
+  background: linear-gradient(115deg, rgba(34, 158, 217, 0.14), rgba(236, 237, 239, 0.025));
   border-color: rgba(93, 181, 218, 0.16);
 }
 .help-orb,
@@ -4454,20 +4457,20 @@ kbd {
   min-width: 0;
 }
 .topbar {
-  background: rgba(9, 19, 29, 0.88);
-  border-bottom-color: rgba(150, 191, 218, 0.11);
+  background: rgba(14, 15, 17, 0.9);
+  border-bottom-color: rgba(236, 237, 239, 0.08);
 }
 .breadcrumb {
-  color: #8199aa;
+  color: #9ba0a8;
 }
 .breadcrumb strong {
-  color: #d7e9f4;
+  color: #c9ccd1;
 }
 .runtime-chip,
 .telegram-chip {
-  color: #b8cbd8;
-  border-color: rgba(137, 183, 215, 0.14);
-  background: rgba(25, 43, 58, 0.76);
+  color: #c9ccd1;
+  border-color: rgba(236, 237, 239, 0.1);
+  background: rgba(30, 33, 37, 0.82);
 }
 .telegram-chip {
   color: #8bd8fb;
@@ -4480,33 +4483,33 @@ kbd {
   box-shadow: 0 0 0 3px rgba(196, 237, 117, 0.11);
 }
 .page-heading h1 {
-  color: #f0f8f5;
+  color: #ecedef;
 }
 .page-heading p {
-  color: #8ba29e;
+  color: #9ba0a8;
 }
 .button-primary {
   color: #06263a;
-  background: linear-gradient(135deg, #70d3fb, #229ed9);
+  background: linear-gradient(135deg, #38b6ed, #1689c8);
   box-shadow: 0 6px 18px rgba(34, 158, 217, 0.24);
 }
 .button-primary:hover {
-  background: linear-gradient(135deg, #92e0ff, #43b5e9);
+  background: linear-gradient(135deg, #5ac8f5, #229ed9);
 }
 .button-secondary {
-  color: #c4d7e4;
-  border-color: #354e62;
-  background: #192b3a;
+  color: #c9ccd1;
+  border-color: #35383d;
+  background: #1e2125;
 }
 .button-secondary:hover {
-  color: #eff9fd;
-  border-color: #5688a5;
-  background: #20384b;
+  color: #ecedef;
+  border-color: #4a5058;
+  background: #282b30;
 }
 .button-glass {
-  color: #d1e5ef;
-  border-color: rgba(170, 208, 229, 0.2);
-  background: rgba(12, 31, 48, 0.54);
+  color: #c9ccd1;
+  border-color: rgba(236, 237, 239, 0.12);
+  background: rgba(23, 25, 28, 0.74);
 }
 .text-button:hover,
 .back-link:hover {
@@ -4517,22 +4520,22 @@ kbd {
 .bot-card,
 .skill-card,
 .server-card {
-  border-color: rgba(150, 191, 218, 0.13);
-  background: linear-gradient(145deg, rgba(22, 35, 48, 0.96), rgba(16, 27, 40, 0.98));
+  border-color: rgba(236, 237, 239, 0.09);
+  background: linear-gradient(145deg, rgba(28, 30, 33, 0.98), rgba(23, 25, 28, 0.99));
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.13);
 }
 .panel-heading h2,
 .info-panel h2,
 .intro-copy h2,
 .miniapp-title h2 {
-  color: #e1eef7;
+  color: #ecedef;
 }
 .stat-card strong {
-  color: #f0f8fd;
+  color: #ecedef;
 }
 .stat-card small,
 .panel-subtitle {
-  color: #859bad;
+  color: #9ba0a8;
 }
 .stat-blue {
   color: #8bdcff;
