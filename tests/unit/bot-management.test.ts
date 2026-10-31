@@ -252,6 +252,72 @@ describe("bot management API", () => {
     expect(genericPatch?.status).toBe(400);
   });
 
+  test("saves and clears owner-scoped model retry overrides without rotating credentials", async () => {
+    const token = await createApiTokenMaterial();
+    const principal = { tenantId, ownerId, tokenId: "token-retries", scopes: ["bots:write"] };
+    const auth = new ApiTokenAuthenticator({
+      findActive: async () => principal,
+      create: async () => {},
+      revoke: async () => {},
+      consumeApiRequest: async () => true,
+      recordApiMutation: async () => {},
+    });
+    let currentBot = bot;
+    let updateCount = 0;
+    const handler = createBotManagementApiHandler(
+      auth,
+      { get: async () => currentBot, saveDraft: async () => {} },
+      {
+        listOwned: async () => [currentBot],
+        listVersions: async () => [],
+        updateOwned: async (input) => {
+          updateCount += 1;
+          expect(input.patch.model?.credentialRef).toBe(bot.model.credentialRef);
+          currentBot = { ...currentBot, ...input.patch, version: currentBot.version + 1 };
+          return currentBot;
+        },
+        setDisabled: async () => {},
+        deleteOwned: async () => {},
+      },
+    );
+    const headers = { authorization: `Bearer ${token.token}`, "content-type": "application/json" };
+    const saved = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}/model/retry-policy`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ expectedVersion: 1, retryPolicy: { maxAttempts: 3, backoffMs: 1250 } }),
+      }),
+    );
+    expect(saved?.status).toBe(200);
+    const savedText = await saved?.text();
+    expect(savedText).toContain('"retryPolicy":{"maxAttempts":3,"backoffMs":1250}');
+    expect(savedText).not.toContain(bot.model.credentialRef);
+    expect(currentBot.model.credentialRef).toBe(bot.model.credentialRef);
+    expect(updateCount).toBe(1);
+
+    const invalid = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}/model/retry-policy`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ expectedVersion: 2, retryPolicy: { maxAttempts: 4, backoffMs: 1250 } }),
+      }),
+    );
+    expect(invalid?.status).toBe(400);
+    expect(updateCount).toBe(1);
+
+    const cleared = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}/model/retry-policy`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ expectedVersion: 2, retryPolicy: null }),
+      }),
+    );
+    expect(cleared?.status).toBe(200);
+    expect(await cleared?.text()).not.toContain("retryPolicy");
+    expect(currentBot.model.credentialRef).toBe(bot.model.credentialRef);
+    expect(updateCount).toBe(2);
+  });
+
   test("scopes lifecycle actions to the bot owner and bots:write", async () => {
     const token = await createApiTokenMaterial();
     let disabled: boolean | undefined;

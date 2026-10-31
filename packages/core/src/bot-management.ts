@@ -4,7 +4,7 @@ import { AppError } from "./errors.js";
 import type { BotManagementRepository, BotRepository } from "./ports.js";
 import type { SecretWriter } from "./ports.js";
 import type { BotCredentialApprovalService } from "./bot-credential-approvals.js";
-import type { BotDefinition, BotId, BotVersionHistoryItem, ModelConfig } from "./types.js";
+import type { BotDefinition, BotId, BotVersionHistoryItem, ModelConfig, ModelRetryPolicySettings } from "./types.js";
 import type { BotSettingsPatch } from "./ports.js";
 
 const BOT_ID = "bot_[a-f0-9-]{36}";
@@ -15,6 +15,7 @@ const BOT_ACTION_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/(enable|disable)$`);
 const BOT_CREDENTIAL_APPROVAL_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/credential-approval$`);
 const BOT_CREDENTIAL_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/credential$`);
 const BOT_MODEL_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/model$`);
+const BOT_MODEL_RETRY_POLICY_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/model/retry-policy$`);
 
 export function validateBotSettingsPatch(value: unknown): BotSettingsPatch {
   if (!isRecord(value)) throw new AppError("VALIDATION_ERROR", "Bot settings must be a JSON object.", 400);
@@ -74,7 +75,17 @@ export function createBotManagementApiHandler(
     const credentialApproval = BOT_CREDENTIAL_APPROVAL_ROUTE.exec(pathname);
     const credential = BOT_CREDENTIAL_ROUTE.exec(pathname);
     const modelConfiguration = BOT_MODEL_ROUTE.exec(pathname);
-    if (!isCollection && !item && !versions && !action && !credentialApproval && !credential && !modelConfiguration)
+    const modelRetryPolicy = BOT_MODEL_RETRY_POLICY_ROUTE.exec(pathname);
+    if (
+      !isCollection &&
+      !item &&
+      !versions &&
+      !action &&
+      !credentialApproval &&
+      !credential &&
+      !modelConfiguration &&
+      !modelRetryPolicy
+    )
       return undefined;
 
     try {
@@ -101,6 +112,35 @@ export function createBotManagementApiHandler(
           limit,
         });
         return Response.json({ items }, { headers: { "cache-control": "no-store" } });
+      }
+
+      if (modelRetryPolicy) {
+        if (request.method !== "PATCH") return methodNotAllowed("PATCH");
+        await requireApiScope(principal, "bots:write");
+        const botId = modelRetryPolicy[1] as BotId;
+        const bot = await bots.get(principal.tenantId, botId);
+        if (!bot || bot.ownerId !== principal.ownerId) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+        const body = await readJsonBody(request, 4096);
+        if (
+          Object.keys(body).some((key) => !["expectedVersion", "retryPolicy"].includes(key)) ||
+          !Object.hasOwn(body, "retryPolicy")
+        ) {
+          throw new AppError("VALIDATION_ERROR", "Retry policy update contains unsupported or missing fields.", 400);
+        }
+        if (!Number.isSafeInteger(body.expectedVersion) || (body.expectedVersion as number) < 1) {
+          throw new AppError("VALIDATION_ERROR", "expectedVersion must be a positive integer.", 400);
+        }
+        const retryPolicy = body.retryPolicy === null ? undefined : parseModelRetryPolicySettings(body.retryPolicy);
+        const { retryPolicy: _previousRetryPolicy, ...modelWithoutRetryPolicy } = bot.model;
+        const model = retryPolicy ? { ...modelWithoutRetryPolicy, retryPolicy } : modelWithoutRetryPolicy;
+        const updated = await management.updateOwned({
+          tenantId: principal.tenantId,
+          ownerId: principal.ownerId,
+          botId,
+          expectedVersion: body.expectedVersion as number,
+          patch: { model },
+        });
+        return Response.json(botSummary(updated), { headers: { "cache-control": "no-store" } });
       }
 
       if (credentialApproval || credential || modelConfiguration) {
@@ -327,6 +367,7 @@ function validateModelConfig(value: unknown): ModelConfig {
     "endpoint",
     "credentialRef",
     "parameters",
+    "retryPolicy",
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     throw new AppError("VALIDATION_ERROR", "Model settings contain unsupported fields.", 400);
@@ -356,6 +397,7 @@ function validateModelConfig(value: unknown): ModelConfig {
   }
   const imageModel = optionalModelIdentifier(value.imageModel, "imageModel");
   const searchModel = optionalModelIdentifier(value.searchModel, "searchModel");
+  const retryPolicy = value.retryPolicy === undefined ? undefined : parseModelRetryPolicySettings(value.retryPolicy);
   if (
     value.credentialRef !== undefined &&
     (typeof value.credentialRef !== "string" || !/^secret_[a-f0-9]{32}$/.test(value.credentialRef))
@@ -391,7 +433,24 @@ function validateModelConfig(value: unknown): ModelConfig {
     ...(endpoint === undefined ? {} : { endpoint }),
     ...(value.credentialRef === undefined ? {} : { credentialRef: value.credentialRef as string }),
     ...(parameters === undefined ? {} : { parameters }),
+    ...(retryPolicy === undefined ? {} : { retryPolicy }),
   };
+}
+
+function parseModelRetryPolicySettings(value: unknown): ModelRetryPolicySettings {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some((key) => key !== "maxAttempts" && key !== "backoffMs") ||
+    !Number.isSafeInteger(value.maxAttempts) ||
+    (value.maxAttempts as number) < 1 ||
+    (value.maxAttempts as number) > 3 ||
+    !Number.isSafeInteger(value.backoffMs) ||
+    (value.backoffMs as number) < 0 ||
+    (value.backoffMs as number) > 3_000
+  ) {
+    throw new AppError("VALIDATION_ERROR", "Model retry settings must use 1–3 attempts and 0–3000 ms backoff.", 400);
+  }
+  return { maxAttempts: value.maxAttempts as number, backoffMs: value.backoffMs as number };
 }
 
 function optionalModelIdentifier(value: unknown, field: string): string | undefined {

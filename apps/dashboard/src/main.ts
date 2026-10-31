@@ -659,6 +659,9 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
         await configureBotModel(data);
         form.reset();
         break;
+      case "bot-retry-policy-form":
+        await configureBotRetryPolicy(data);
+        break;
       case "bot-access-policy-form":
         await saveBotAccessPolicy(data);
         break;
@@ -1128,6 +1131,7 @@ async function configureBotModel(data: FormData): Promise<void> {
         searchModel: String(data.get("searchModel") ?? "").trim(),
         ...(endpoint ? { endpoint } : {}),
         parameters: { temperature },
+        ...(bot.model.retryPolicy ? { retryPolicy: bot.model.retryPolicy } : {}),
       },
     }),
   });
@@ -1137,6 +1141,35 @@ async function configureBotModel(data: FormData): Promise<void> {
   state.bots = state.bots.map((item) => (item.id === bot.id ? updated : item));
   render();
   showToast("Model settings saved and credential encrypted");
+}
+
+async function configureBotRetryPolicy(data: FormData): Promise<void> {
+  const bot = requireActiveBot();
+  const mode = String(data.get("mode") ?? "deployment");
+  let retryPolicy: { maxAttempts: number; backoffMs: number } | null = null;
+  if (mode === "bot") {
+    const maxAttempts = Number(data.get("maxAttempts"));
+    const backoffMs = Number(data.get("backoffMs"));
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 3) {
+      throw new Error("Model retries must allow between 1 and 3 total attempts.");
+    }
+    if (!Number.isSafeInteger(backoffMs) || backoffMs < 0 || backoffMs > 3000) {
+      throw new Error("Initial model retry backoff must be between 0 and 3000 milliseconds.");
+    }
+    retryPolicy = { maxAttempts, backoffMs };
+  } else if (mode !== "deployment") {
+    throw new Error("Choose a valid model retry policy.");
+  }
+  const updated = await api<Bot>(`${botBase(bot.id)}/model/retry-policy`, {
+    method: "PATCH",
+    body: jsonBody({ expectedVersion: bot.version, retryPolicy }),
+  });
+  activeBotVersionsId = "";
+  state.botVersions = [];
+  state.activeBot = updated;
+  state.bots = state.bots.map((item) => (item.id === bot.id ? updated : item));
+  render();
+  showToast(retryPolicy ? "Per-bot model retry policy saved" : "Deployment model retry defaults restored");
 }
 
 async function saveBotAccessPolicy(data: FormData): Promise<void> {

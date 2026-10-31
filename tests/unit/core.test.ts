@@ -516,6 +516,47 @@ describe("OpenAI-compatible provider boundary", () => {
     ]);
   });
 
+  test("applies a validated per-bot retry override over the deployment default", async () => {
+    let calls = 0;
+    const retryEvents: Array<{ event: string; fields: Readonly<Record<string, unknown>> | undefined }> = [];
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      retryPolicy: {
+        maxAttempts: 1,
+        backoffMs: 0,
+        maxRetryAfterMs: 3_000,
+        retryableStatusCodes: [503],
+      },
+      logger: { warn: (event, fields) => retryEvents.push({ event, fields }) },
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async () => {
+        calls += 1;
+        return calls === 1
+          ? new Response("temporary", { status: 503 })
+          : Response.json({ choices: [{ message: { role: "assistant", content: "recovered" } }] });
+      },
+    });
+    await expect(
+      provider.complete({
+        tenantId,
+        config: {
+          providerId: "compatible",
+          model: "sample",
+          credentialRef: "secret-ref",
+          retryPolicy: { maxAttempts: 2, backoffMs: 0 },
+        },
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    ).resolves.toMatchObject({ message: { content: "recovered" } });
+    expect(calls).toBe(2);
+    expect(retryEvents).toContainEqual({
+      event: "dependency.retry",
+      fields: { service: "model", attempt: 1, maxAttempts: 2, delayMs: 0, statusCode: 503 },
+    });
+  });
+
   test("does not retry a provider response whose Retry-After exceeds the configured cap", async () => {
     let attempts = 0;
     const provider = new OpenAICompatibleProvider({

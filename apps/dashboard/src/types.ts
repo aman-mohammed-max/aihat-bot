@@ -54,6 +54,7 @@ export interface Bot {
     searchModel?: string;
     endpoint?: string;
     parameters?: Record<string, string | number | boolean>;
+    retryPolicy?: { maxAttempts: number; backoffMs: number };
     hasCredential: boolean;
   };
   visibility: "private" | "shared" | "public" | "invitation";
@@ -74,6 +75,7 @@ export interface BotVersion {
     model: string;
     imageModel?: string;
     searchModel?: string;
+    retryPolicy?: { maxAttempts: number; backoffMs: number };
     hasCredential: boolean;
   };
   memoryEnabled: boolean;

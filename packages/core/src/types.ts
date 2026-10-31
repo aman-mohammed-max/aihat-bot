@@ -51,6 +51,13 @@ export interface ModelConfig {
   readonly endpoint?: string;
   readonly credentialRef?: string;
   readonly parameters?: Readonly<Record<string, string | number | boolean>>;
+  readonly retryPolicy?: ModelRetryPolicySettings;
+}
+
+export interface ModelRetryPolicySettings {
+  /** Includes the first request; the supported range is 1–3. */
+  readonly maxAttempts: number;
+  readonly backoffMs: number;
 }
 
 /** Bounded JSON Schema object supplied for a structured agent response. */

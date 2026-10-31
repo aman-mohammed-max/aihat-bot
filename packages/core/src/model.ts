@@ -6,6 +6,7 @@ import type {
   ModelToolDefinition,
   ModelTurn,
   ConversationMessage,
+  ModelRetryPolicySettings,
   TenantId,
 } from "./types.js";
 import type { Logger, SecretStore } from "./ports.js";
@@ -174,6 +175,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
     const endpoint = input.config.endpoint ?? this.#defaultEndpoint;
     const target = this.#completionUrl(endpoint);
+    const retryPolicy = resolveModelRetryPolicy(input.config.retryPolicy, this.#retryPolicy);
     const streaming = input.onTextDelta !== undefined;
     if (streaming && !this.capabilities(input.config).streaming) {
       throw new AppError("UNSUPPORTED_CAPABILITY", "Streaming is not verified for this model endpoint.", 501);
@@ -267,16 +269,16 @@ export class OpenAICompatibleProvider implements ModelProvider {
         if (
           !streaming &&
           !response.ok &&
-          this.#retryPolicy.retryableStatusCodes.includes(response.status) &&
-          attempt < this.#retryPolicy.maxAttempts
+          retryPolicy.retryableStatusCodes.includes(response.status) &&
+          attempt < retryPolicy.maxAttempts
         ) {
-          const waitMs = getModelRetryDelay(response.headers.get("retry-after"), attempt, this.#retryPolicy);
+          const waitMs = getModelRetryDelay(response.headers.get("retry-after"), attempt, retryPolicy);
           if (waitMs !== undefined) {
             try {
               this.#logger?.warn("dependency.retry", {
                 service: "model",
                 attempt,
-                maxAttempts: this.#retryPolicy.maxAttempts,
+                maxAttempts: retryPolicy.maxAttempts,
                 delayMs: waitMs,
                 statusCode: response.status,
               });
@@ -425,6 +427,28 @@ function validateRetryPolicy(policy: ModelRetryPolicy): ModelRetryPolicy {
     maxRetryAfterMs: policy.maxRetryAfterMs,
     retryableStatusCodes: [...policy.retryableStatusCodes],
   };
+}
+
+function resolveModelRetryPolicy(
+  override: ModelRetryPolicySettings | undefined,
+  deploymentPolicy: ModelRetryPolicy,
+): ModelRetryPolicy {
+  if (override === undefined) return deploymentPolicy;
+  if (
+    !Number.isSafeInteger(override.maxAttempts) ||
+    override.maxAttempts < 1 ||
+    override.maxAttempts > 3 ||
+    !Number.isSafeInteger(override.backoffMs) ||
+    override.backoffMs < 0 ||
+    override.backoffMs > 3_000
+  ) {
+    throw new AppError("VALIDATION_ERROR", "Bot model retry settings are invalid.", 400);
+  }
+  return validateRetryPolicy({
+    ...deploymentPolicy,
+    maxAttempts: override.maxAttempts,
+    backoffMs: override.backoffMs,
+  });
 }
 
 function getModelRetryDelay(header: string | null, attempt: number, policy: ModelRetryPolicy): number | undefined {
