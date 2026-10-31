@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Core runtime expansion and tenant collaboration: verified-origin streaming and structured model output, bounded and observable service retries, per-bot model retry policies and owner-facing retry analytics, dashboard and Telegram master-bot AI drafting, provider-backed model selection, image attachment delivery, Telegram media input, Telegram Mini App and optional browser sign-in, public shareable Web Chat, account-wide and per-network API limits, per-user Telegram master-bot/customer-bot rate limits, scope and resource denial audits, encrypted replay for successful tool calls, workspace switching, audited tenant membership controls, expiring single-use invitations, recipient-approved bot ownership transfers, explicit viewer/editor bot collaborators, scheduled-job recovery, private owner document retrieval, quarantined persistent file management, owner-reviewed recovery for ambiguous remote tool calls, and leased, bounded MCP reconnect recovery are implemented in both runtimes. Cloudflare also serializes agent turns through a per-conversation Durable Object; production readiness remains incomplete.
+Phase 9 — production readiness verification. The Bun and Cloudflare runtimes, shared agent core, factory, Telegram/Mini App/Web Chat interfaces, skills/MCP, scheduling, tenant security, and runtime-parity coverage are implemented and the development Worker is deployed. Remaining production gates are external configuration: a public HTTPS malware-scanner gateway and secret, the optional BotFather browser Login Client ID, and approved staging/production Cloudflare resources and secrets. Arbitrary-code sandboxing remains explicitly unsupported; no unsafe in-process execution is enabled.
 
 ## Completed work
 
