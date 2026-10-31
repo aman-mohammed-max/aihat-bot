@@ -38,7 +38,7 @@ services:
       - clamav_signatures:/var/lib/clamav
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "clamdscan", "--ping=3", "--wait"]
+      test: ["CMD", "clamdscan", "--ping=3", "--wait", "/etc/hostname"]
       interval: 30s
       timeout: 15s
       retries: 5
