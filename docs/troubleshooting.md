@@ -45,11 +45,18 @@ Approved senders are limited to 30 messages per minute by default. Set `TELEGRAM
 - If an HTTP skill is not discoverable, check its installation, enabled state, declared permissions, actor grants, and origin allowlist. MCP tools start disabled and need explicit grants.
 - Model HTTP errors 408, 429, 500, 502, 503, and 504 may retry for non-streaming requests. Set `MODEL_RETRY_MAX_ATTEMPTS` to 1–3 and `MODEL_RETRY_BACKOFF_MS` to 0–3000; network failures and streaming requests fail without replay to avoid duplicate cost or repeated text deltas.
 
+## File scanning
+
+- Without a scanner, uploaded files stay quarantined and Telegram attachments are refused.
+- For self-hosted Bun, enable the Compose `clamav` profile and set `CLAMAV_HOST=clamav`. To let a Cloudflare Worker use it, also set a strong `FILE_SCANNER_GATEWAY_TOKEN` in the Bun `.env`, terminate TLS in a reverse proxy, and route only `POST /internal/file-scan` to the Bun runtime. Keep port 3000 and ClamAV port 3310 private; do not expose the unauthenticated ClamAV protocol.
+- In the Cloudflare development environment, set `FILE_SCANNER_ENDPOINT` to the full HTTPS gateway route and `FILE_SCANNER_ALLOWED_ORIGINS` to its exact origin. Store the matching gateway token as `FILE_SCANNER_TOKEN` with `wrangler secret put`; never add either secret to Wrangler variables or Git. Verify `/capabilities` reports `fileMalwareScanning: true` after deployment.
+- The gateway accepts bounded raw file bodies, requires the bearer token and encoded filename/content type headers, and returns only a `clean` or `infected` verdict. It permits four concurrent scans and returns `503` while at capacity. Auth, size, scanner, and network failures do not mark a file clean.
+
 ## Encryption and database setup
 
 - `encryptedSecrets` must be `true` in `/capabilities` before connecting model, Telegram, or skill credentials. Configure `SECRET_ACTIVE_KEY_ID` and `SECRET_KEYRING_JSON` as Worker secrets or Bun environment values.
 - Keep every key ID needed to decrypt existing records. Do not replace the keyring with a new single key unless existing encrypted records have been rotated. Use the secret-rotation workflow documented in the root README and Cloudflare runtime guide.
-- Cloudflare development has D1 migrations `0001` through `0030`. For a new environment, create its D1 database, set the returned ID in `wrangler.jsonc`, then apply migrations from `apps/cloudflare-runtime` with `wrangler d1 migrations apply <database-name> --remote`.
+- Cloudflare development has D1 migrations `0001` through `0031`. For a new environment, create its D1 database, set the returned ID in `wrangler.jsonc`, then apply migrations from `apps/cloudflare-runtime` with `wrangler d1 migrations apply <database-name> --remote`.
 - Staging and production also need distinct R2 buckets and Queues. The committed placeholder D1 IDs are not valid deployment IDs.
 - Local Bun migrations run at startup. For migration errors, inspect the stored migration checksum and database path; do not edit an already-applied migration. Add a forward-only migration instead.
 

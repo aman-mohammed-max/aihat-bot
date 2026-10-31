@@ -56,6 +56,7 @@ import {
   createDefaultNativeSkillRegistry,
 } from "@aihat/core";
 import { createOptionalClamDScanner } from "./clamav-scanner.js";
+import { createOptionalClamDGateway } from "./clamav-gateway.js";
 import { BunSqliteRepositories } from "./sqlite-store.js";
 import { BunFileObjectStore } from "./file-object-store.js";
 import { BunSqliteUploadedFileRepository } from "./uploaded-file-repository.js";
@@ -87,6 +88,10 @@ if (httpMalwareScanner && clamDScanner) {
   throw new AppError("VALIDATION_ERROR", "Configure either the HTTPS file scanner or ClamAV, not both.", 500);
 }
 const malwareScanner = httpMalwareScanner ?? clamDScanner;
+const clamDGateway = createOptionalClamDGateway({
+  ...(clamDScanner ? { scanner: clamDScanner } : {}),
+  ...(process.env.FILE_SCANNER_GATEWAY_TOKEN ? { token: process.env.FILE_SCANNER_GATEWAY_TOKEN } : {}),
+});
 const uploadedFilesService = new UploadedFilesService({
   bots: repositories,
   files: uploadedFileRepository,
@@ -308,6 +313,8 @@ const server = Bun.serve({
     const clientAddress = server.requestIP(request)?.address;
     const networkLimitResponse = await networkAbuseGuard(request, clientAddress);
     if (networkLimitResponse) return networkLimitResponse;
+    const scannerGatewayResponse = await clamDGateway?.(request);
+    if (scannerGatewayResponse) return scannerGatewayResponse;
     const globalSkillCatalogResponse = await globalSkillCatalogAdminApi(request);
     if (globalSkillCatalogResponse) return globalSkillCatalogResponse;
     const masterWebhookResponse = await telegramMasterWebhook(request);

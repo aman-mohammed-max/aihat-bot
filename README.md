@@ -126,3 +126,5 @@ docker compose ps clamav
 ```
 
 Wait until the ClamAV service is healthy before uploading files. The daemon port is available only on the private Compose network; do not publish it to the host or Internet. This adapter is for Bun. Cloudflare continues to use the HTTPS scanner gateway contract below.
+
+The Bun runtime can also expose ClamAV as that gateway for a Cloudflare Worker. Set `FILE_SCANNER_GATEWAY_TOKEN` to a high-entropy value in the Bun `.env`, keep the Bun service behind a TLS reverse proxy, and expose only `/internal/file-scan` to the Worker. Restrict that proxy route to the Worker/network where possible. In the Worker environment, set `FILE_SCANNER_ENDPOINT` to the full HTTPS route, set `FILE_SCANNER_ALLOWED_ORIGINS` to its exact HTTPS origin, and store the same token with `wrangler secret put FILE_SCANNER_TOKEN --env development`. The gateway bounds file bodies at 25 MiB, accepts four concurrent scans, and returns a transient `503` while at capacity. The token is never returned by the gateway. Do not publish ClamAV's unauthenticated TCP port.
