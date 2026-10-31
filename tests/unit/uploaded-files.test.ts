@@ -20,6 +20,46 @@ const botId = "bot_00000000-0000-4000-8000-000000000001" as BotId;
 const text = new TextEncoder().encode("hello file");
 
 describe("uploaded files", () => {
+  test("accepts bounded UTF-8 structured text formats with matching extensions and media types", async () => {
+    const fixture = createFixture();
+    const service = createService(fixture);
+    const samples = [
+      { fileName: "settings.json", contentType: "application/json", value: '{"enabled":true}' },
+      { fileName: "events.jsonl", contentType: "application/x-ndjson", value: '{"event":1}\n' },
+      { fileName: "feed.xml", contentType: "application/xml", value: "<feed />" },
+      { fileName: "config.yaml", contentType: "application/yaml", value: "enabled: true\n" },
+      { fileName: "table.tsv", contentType: "text/tab-separated-values", value: "name\tcount\nitem\t2" },
+      { fileName: "service.log", contentType: "text/plain", value: "service started\n" },
+    ];
+
+    for (const sample of samples) {
+      const file = await service.upload({
+        tenantId,
+        ownerId,
+        botId,
+        fileName: sample.fileName,
+        contentType: sample.contentType,
+        bytes: new TextEncoder().encode(sample.value),
+      });
+      expect(file).toMatchObject({
+        fileName: sample.fileName,
+        contentType: sample.contentType,
+        scanStatus: "pending_scan",
+      });
+    }
+
+    await expect(
+      service.upload({
+        tenantId,
+        ownerId,
+        botId,
+        fileName: "settings.json",
+        contentType: "text/plain",
+        bytes: new TextEncoder().encode('{"enabled":true}'),
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR", status: 415 });
+  });
+
   test("keeps uploads quarantined without a scanner and scopes access to the bot owner", async () => {
     const fixture = createFixture();
     const service = createService(fixture);

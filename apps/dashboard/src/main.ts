@@ -1421,6 +1421,11 @@ function supportedUploadedFileType(file: File): string {
     "text/plain",
     "text/markdown",
     "text/csv",
+    "text/tab-separated-values",
+    "application/json",
+    "application/x-ndjson",
+    "application/xml",
+    "application/yaml",
   ]);
   const hasExtension = file.name.includes(".");
   const extension = hasExtension ? file.name.split(".").at(-1)?.toLowerCase() : undefined;
@@ -1433,6 +1438,14 @@ function supportedUploadedFileType(file: File): string {
     txt: "text/plain",
     md: "text/markdown",
     csv: "text/csv",
+    tsv: "text/tab-separated-values",
+    json: "application/json",
+    jsonl: "application/x-ndjson",
+    ndjson: "application/x-ndjson",
+    xml: "application/xml",
+    yaml: "application/yaml",
+    yml: "application/yaml",
+    log: "text/plain",
   };
   const contentType = hasExtension ? byExtension[extension ?? ""] : allowed.has(file.type) ? file.type : undefined;
   if (!contentType) throw new Error(`“${file.name}” has an unsupported file type.`);

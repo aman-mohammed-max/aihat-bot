@@ -15,6 +15,22 @@ const SUPPORTED_CONTENT_TYPES = new Set([
   "text/plain",
   "text/markdown",
   "text/csv",
+  "text/tab-separated-values",
+  "application/json",
+  "application/x-ndjson",
+  "application/xml",
+  "application/yaml",
+]);
+
+const TEXT_CONTENT_TYPES = new Set([
+  "text/plain",
+  "text/markdown",
+  "text/csv",
+  "text/tab-separated-values",
+  "application/json",
+  "application/x-ndjson",
+  "application/xml",
+  "application/yaml",
 ]);
 
 export interface UploadedFilesServiceOptions {
@@ -247,6 +263,14 @@ function validateExtension(fileName: string, contentType: string): void {
     md: "text/markdown",
     markdown: "text/markdown",
     csv: "text/csv",
+    tsv: "text/tab-separated-values",
+    json: "application/json",
+    jsonl: "application/x-ndjson",
+    ndjson: "application/x-ndjson",
+    xml: "application/xml",
+    yaml: "application/yaml",
+    yml: "application/yaml",
+    log: "text/plain",
   };
   if (expected[extension] !== contentType) {
     throw new AppError("VALIDATION_ERROR", "File name extension does not match its supported content type.", 415);
@@ -269,7 +293,7 @@ export function validateFileBytes(contentType: string, bytes: Uint8Array): void 
       bytes[10] === 0x42 &&
       bytes[11] === 0x50) ||
     (contentType === "application/pdf" && starts(0x25, 0x50, 0x44, 0x46, 0x2d)) ||
-    (contentType.startsWith("text/") && isUtf8Text(bytes));
+    (TEXT_CONTENT_TYPES.has(contentType) && isUtf8Text(bytes));
   if (!isValid) throw new AppError("VALIDATION_ERROR", "File bytes do not match the declared file type.", 415);
 }
 

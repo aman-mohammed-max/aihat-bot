@@ -359,7 +359,9 @@ export class TelegramManager {
     const bot = await this.#bots.get(deployment.tenantId, deployment.botId);
     if (bot?.status !== "published") return { text: "" };
     if (message.unsupportedAttachment && !message.photo?.length && !message.document) {
-      return { text: "I can read photos and small .txt, .md, or .csv files." };
+      return {
+        text: "I can read photos and small text files such as TXT, Markdown, CSV, TSV, JSON, JSONL, XML, YAML, and logs.",
+      };
     }
     const thread = Number.isSafeInteger(message.message_thread_id) ? String(message.message_thread_id) : "0";
     const actorKey = await hashTelegramIdentity(
@@ -444,7 +446,10 @@ export class TelegramManager {
     const isDocumentImage = !!document && isSupportedImageNameOrType(name, document.mime_type);
     const isTextDocument = !!document && (isSupportedTextName(name) || isSupportedTextMime(document.mime_type));
     if (document && !isDocumentImage && !isTextDocument) {
-      return { unsupported: "I can read photos and small .txt, .md, or .csv files." };
+      return {
+        unsupported:
+          "I can read photos and small text files such as TXT, Markdown, CSV, TSV, JSON, JSONL, XML, YAML, and logs.",
+      };
     }
     if (
       document &&
@@ -500,7 +505,7 @@ export class TelegramManager {
     try {
       text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
     } catch {
-      return { unsupported: "That file isn't valid UTF-8 text. Send a .txt, .md, or .csv file." };
+      return { unsupported: "That file isn't valid UTF-8 text. Send a supported text document instead." };
     }
     if (text.includes("\0")) return { unsupported: "That file doesn't look like a text document." };
     if (!(await this.#scanAttachment(name, "text/plain", bytes))) {
@@ -897,13 +902,22 @@ function isSupportedImageNameOrType(name: string, mimeType: string | undefined):
 }
 
 function isSupportedTextName(name: string): boolean {
-  return /\.(?:txt|md|csv)$/i.test(name);
+  return /\.(?:txt|md|markdown|csv|tsv|json|jsonl|ndjson|xml|yaml|yml|log)$/i.test(name);
 }
 
 function isSupportedTextMime(mimeType: string | undefined): boolean {
   return (
     mimeType !== undefined &&
-    ["text/plain", "text/markdown", "text/csv"].includes(mimeType.split(";")[0]?.trim().toLowerCase() ?? "")
+    [
+      "text/plain",
+      "text/markdown",
+      "text/csv",
+      "text/tab-separated-values",
+      "application/json",
+      "application/x-ndjson",
+      "application/xml",
+      "application/yaml",
+    ].includes(mimeType.split(";")[0]?.trim().toLowerCase() ?? "")
   );
 }
 

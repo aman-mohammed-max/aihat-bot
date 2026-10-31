@@ -419,6 +419,36 @@ describe("Telegram webhook integration", () => {
       expect(storedObjects.size).toBe(0);
       expect(calls.filter((name) => name === "sendChatAction")).toHaveLength(3);
 
+      const jsonText = '{"diet":"vegan"}';
+      attachmentBytes = new TextEncoder().encode(jsonText);
+      const jsonDocumentResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9046,
+            message: {
+              document: {
+                file_id: "json-file",
+                file_name: "preferences.json",
+                mime_type: "application/json",
+                file_size: attachmentBytes.byteLength,
+              },
+              chat: { id: -10012345 },
+              from: { id: 54321, is_bot: false },
+            },
+          }),
+        }),
+      );
+      expect(jsonDocumentResponse?.status).toBe(200);
+      expect(agentMessages.at(-1)).toEqual([
+        { role: "user", content: `[Attached text file: preferences.json]\n${jsonText}` },
+      ]);
+      expect(storedObjects.size).toBe(0);
+
       const imageResponse = await webhooks(
         new Request(endpoint, {
           method: "POST",
