@@ -62,9 +62,18 @@ export interface OpenAICompatibleProviderOptions {
   readonly secrets: SecretStore;
   readonly fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   readonly timeoutMs?: number;
+  readonly retryPolicy?: ModelRetryPolicy;
   /** Set only after the endpoint has been checked for this deployment/provider. */
   readonly toolCalling?: boolean;
   readonly imageInput?: boolean;
+}
+
+export interface ModelRetryPolicy {
+  /** Includes the initial request; bounded to avoid retry storms. */
+  readonly maxAttempts: number;
+  readonly backoffMs: number;
+  readonly maxRetryAfterMs: number;
+  readonly retryableStatusCodes: readonly number[];
 }
 
 interface OpenAIResponse {
@@ -82,6 +91,12 @@ interface OpenAIResponse {
 }
 
 const MAX_STRUCTURED_OUTPUT_BYTES = 64 * 1024;
+const DEFAULT_RETRY_POLICY: ModelRetryPolicy = {
+  maxAttempts: 2,
+  backoffMs: 250,
+  maxRetryAfterMs: 3_000,
+  retryableStatusCodes: [408, 429, 500, 502, 503, 504],
+};
 
 /** OpenAI chat-completions adapter with strict egress, timeout, and redirect controls. */
 export class OpenAICompatibleProvider implements ModelProvider {
@@ -93,12 +108,14 @@ export class OpenAICompatibleProvider implements ModelProvider {
   readonly #secrets: SecretStore;
   readonly #fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   readonly #timeoutMs: number;
+  readonly #retryPolicy: ModelRetryPolicy;
   readonly #capabilities: ProviderCapabilities;
 
   constructor(options: OpenAICompatibleProviderOptions) {
     if (!Number.isInteger(options.timeoutMs ?? 30_000) || (options.timeoutMs ?? 30_000) < 1) {
       throw new AppError("VALIDATION_ERROR", "Model request timeout must be a positive integer.", 400);
     }
+    this.#retryPolicy = validateRetryPolicy(options.retryPolicy ?? DEFAULT_RETRY_POLICY);
     this.id = options.id;
     this.#defaultEndpoint = options.defaultEndpoint;
     this.#allowedOrigins = new Set([...options.allowedOrigins].map((origin) => new URL(origin).origin));
@@ -224,14 +241,43 @@ export class OpenAICompatibleProvider implements ModelProvider {
         }));
       }
 
-      const response = await this.#fetch(target, {
-        method: "POST",
-        redirect: "error",
-        signal: controller.signal,
-        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      let response: Response;
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          response = await this.#fetch(target, {
+            method: "POST",
+            redirect: "error",
+            signal: controller.signal,
+            headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+        } catch (cause) {
+          // A lost connection can happen after a provider accepts and bills the request.
+          // Retry only explicit HTTP responses with a configured transient status.
+          if (controller.signal.aborted) {
+            throw new AppError("DEPENDENCY_UNAVAILABLE", "Model request was cancelled or timed out.", 504, {
+              cause,
+            });
+          }
+          throw cause;
+        }
+        if (
+          !streaming &&
+          !response.ok &&
+          this.#retryPolicy.retryableStatusCodes.includes(response.status) &&
+          attempt < this.#retryPolicy.maxAttempts
+        ) {
+          const waitMs = getModelRetryDelay(response.headers.get("retry-after"), attempt, this.#retryPolicy);
+          if (waitMs !== undefined) {
+            await cancelResponseBody(response);
+            await waitForRetry(waitMs, controller.signal);
+            continue;
+          }
+        }
+        break;
+      }
       if (!response.ok) {
+        await cancelResponseBody(response);
         throw new AppError("DEPENDENCY_UNAVAILABLE", `Model provider returned HTTP ${response.status}.`, 502);
       }
 
@@ -340,6 +386,70 @@ export class OpenAICompatibleProvider implements ModelProvider {
     base.pathname = `${base.pathname.replace(/\/+$/, "")}/chat/completions`;
     return base.toString();
   }
+}
+
+function validateRetryPolicy(policy: ModelRetryPolicy): ModelRetryPolicy {
+  if (
+    !Number.isSafeInteger(policy.maxAttempts) ||
+    policy.maxAttempts < 1 ||
+    policy.maxAttempts > 3 ||
+    !Number.isSafeInteger(policy.backoffMs) ||
+    policy.backoffMs < 0 ||
+    policy.backoffMs > 5_000 ||
+    !Number.isSafeInteger(policy.maxRetryAfterMs) ||
+    policy.maxRetryAfterMs < 0 ||
+    policy.maxRetryAfterMs > 5_000 ||
+    policy.retryableStatusCodes.length > 12 ||
+    policy.retryableStatusCodes.some((status) => !Number.isSafeInteger(status) || status < 400 || status > 599) ||
+    new Set(policy.retryableStatusCodes).size !== policy.retryableStatusCodes.length
+  ) {
+    throw new AppError("VALIDATION_ERROR", "Model retry policy is invalid.", 400);
+  }
+  return {
+    maxAttempts: policy.maxAttempts,
+    backoffMs: policy.backoffMs,
+    maxRetryAfterMs: policy.maxRetryAfterMs,
+    retryableStatusCodes: [...policy.retryableStatusCodes],
+  };
+}
+
+function getModelRetryDelay(header: string | null, attempt: number, policy: ModelRetryPolicy): number | undefined {
+  let requestedDelay: number | undefined;
+  if (header !== null) {
+    const value = header.trim();
+    if (/^\d+$/.test(value)) requestedDelay = Number(value) * 1000;
+    else if (/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value)) {
+      const retryAt = Date.parse(value);
+      if (Number.isFinite(retryAt)) requestedDelay = Math.max(0, retryAt - Date.now());
+    }
+  }
+  const delay = requestedDelay ?? policy.backoffMs * 2 ** (attempt - 1);
+  return Number.isFinite(delay) && delay <= policy.maxRetryAfterMs ? delay : undefined;
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The failed response is discarded regardless of connection cancellation support.
+  }
+}
+
+function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted)
+    return Promise.reject(new AppError("DEPENDENCY_UNAVAILABLE", "Model request was cancelled.", 504));
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
+    const abort = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", abort);
+      reject(new AppError("DEPENDENCY_UNAVAILABLE", "Model request was cancelled.", 504));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
 }
 
 interface StreamedToolCall {

@@ -4,6 +4,7 @@ import { ModelProviderRegistry, OpenAICompatibleProvider } from "./model.js";
 import { ToolRegistry } from "./tools.js";
 import type { AgentToolRegistry } from "./tools.js";
 import { AppError } from "./errors.js";
+import type { ModelRetryPolicy } from "./model.js";
 
 /** Shared default composition for text-only agent calls in Bun and Workers. */
 export function createOpenAICompatibleAgentEngine(input: {
@@ -16,6 +17,7 @@ export function createOpenAICompatibleAgentEngine(input: {
   readonly toolCalling?: boolean;
   readonly imageInput?: boolean;
   readonly timeoutMs?: number;
+  readonly retryPolicy?: ModelRetryPolicy;
 }): AgentOrchestrator {
   const origins = normalizeAllowedOrigins(input.allowedOrigins);
   const providers = new ModelProviderRegistry();
@@ -33,6 +35,7 @@ export function createOpenAICompatibleAgentEngine(input: {
       toolCalling: input.toolCalling ?? false,
       imageInput: input.imageInput ?? false,
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      ...(input.retryPolicy === undefined ? {} : { retryPolicy: input.retryPolicy }),
     }),
   );
   const tools = input.tools ?? new ToolRegistry({ isAllowed: async () => false });

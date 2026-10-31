@@ -39,6 +39,7 @@ The Mini App sign-in does not require the master bot webhook. To use `/create`, 
 - Strict structured output additionally requires the origin in `MODEL_STRUCTURED_OUTPUT_ORIGINS`. It is disabled by default; streaming and structured output cannot be combined.
 - HTTP skills require their endpoint origin in `HTTP_SKILL_ALLOWED_ORIGINS`. MCP servers require `MCP_ALLOWED_ORIGINS`; MCP currently supports static bearer tokens, not OAuth.
 - If an HTTP skill is not discoverable, check its installation, enabled state, declared permissions, actor grants, and origin allowlist. MCP tools start disabled and need explicit grants.
+- Model HTTP errors 408, 429, 500, 502, 503, and 504 may retry for non-streaming requests. Set `MODEL_RETRY_MAX_ATTEMPTS` to 1–3 and `MODEL_RETRY_BACKOFF_MS` to 0–3000; network failures and streaming requests fail without replay to avoid duplicate cost or repeated text deltas.
 
 ## Encryption and database setup
 

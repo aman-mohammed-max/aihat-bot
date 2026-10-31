@@ -44,6 +44,7 @@ import {
   ScheduledTaskRunner,
   createScheduledTasksApiHandler,
   createToolExecutionRecoveryApiHandler,
+  parseRuntimeConfig,
   CombinedToolRegistry,
   DurableToolRegistry,
   McpManager,
@@ -228,6 +229,10 @@ export default {
     const baseAgentEngine = createOpenAICompatibleAgentEngine({
       conversations: d1,
       secrets: secretStore,
+      retryPolicy: parseRuntimeConfig({
+        MODEL_RETRY_MAX_ATTEMPTS: env.MODEL_RETRY_MAX_ATTEMPTS,
+        MODEL_RETRY_BACKOFF_MS: env.MODEL_RETRY_BACKOFF_MS,
+      }).modelRetryPolicy,
       tools: new DurableToolRegistry({
         registry: new CombinedToolRegistry([
           new ProviderCapabilityTools({ bots: d1, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),
@@ -410,6 +415,10 @@ export default {
     const baseEngine = createOpenAICompatibleAgentEngine({
       conversations: d1,
       secrets: secretStore,
+      retryPolicy: parseRuntimeConfig({
+        MODEL_RETRY_MAX_ATTEMPTS: env.MODEL_RETRY_MAX_ATTEMPTS,
+        MODEL_RETRY_BACKOFF_MS: env.MODEL_RETRY_BACKOFF_MS,
+      }).modelRetryPolicy,
       tools: new DurableToolRegistry({
         registry: new CombinedToolRegistry([
           new ProviderCapabilityTools({ bots: d1, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),

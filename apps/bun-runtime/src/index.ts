@@ -134,6 +134,7 @@ const modelAllowedOrigins = new Set(
 const baseAgentEngine = createOpenAICompatibleAgentEngine({
   conversations: repositories,
   secrets: secretStore,
+  retryPolicy: config.modelRetryPolicy,
   tools: new DurableToolRegistry({
     registry: new CombinedToolRegistry([
       new ProviderCapabilityTools({ bots: repositories, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),

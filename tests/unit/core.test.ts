@@ -474,6 +474,118 @@ describe("Bun SQLite workflow executions", () => {
 });
 
 describe("OpenAI-compatible provider boundary", () => {
+  test("retries configured transient HTTP responses with a bounded Retry-After", async () => {
+    let attempts = 0;
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      retryPolicy: {
+        maxAttempts: 2,
+        backoffMs: 0,
+        maxRetryAfterMs: 100,
+        retryableStatusCodes: [429, 503],
+      },
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async () => {
+        attempts += 1;
+        if (attempts === 1) return new Response("busy", { status: 429, headers: { "retry-after": "0" } });
+        return Response.json({ choices: [{ message: { role: "assistant", content: "recovered" } }] });
+      },
+    });
+    const result = await provider.complete({
+      tenantId,
+      config: { providerId: "compatible", model: "sample", credentialRef: "secret-ref" },
+      messages: [{ role: "user", content: "hello" }],
+    });
+    expect(attempts).toBe(2);
+    expect(result.message.content).toBe("recovered");
+  });
+
+  test("does not retry a provider response whose Retry-After exceeds the configured cap", async () => {
+    let attempts = 0;
+    const provider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      retryPolicy: {
+        maxAttempts: 3,
+        backoffMs: 0,
+        maxRetryAfterMs: 100,
+        retryableStatusCodes: [429],
+      },
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async () => {
+        attempts += 1;
+        return new Response("busy", { status: 429, headers: { "retry-after": "10" } });
+      },
+    });
+    await expect(
+      provider.complete({
+        tenantId,
+        config: { providerId: "compatible", model: "sample", credentialRef: "secret-ref" },
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_UNAVAILABLE", status: 502 });
+    expect(attempts).toBe(1);
+  });
+
+  test("does not retry ambiguous network failures or streaming calls", async () => {
+    let networkAttempts = 0;
+    const networkProvider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      retryPolicy: {
+        maxAttempts: 3,
+        backoffMs: 0,
+        maxRetryAfterMs: 100,
+        retryableStatusCodes: [503],
+      },
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async () => {
+        networkAttempts += 1;
+        throw new Error("connection lost");
+      },
+    });
+    await expect(
+      networkProvider.complete({
+        tenantId,
+        config: { providerId: "compatible", model: "sample", credentialRef: "secret-ref" },
+        messages: [],
+      }),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_UNAVAILABLE", status: 502 });
+    expect(networkAttempts).toBe(1);
+
+    let streamingAttempts = 0;
+    const streamingProvider = new OpenAICompatibleProvider({
+      id: "compatible",
+      defaultEndpoint: "https://api.example.test/v1",
+      allowedOrigins: new Set(["https://api.example.test"]),
+      streamingOrigins: new Set(["https://api.example.test"]),
+      retryPolicy: {
+        maxAttempts: 3,
+        backoffMs: 0,
+        maxRetryAfterMs: 100,
+        retryableStatusCodes: [503],
+      },
+      secrets: { resolve: async () => "secret-value" },
+      fetch: async () => {
+        streamingAttempts += 1;
+        return new Response("unavailable", { status: 503 });
+      },
+    });
+    await expect(
+      streamingProvider.complete({
+        tenantId,
+        config: { providerId: "compatible", model: "sample", credentialRef: "secret-ref" },
+        messages: [],
+        onTextDelta: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_UNAVAILABLE", status: 502 });
+    expect(streamingAttempts).toBe(1);
+  });
+
   test("sends secrets only to an explicitly approved HTTPS origin", async () => {
     const captured: { authorization: string | null; url: string } = { authorization: null, url: "" };
     const provider = new OpenAICompatibleProvider({
