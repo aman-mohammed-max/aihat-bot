@@ -93,6 +93,8 @@ bun run typecheck:cloudflare
 bun run build:cloudflare
 ```
 
+After the checks pass, deploy the top-level development environment with `bun run --cwd apps/cloudflare-runtime deploy:development`. This script passes an explicit empty Wrangler environment so it cannot accidentally target staging or production.
+
 To start local development (the script builds the dashboard first):
 
 ```sh
