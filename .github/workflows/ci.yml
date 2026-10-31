@@ -77,6 +77,37 @@ jobs:
       - name: Build self-hosted runtime image
         run: docker build --tag aihat-bot-factory:ci .
 
+      - name: Smoke test runtime in a read-only container
+        run: |
+          set -e
+          cleanup() { docker stop aihat-bot-factory-smoke >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run --detach --rm --name aihat-bot-factory-smoke \
+            --publish 127.0.0.1:13000:3000 \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --tmpfs /data:rw,noexec,nosuid,size=64m,uid=10001,gid=10001 \
+            --env APP_ENV=production \
+            --env HOST=0.0.0.0 \
+            --env PORT=3000 \
+            --env DATABASE_PATH=/data/aihat.sqlite \
+            --env OBJECTS_PATH=/data/objects \
+            aihat-bot-factory:ci >/dev/null
+          ready=0
+          for ((attempt=0; attempt<30; attempt++)); do
+            if curl --fail --silent http://127.0.0.1:13000/ready >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            docker logs aihat-bot-factory-smoke
+            exit 1
+          fi
+          curl --fail --silent --show-error http://127.0.0.1:13000/health >/dev/null
+          curl --fail --silent --show-error http://127.0.0.1:13000/miniapp/ >/dev/null
+
       - name: Export image for scanning
         run: docker save aihat-bot-factory:ci --output "${RUNNER_TEMP}/aihat-bot-factory-ci.tar"
 
