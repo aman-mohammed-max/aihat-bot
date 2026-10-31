@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { AppError } from "@aihat/core";
+import { AppError, MAX_UPLOADED_BYTES_PER_BOT, MAX_UPLOADED_FILES_PER_BOT } from "@aihat/core";
 import type { UploadedFileRepository, TenantId, UserId, BotId, UploadedFile } from "@aihat/core";
 
 interface UploadedFileRow {
@@ -31,12 +31,21 @@ export class BunSqliteUploadedFileRepository implements UploadedFileRepository {
 
   async createUploadedFile(input: { file: UploadedFile; tenantId: TenantId; ownerId: UserId }): Promise<void> {
     try {
-      this.db
+      const result = this.db
         .query(`
           INSERT INTO bot_files (
             id, tenant_id, bot_id, owner_id, file_name, content_type, size, etag,
             scan_status, scanner, scanned_at, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          )
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE (
+            SELECT count(*) FROM bot_files
+            WHERE tenant_id = ? AND owner_id = ? AND bot_id = ?
+          ) < ?
+          AND (
+            SELECT coalesce(sum(size), 0) FROM bot_files
+            WHERE tenant_id = ? AND owner_id = ? AND bot_id = ?
+          ) + ? <= ?
         `)
         .run(
           input.file.id,
@@ -52,8 +61,21 @@ export class BunSqliteUploadedFileRepository implements UploadedFileRepository {
           input.file.scannedAt ?? null,
           input.file.createdAt,
           input.file.updatedAt,
+          input.tenantId,
+          input.ownerId,
+          input.file.botId,
+          MAX_UPLOADED_FILES_PER_BOT,
+          input.tenantId,
+          input.ownerId,
+          input.file.botId,
+          input.file.size,
+          MAX_UPLOADED_BYTES_PER_BOT,
         );
+      if (result.changes === 0) {
+        throw new AppError("VALIDATION_ERROR", "This bot has reached its uploaded-file storage limit.", 413);
+      }
     } catch (cause) {
+      if (cause instanceof AppError) throw cause;
       throw new AppError("CONFLICT", "Uploaded file metadata could not be saved.", 409, { cause });
     }
   }

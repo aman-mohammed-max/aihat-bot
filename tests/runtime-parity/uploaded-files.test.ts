@@ -199,6 +199,120 @@ describe("uploaded file metadata runtime parity", () => {
       d1Db.close();
     }
   });
+
+  test("Bun SQLite and D1 enforce per-bot file count and byte quotas atomically", async () => {
+    const bunDb = openSqliteDatabase(":memory:");
+    const d1Db = openSqliteDatabase(":memory:");
+    const bun = new BunSqliteUploadedFileRepository(bunDb);
+    const d1 = new CloudflareD1UploadedFileRepository(new SqliteD1(d1Db) as unknown as D1Database);
+    const tenantId = "tenant-file-quota" as TenantId;
+    const ownerId = "user-file-quota" as UserId;
+    const botId = "bot_00000000-0000-4000-8000-000000000001" as BotId;
+    const now = "2026-10-31T00:00:00.000Z";
+    try {
+      seed(bunDb, tenantId, ownerId, botId, now);
+      seed(d1Db, tenantId, ownerId, botId, now);
+      for (let index = 0; index < 99; index += 1) {
+        const file: UploadedFile = {
+          id: `file_${index.toString(16).padStart(32, "0")}`,
+          botId,
+          fileName: `existing-${index}.txt`,
+          contentType: "text/plain",
+          size: 1,
+          etag: `etag-${index}`,
+          scanStatus: "pending_scan",
+          createdAt: now,
+          updatedAt: now,
+        };
+        await Promise.all([
+          bun.createUploadedFile({ file, tenantId, ownerId }),
+          d1.createUploadedFile({ file, tenantId, ownerId }),
+        ]);
+      }
+
+      const racingFiles = ["a", "b"].map(
+        (suffix): UploadedFile => ({
+          id: `file_${suffix.repeat(32)}`,
+          botId,
+          fileName: `racing-${suffix}.txt`,
+          contentType: "text/plain",
+          size: 1,
+          etag: `etag-racing-${suffix}`,
+          scanStatus: "pending_scan",
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+      const [bunAttempts, d1Attempts] = await Promise.all([
+        Promise.allSettled(racingFiles.map((file) => bun.createUploadedFile({ file, tenantId, ownerId }))),
+        Promise.allSettled(racingFiles.map((file) => d1.createUploadedFile({ file, tenantId, ownerId }))),
+      ]);
+
+      for (const attempts of [bunAttempts, d1Attempts]) {
+        expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+        const rejected = attempts.filter((attempt) => attempt.status === "rejected");
+        expect(rejected).toHaveLength(1);
+        expect(rejected[0]).toMatchObject({ status: "rejected", reason: { code: "VALIDATION_ERROR", status: 413 } });
+      }
+      const [bunUsage, d1Usage] = await Promise.all([
+        bun.getOwnedUploadedFileUsage({ tenantId, ownerId, botId }),
+        d1.getOwnedUploadedFileUsage({ tenantId, ownerId, botId }),
+      ]);
+      expect(bunUsage).toEqual({ files: 100, bytes: 100 });
+      expect(d1Usage).toEqual(bunUsage);
+
+      bunDb.query("DELETE FROM bot_files WHERE tenant_id = ? AND bot_id = ?").run(tenantId, botId);
+      d1Db.query("DELETE FROM bot_files WHERE tenant_id = ? AND bot_id = ?").run(tenantId, botId);
+      const maxFileSize = 25 * 1024 * 1024;
+      for (let index = 0; index < 9; index += 1) {
+        const file: UploadedFile = {
+          id: `file_${index.toString(16).padStart(32, "0")}`,
+          botId,
+          fileName: `large-${index}.txt`,
+          contentType: "text/plain",
+          size: maxFileSize,
+          etag: `etag-large-${index}`,
+          scanStatus: "pending_scan",
+          createdAt: now,
+          updatedAt: now,
+        };
+        await Promise.all([
+          bun.createUploadedFile({ file, tenantId, ownerId }),
+          d1.createUploadedFile({ file, tenantId, ownerId }),
+        ]);
+      }
+      const racingLargeFiles = ["c", "d"].map(
+        (suffix): UploadedFile => ({
+          id: `file_${suffix.repeat(32)}`,
+          botId,
+          fileName: `racing-large-${suffix}.txt`,
+          contentType: "text/plain",
+          size: maxFileSize,
+          etag: `etag-racing-large-${suffix}`,
+          scanStatus: "pending_scan",
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+      const [bunLargeAttempts, d1LargeAttempts] = await Promise.all([
+        Promise.allSettled(racingLargeFiles.map((file) => bun.createUploadedFile({ file, tenantId, ownerId }))),
+        Promise.allSettled(racingLargeFiles.map((file) => d1.createUploadedFile({ file, tenantId, ownerId }))),
+      ]);
+      for (const attempts of [bunLargeAttempts, d1LargeAttempts]) {
+        expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+        expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+      }
+      const [bunByteUsage, d1ByteUsage] = await Promise.all([
+        bun.getOwnedUploadedFileUsage({ tenantId, ownerId, botId }),
+        d1.getOwnedUploadedFileUsage({ tenantId, ownerId, botId }),
+      ]);
+      expect(bunByteUsage).toEqual({ files: 10, bytes: 250 * 1024 * 1024 });
+      expect(d1ByteUsage).toEqual(bunByteUsage);
+    } finally {
+      bunDb.close();
+      d1Db.close();
+    }
+  });
 });
 
 function createMemoryObjectStore(): ObjectStore {
