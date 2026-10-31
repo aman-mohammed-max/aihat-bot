@@ -65,3 +65,25 @@ jobs:
           --workdir /src
           ghcr.io/google/osv-scanner@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0
           scan source --lockfile /src/bun.lock
+
+  container-image:
+    name: Build and scan Bun image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build self-hosted runtime image
+        run: docker build --tag aihat-bot-factory:ci .
+
+      - name: Export image for scanning
+        run: docker save aihat-bot-factory:ci --output "${RUNNER_TEMP}/aihat-bot-factory-ci.tar"
+
+      - name: Scan runtime image with OSV Scanner
+        run: >-
+          docker run --rm
+          --volume "${RUNNER_TEMP}:/input:ro"
+          --workdir /tmp
+          ghcr.io/google/osv-scanner@sha256:4f3b7e2c64b9d38a5febc5a7e4a3dfef1d1362f726dea7a2ef4762b46469fcd0
+          scan image --archive /input/aihat-bot-factory-ci.tar
