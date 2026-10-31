@@ -3,6 +3,7 @@ import type {
   SecretStore,
   SecretWriter,
   AuditLogRepository,
+  IsolatedSkillExecutor,
   SkillRateLimiter,
   SkillRepository,
   TelegramRepository,
@@ -46,6 +47,7 @@ export interface SkillEngineOptions {
   readonly telegramGrants?: Pick<TelegramRepository, "isTelegramToolAllowed">;
   readonly authorizationAudit?: Pick<AuditLogRepository, "recordPermissionDecision">;
   readonly nativeHandlers?: ReadonlyMap<string, NativeSkillHandler>;
+  readonly isolatedSkillExecutor?: IsolatedSkillExecutor;
   readonly workflowExecutions?: WorkflowExecutionRepository;
   readonly secretWriter?: SecretWriter;
   readonly fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -59,6 +61,7 @@ export class SkillEngine implements AgentToolRegistry {
   readonly #secrets: SecretStore;
   readonly #allowedOrigins: ReadonlySet<string>;
   readonly #nativeHandlers: ReadonlyMap<string, NativeSkillHandler>;
+  readonly #isolatedSkillExecutor: IsolatedSkillExecutor | undefined;
   readonly #telegramGrants: SkillEngineOptions["telegramGrants"];
   readonly #authorizationAudit: SkillEngineOptions["authorizationAudit"];
   readonly #workflowExecutions: WorkflowExecutionRepository | undefined;
@@ -72,6 +75,7 @@ export class SkillEngine implements AgentToolRegistry {
     this.#secrets = options.secrets;
     this.#allowedOrigins = normalizeAllowedOrigins(options.allowedHttpOrigins);
     this.#nativeHandlers = options.nativeHandlers ?? new Map();
+    this.#isolatedSkillExecutor = options.isolatedSkillExecutor;
     this.#telegramGrants = options.telegramGrants;
     this.#authorizationAudit = options.authorizationAudit;
     this.#workflowExecutions = options.workflowExecutions;
@@ -91,6 +95,7 @@ export class SkillEngine implements AgentToolRegistry {
           skill.definition,
           this.#nativeHandlers,
           this.#workflowExecutions !== undefined && this.#secretWriter !== undefined,
+          this.#isolatedSkillExecutor,
         )
       )
         continue;
@@ -135,6 +140,7 @@ export class SkillEngine implements AgentToolRegistry {
         skill.definition,
         this.#nativeHandlers,
         this.#workflowExecutions !== undefined && this.#secretWriter !== undefined,
+        this.#isolatedSkillExecutor,
       )
     ) {
       throw unsupportedCapability(skill.definition.executionType, "current runtime");
@@ -171,9 +177,19 @@ export class SkillEngine implements AgentToolRegistry {
       const execution =
         skill.definition.executionType === "workflow"
           ? this.#executeWorkflow(skill, context, parsedInput, controller.signal)
-          : handler
-            ? handler(context, parsedInput, controller.signal, skill)
-            : this.#executeHttp(skill, context, parsedInput, controller.signal);
+          : skill.definition.executionType === "sandbox" && this.#isolatedSkillExecutor
+            ? this.#isolatedSkillExecutor.execute({
+                tenantId: context.tenantId,
+                botId: context.botId,
+                skillId: skill.definition.id,
+                version: skill.definition.version,
+                input: parsedInput,
+                timeoutMs: skill.definition.timeoutMs,
+                signal: controller.signal,
+              })
+            : handler
+              ? handler(context, parsedInput, controller.signal, skill)
+              : this.#executeHttp(skill, context, parsedInput, controller.signal);
       const timeoutResult = new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
           controller.abort(new Error("Skill execution timed out."));
@@ -826,10 +842,14 @@ function isSupported(
   definition: SkillDefinition,
   handlers: ReadonlyMap<string, NativeSkillHandler>,
   workflowEnabled: boolean,
+  isolatedSkillExecutor?: IsolatedSkillExecutor,
 ): boolean {
   if (definition.executionType === "http") return true;
   if (definition.executionType === "native") return handlers.has(definition.id);
   if (definition.executionType === "workflow") return workflowEnabled;
+  if (definition.executionType === "sandbox") {
+    return isolatedSkillExecutor?.supports({ id: definition.id, version: definition.version }) === true;
+  }
   return false;
 }
 

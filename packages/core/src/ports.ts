@@ -971,6 +971,26 @@ export interface SkillRateLimiter {
   }): Promise<boolean>;
 }
 
+/**
+ * Optional isolated execution adapter for reviewed, immutable skill artifacts.
+ * Implementations must resolve only registered skill ID/version pairs, execute
+ * outside the main runtime, and apply their own isolation and egress policy.
+ * The host passes validated input and identifiers only; no source text, secrets,
+ * environment, or host runtime handles cross this boundary.
+ */
+export interface IsolatedSkillExecutor {
+  supports(skill: { readonly id: string; readonly version: string }): boolean;
+  execute(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly skillId: string;
+    readonly version: string;
+    readonly input: unknown;
+    readonly timeoutMs: number;
+    readonly signal: AbortSignal;
+  }): Promise<unknown>;
+}
+
 /** Durable, tenant-scoped workflow checkpoints. State payloads live only in encrypted secret storage. */
 export interface WorkflowExecutionRepository {
   acquire(input: {

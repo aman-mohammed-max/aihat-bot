@@ -10,6 +10,7 @@ import { SkillEngine } from "../../packages/core/src/skill-engine.js";
 import type {
   SecretStore,
   SecretWriter,
+  IsolatedSkillExecutor,
   SkillRateLimiter,
   SkillRepository,
   WorkflowExecutionRepository,
@@ -124,6 +125,60 @@ describe("skill engine", () => {
       nativeHandlers: registry.handlers,
     });
     await expect(unauthorized.available(context)).resolves.toEqual([]);
+  });
+
+  test("routes sandbox skills only through an optional isolated artifact adapter", async () => {
+    const sandboxDefinition: SkillDefinition = {
+      ...definition,
+      id: "weather.isolated",
+      name: "Isolated weather lookup",
+      executionType: "sandbox",
+      configuration: { sandbox: { artifactRef: "weather-lookup-v1" } },
+    };
+    const installed = installation({ definition: sandboxDefinition });
+    const unavailable = new SkillEngine({
+      skills: skillRepository([installed]),
+      rateLimiter: rateLimiter(),
+      secrets,
+      allowedHttpOrigins: new Set(),
+    });
+    await expect(unavailable.available(context)).resolves.toEqual([]);
+
+    const calls: Array<Record<string, unknown>> = [];
+    const isolatedSkillExecutor: IsolatedSkillExecutor = {
+      supports: ({ id, version }) => id === sandboxDefinition.id && version === sandboxDefinition.version,
+      execute: async (input) => {
+        calls.push(input);
+        return { forecast: "12°C" };
+      },
+    };
+    const isolated = new SkillEngine({
+      skills: skillRepository([installed]),
+      rateLimiter: rateLimiter(),
+      secrets,
+      allowedHttpOrigins: new Set(),
+      isolatedSkillExecutor,
+    });
+    const [tool] = await isolated.available(context);
+    if (!tool) throw new Error("Expected the registered isolated artifact to be available.");
+
+    await expect(isolated.execute(context, tool.name, { city: "Oslo" })).resolves.toEqual({ forecast: "12°C" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      tenantId,
+      botId,
+      skillId: sandboxDefinition.id,
+      version: sandboxDefinition.version,
+      input: { city: "Oslo" },
+      timeoutMs: sandboxDefinition.timeoutMs,
+    });
+    expect(Object.keys(calls[0] ?? {}).sort()).toEqual(
+      ["tenantId", "botId", "skillId", "version", "input", "timeoutMs", "signal"].sort(),
+    );
+
+    await expect(unavailable.execute(context, tool.name, { city: "Oslo" })).rejects.toMatchObject({
+      code: "UNSUPPORTED_CAPABILITY",
+    });
   });
 
   test("runs forward-only workflows with opaque checkpoints, child retries, and completed-call replay", async () => {
