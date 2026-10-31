@@ -20,6 +20,10 @@ import type { McpOAuthAuthorizationState } from "./mcp-oauth.js";
 export const MCP_INVOKE_PERMISSION = "mcp:invoke";
 const MAX_TOOL_SCHEMA_BYTES = 32_768;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const MCP_RECONNECT_MAX_ATTEMPTS = 5;
+const MCP_RECONNECT_BASE_DELAY_MS = 15_000;
+const MCP_RECONNECT_MAX_DELAY_MS = 15 * 60_000;
+const MCP_RECONNECT_LEASE_GRACE_MS = 5_000;
 const OAUTH_SECRET_PREFIX = "aihat:mcp:oauth-client-credentials:v1:";
 const MAX_CACHED_OAUTH_PROVIDERS = 128;
 const mcpSchemaValidator = new CfWorkerJsonSchemaValidator({ draft: "2020-12" });
@@ -68,6 +72,7 @@ export class McpManager implements AgentToolRegistry {
   readonly #timeoutMs: number;
   readonly #telegramGrants: Pick<TelegramRepository, "isTelegramToolAllowed"> | undefined;
   readonly #authorizationAudit: Pick<AuditLogRepository, "recordPermissionDecision"> | undefined;
+  readonly #now: () => number;
 
   constructor(input: {
     readonly repository: McpRepository;
@@ -78,6 +83,7 @@ export class McpManager implements AgentToolRegistry {
     readonly timeoutMs?: number;
     readonly telegramGrants?: Pick<TelegramRepository, "isTelegramToolAllowed">;
     readonly authorizationAudit?: Pick<AuditLogRepository, "recordPermissionDecision">;
+    readonly now?: () => number;
   }) {
     this.#repository = input.repository;
     this.#secrets = input.secrets;
@@ -87,6 +93,7 @@ export class McpManager implements AgentToolRegistry {
     this.#timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#telegramGrants = input.telegramGrants;
     this.#authorizationAudit = input.authorizationAudit;
+    this.#now = input.now ?? Date.now;
     if (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs < 100 || this.#timeoutMs > 120_000) {
       throw new AppError("VALIDATION_ERROR", "MCP timeout must be between 100 and 120000 milliseconds.", 400);
     }
@@ -284,21 +291,9 @@ export class McpManager implements AgentToolRegistry {
   async connect(tenantId: TenantId, botId: ToolContext["botId"], serverId: string): Promise<readonly McpRemoteTool[]> {
     const server = await this.#requiredServer(tenantId, botId, serverId);
     try {
-      const tools = await this.#withClient(server, async (client) => {
-        const result = await client.listTools();
-        return normalizeToolList(result.tools);
-      });
-      await this.#repository.replaceDiscoveredTools({
-        tenantId,
-        botId,
-        serverId,
-        tools,
-        discoveredAt: new Date().toISOString(),
-      });
-      await this.#repository.setServerStatus({ tenantId, botId, serverId, status: "connected" });
-      return tools;
+      return await this.#discoverAndStore(server);
     } catch (cause) {
-      await this.#repository.setServerStatus({ tenantId, botId, serverId, status: "unhealthy" });
+      await this.#markUnhealthy(tenantId, botId, serverId);
       if (cause instanceof AppError) throw cause;
       throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP server connection or tool discovery failed.", 502, { cause });
     }
@@ -340,7 +335,12 @@ export class McpManager implements AgentToolRegistry {
   ): Promise<readonly { name: string; description: string; inputSchema: Readonly<Record<string, unknown>> }[]> {
     const servers = await this.#repository.listServers(context.tenantId, context.botId);
     const tools: { name: string; description: string; inputSchema: Readonly<Record<string, unknown>> }[] = [];
-    for (const server of servers) {
+    for (const listedServer of servers) {
+      let server = listedServer;
+      if (server.status === "unhealthy") {
+        await this.#tryReconnect(server, context.signal);
+        server = (await this.#repository.getServer(context.tenantId, context.botId, server.id)) ?? server;
+      }
       if (server.status !== "connected") continue;
       for (const tool of await this.#repository.listTools(context.tenantId, context.botId, server.id)) {
         if (!(await this.#isAuthorizedForActor(context, server.id, tool))) continue;
@@ -405,12 +405,7 @@ export class McpManager implements AgentToolRegistry {
         );
       } catch (cause) {
         if (!context.signal?.aborted && (!(cause instanceof AppError) || cause.code === "DEPENDENCY_UNAVAILABLE")) {
-          await this.#repository.setServerStatus({
-            tenantId: context.tenantId,
-            botId: context.botId,
-            serverId: server.id,
-            status: "unhealthy",
-          });
+          await this.#markUnhealthy(context.tenantId, context.botId, server.id);
         }
         throw cause;
       }
@@ -420,6 +415,72 @@ export class McpManager implements AgentToolRegistry {
 
   async promptInstructions(_context: ToolContext): Promise<readonly string[]> {
     return [];
+  }
+
+  async #discoverAndStore(server: McpServerConnection, signal?: AbortSignal): Promise<readonly McpRemoteTool[]> {
+    const tools = await this.#withClient(
+      server,
+      async (client) => normalizeToolList((await client.listTools()).tools),
+      signal,
+    );
+    await this.#repository.replaceDiscoveredTools({
+      tenantId: server.tenantId,
+      botId: server.botId,
+      serverId: server.id,
+      tools,
+      discoveredAt: new Date(this.#now()).toISOString(),
+    });
+    await this.#repository.setServerStatus({
+      tenantId: server.tenantId,
+      botId: server.botId,
+      serverId: server.id,
+      status: "connected",
+    });
+    return tools;
+  }
+
+  async #tryReconnect(server: McpServerConnection, signal?: AbortSignal): Promise<void> {
+    const now = this.#now();
+    const nowIso = new Date(now).toISOString();
+    const leaseToken = crypto.randomUUID();
+    const attempt = await this.#repository.claimServerReconnect({
+      tenantId: server.tenantId,
+      botId: server.botId,
+      serverId: server.id,
+      now: nowIso,
+      leaseUntil: new Date(now + this.#timeoutMs + MCP_RECONNECT_LEASE_GRACE_MS).toISOString(),
+      leaseToken,
+      maxAttempts: MCP_RECONNECT_MAX_ATTEMPTS,
+    });
+    if (attempt === undefined) return;
+
+    try {
+      await this.#discoverAndStore(server, signal);
+    } catch {
+      const retryAfter =
+        attempt >= MCP_RECONNECT_MAX_ATTEMPTS
+          ? undefined
+          : new Date(this.#now() + reconnectDelayMs(attempt)).toISOString();
+      await this.#repository.failServerReconnect({
+        tenantId: server.tenantId,
+        botId: server.botId,
+        serverId: server.id,
+        attempt,
+        leaseToken,
+        ...(retryAfter ? { retryAfter } : {}),
+        now: new Date(this.#now()).toISOString(),
+      });
+    }
+  }
+
+  async #markUnhealthy(tenantId: TenantId, botId: ToolContext["botId"], serverId: string): Promise<void> {
+    await this.#repository.setServerStatus({
+      tenantId,
+      botId,
+      serverId,
+      status: "unhealthy",
+      reconnectAfter: new Date(this.#now() + MCP_RECONNECT_BASE_DELAY_MS).toISOString(),
+    });
   }
 
   async #canActorUse(context: ToolContext, serverId: string, toolName: string): Promise<boolean> {
@@ -636,6 +697,10 @@ export class McpManager implements AgentToolRegistry {
       await transport.close().catch(() => undefined);
     }
   }
+}
+
+function reconnectDelayMs(attempt: number): number {
+  return Math.min(MCP_RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1), MCP_RECONNECT_MAX_DELAY_MS);
 }
 
 export function exposedToolName(serverId: string, toolName: string): string {

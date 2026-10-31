@@ -1057,7 +1057,26 @@ export interface McpRepository {
     readonly botId: BotId;
     readonly serverId: string;
     readonly status: McpServerConnection["status"];
+    readonly reconnectAfter?: string;
   }): Promise<void>;
+  claimServerReconnect(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly serverId: string;
+    readonly now: string;
+    readonly leaseUntil: string;
+    readonly leaseToken: string;
+    readonly maxAttempts: number;
+  }): Promise<number | undefined>;
+  failServerReconnect(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly serverId: string;
+    readonly attempt: number;
+    readonly leaseToken: string;
+    readonly retryAfter?: string;
+    readonly now: string;
+  }): Promise<boolean>;
   setServerCredentialRef(input: {
     readonly tenantId: TenantId;
     readonly botId: BotId;

@@ -147,6 +147,11 @@ const migrations: readonly Migration[] = [
     name: "native_text_statistics",
     sql: readFileSync(findMigration("0027_native_text_statistics.sql"), "utf8"),
   },
+  {
+    version: 28,
+    name: "mcp_reconnect_state",
+    sql: readFileSync(findMigration("0028_mcp_reconnect_state.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {

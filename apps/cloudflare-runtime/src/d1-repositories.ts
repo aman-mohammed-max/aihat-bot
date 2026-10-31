@@ -190,6 +190,8 @@ interface McpServerRow {
   endpoint: string;
   credential_ref: string | null;
   status: McpServerConnection["status"];
+  reconnect_attempts: number;
+  reconnect_after: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -516,6 +518,8 @@ export class CloudflareD1Repositories
       getServer: (tenantId, botId, serverId) => this.getMcpServer(tenantId, botId, serverId),
       createServer: (input) => this.createMcpServer(input),
       setServerStatus: (input) => this.setMcpServerStatus(input),
+      claimServerReconnect: (input) => this.claimMcpServerReconnect(input),
+      failServerReconnect: (input) => this.failMcpServerReconnect(input),
       setServerCredentialRef: (input) => this.setMcpServerCredentialRef(input),
       deleteServer: (input) => this.deleteMcpServer(input),
       listTools: (tenantId, botId, serverId) => this.listMcpTools(tenantId, botId, serverId),
@@ -4500,7 +4504,8 @@ export class CloudflareD1Repositories
   async listMcpServers(tenantId: TenantId, botId: BotId): Promise<readonly McpServerConnection[]> {
     const result = await this.db
       .prepare(`
-        SELECT id, tenant_id, bot_id, name, endpoint, credential_ref, status, created_at, updated_at
+        SELECT id, tenant_id, bot_id, name, endpoint, credential_ref, status,
+               reconnect_attempts, reconnect_after, created_at, updated_at
         FROM mcp_servers WHERE tenant_id = ? AND bot_id = ? ORDER BY created_at, id
       `)
       .bind(tenantId, botId)
@@ -4511,7 +4516,8 @@ export class CloudflareD1Repositories
   async getMcpServer(tenantId: TenantId, botId: BotId, serverId: string): Promise<McpServerConnection | undefined> {
     const row = await this.db
       .prepare(`
-        SELECT id, tenant_id, bot_id, name, endpoint, credential_ref, status, created_at, updated_at
+        SELECT id, tenant_id, bot_id, name, endpoint, credential_ref, status,
+               reconnect_attempts, reconnect_after, created_at, updated_at
         FROM mcp_servers WHERE tenant_id = ? AND bot_id = ? AND id = ?
       `)
       .bind(tenantId, botId, serverId)
@@ -4536,11 +4542,76 @@ export class CloudflareD1Repositories
   }
 
   async setMcpServerStatus(input: Parameters<McpRepository["setServerStatus"]>[0]): Promise<void> {
-    const result = await this.db
-      .prepare("UPDATE mcp_servers SET status = ?, updated_at = ? WHERE tenant_id = ? AND bot_id = ? AND id = ?")
-      .bind(input.status, new Date().toISOString(), input.tenantId, input.botId, input.serverId)
-      .run();
+    const now = new Date().toISOString();
+    const result =
+      input.status === "unhealthy"
+        ? await this.db
+            .prepare(`
+              UPDATE mcp_servers SET status = ?, reconnect_attempts = 0, reconnect_after = ?,
+                reconnect_lease_until = NULL, reconnect_lease_token = NULL, updated_at = ?
+              WHERE tenant_id = ? AND bot_id = ? AND id = ?
+            `)
+            .bind(input.status, input.reconnectAfter ?? null, now, input.tenantId, input.botId, input.serverId)
+            .run()
+        : await this.db
+            .prepare(`
+              UPDATE mcp_servers SET status = ?, reconnect_attempts = 0, reconnect_after = NULL,
+                reconnect_lease_until = NULL, reconnect_lease_token = NULL, updated_at = ?
+              WHERE tenant_id = ? AND bot_id = ? AND id = ?
+            `)
+            .bind(input.status, now, input.tenantId, input.botId, input.serverId)
+            .run();
     if (result.meta.changes !== 1) throw new AppError("NOT_FOUND", "MCP server was not found for this bot.", 404);
+  }
+
+  async claimMcpServerReconnect(
+    input: Parameters<McpRepository["claimServerReconnect"]>[0],
+  ): Promise<number | undefined> {
+    const row = await this.db
+      .prepare(`
+        UPDATE mcp_servers
+        SET reconnect_attempts = reconnect_attempts + 1, reconnect_lease_until = ?,
+            reconnect_lease_token = ?, updated_at = ?
+        WHERE tenant_id = ? AND bot_id = ? AND id = ? AND status = 'unhealthy'
+          AND reconnect_attempts < ?
+          AND (reconnect_after IS NULL OR reconnect_after <= ?)
+          AND (reconnect_lease_until IS NULL OR reconnect_lease_until <= ?)
+        RETURNING reconnect_attempts
+      `)
+      .bind(
+        input.leaseUntil,
+        input.leaseToken,
+        input.now,
+        input.tenantId,
+        input.botId,
+        input.serverId,
+        input.maxAttempts,
+        input.now,
+        input.now,
+      )
+      .first<{ reconnect_attempts: number }>();
+    return row?.reconnect_attempts;
+  }
+
+  async failMcpServerReconnect(input: Parameters<McpRepository["failServerReconnect"]>[0]): Promise<boolean> {
+    const result = await this.db
+      .prepare(`
+        UPDATE mcp_servers SET reconnect_after = ?, reconnect_lease_until = NULL,
+          reconnect_lease_token = NULL, updated_at = ?
+        WHERE tenant_id = ? AND bot_id = ? AND id = ? AND status = 'unhealthy'
+          AND reconnect_attempts = ? AND reconnect_lease_token = ?
+      `)
+      .bind(
+        input.retryAfter ?? null,
+        input.now,
+        input.tenantId,
+        input.botId,
+        input.serverId,
+        input.attempt,
+        input.leaseToken,
+      )
+      .run();
+    return result.meta.changes === 1;
   }
 
   async setMcpServerCredentialRef(input: Parameters<McpRepository["setServerCredentialRef"]>[0]): Promise<void> {
@@ -5552,6 +5623,8 @@ function mapMcpServer(row: McpServerRow): McpServerConnection {
     endpoint: row.endpoint,
     ...(row.credential_ref ? { credentialRef: row.credential_ref } : {}),
     status: row.status,
+    reconnectAttempts: row.reconnect_attempts,
+    ...(row.reconnect_after ? { reconnectAfter: row.reconnect_after } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

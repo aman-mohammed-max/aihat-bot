@@ -195,6 +195,49 @@ describe("MCP manager", () => {
     expect(state.servers[0]?.status).toBe("unhealthy");
   });
 
+  test("reconnects an unhealthy server after its persisted retry delay", async () => {
+    const state = memoryRepository();
+    let now = Date.parse("2026-01-01T00:00:00.000Z");
+    let shouldConnect = false;
+    const manager = new McpManager({
+      repository: state.repository,
+      secrets: { resolve: async () => "unused" },
+      allowedOrigins: new Set(["https://mcp.example.com"]),
+      now: () => now,
+      fetch: async (input, init) => {
+        if (!shouldConnect) throw new Error("MCP unavailable");
+        const request = input instanceof Request ? input : new Request(input, init);
+        const message = (await request.json()) as {
+          id?: string | number;
+          method: string;
+          params?: Record<string, unknown>;
+        };
+        if (message.id === undefined) return new Response(null, { status: 202 });
+        const result =
+          message.method === "initialize"
+            ? {
+                protocolVersion: message.params?.protocolVersion ?? "2025-11-25",
+                capabilities: { tools: {} },
+                serverInfo: { name: "test-server", version: "1" },
+              }
+            : { tools: [tool] };
+        return Response.json({ jsonrpc: "2.0", id: message.id, result });
+      },
+    });
+    await manager.addServer({ id: "mcp_reconnect", tenantId, botId, name: "Test", endpoint, installedBy: ownerId });
+    await expect(manager.connect(tenantId, botId, "mcp_reconnect")).rejects.toMatchObject({ status: 502 });
+    expect(state.servers[0]).toMatchObject({ status: "unhealthy", reconnectAttempts: 0 });
+
+    expect(await manager.available({ tenantId, botId, actorId: ownerId })).toEqual([]);
+    expect(state.servers[0]?.reconnectAttempts).toBe(0);
+    now += 15_001;
+    shouldConnect = true;
+
+    expect(await manager.available({ tenantId, botId, actorId: ownerId })).toEqual([]);
+    expect(state.servers[0]).toMatchObject({ status: "connected", reconnectAttempts: 0 });
+    expect(state.tools).toHaveLength(1);
+  });
+
   test("stores MCP OAuth client credentials behind the secret writer and allowlists the issuer", async () => {
     const state = memoryRepository();
     const stored: string[] = [];
@@ -1000,6 +1043,7 @@ describe("MCP manager", () => {
 function memoryRepository() {
   const servers: McpServerConnection[] = [];
   const tools: McpDiscoveredTool[] = [];
+  const reconnectLeases = new Map<string, { leaseUntil: string; leaseToken: string }>();
   const repository: McpRepository = {
     listServers: async (tenant, bot) => servers.filter((server) => server.tenantId === tenant && server.botId === bot),
     getServer: async (tenant, bot, id) =>
@@ -1022,7 +1066,57 @@ function memoryRepository() {
         (server) => server.id === input.serverId && server.tenantId === input.tenantId && server.botId === input.botId,
       );
       const server = servers[index];
-      if (server) servers[index] = { ...server, status: input.status, updatedAt: new Date().toISOString() };
+      if (server) {
+        reconnectLeases.delete(server.id);
+        servers[index] = {
+          ...server,
+          status: input.status,
+          reconnectAttempts: 0,
+          ...(input.status === "unhealthy" && input.reconnectAfter ? { reconnectAfter: input.reconnectAfter } : {}),
+          updatedAt: new Date().toISOString(),
+        };
+      }
+    },
+    claimServerReconnect: async (input) => {
+      const server = servers.find(
+        (entry) => entry.id === input.serverId && entry.tenantId === input.tenantId && entry.botId === input.botId,
+      );
+      const lease = reconnectLeases.get(input.serverId);
+      if (
+        !server ||
+        server.status !== "unhealthy" ||
+        (server.reconnectAttempts ?? 0) >= input.maxAttempts ||
+        (server.reconnectAfter !== undefined && server.reconnectAfter > input.now) ||
+        (lease !== undefined && lease.leaseUntil > input.now)
+      ) {
+        return undefined;
+      }
+      const attempt = (server.reconnectAttempts ?? 0) + 1;
+      servers[servers.indexOf(server)] = { ...server, reconnectAttempts: attempt };
+      reconnectLeases.set(input.serverId, { leaseUntil: input.leaseUntil, leaseToken: input.leaseToken });
+      return attempt;
+    },
+    failServerReconnect: async (input) => {
+      const server = servers.find(
+        (entry) => entry.id === input.serverId && entry.tenantId === input.tenantId && entry.botId === input.botId,
+      );
+      const lease = reconnectLeases.get(input.serverId);
+      if (
+        !server ||
+        server.status !== "unhealthy" ||
+        server.reconnectAttempts !== input.attempt ||
+        lease?.leaseToken !== input.leaseToken
+      ) {
+        return false;
+      }
+      const index = servers.indexOf(server);
+      servers[index] = {
+        ...server,
+        ...(input.retryAfter ? { reconnectAfter: input.retryAfter } : {}),
+        updatedAt: input.now,
+      };
+      reconnectLeases.delete(input.serverId);
+      return true;
     },
     setServerCredentialRef: async (input) => {
       const index = servers.findIndex(

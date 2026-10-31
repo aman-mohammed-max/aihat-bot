@@ -475,6 +475,8 @@ export interface McpServerConnection {
   readonly credentialRef?: string;
   readonly authenticationMode?: "none" | "bearer" | "oauth_client_credentials" | "oauth_authorization_code";
   readonly status: McpServerStatus;
+  readonly reconnectAttempts?: number;
+  readonly reconnectAfter?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
