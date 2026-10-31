@@ -1,6 +1,7 @@
 import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import type { BotMemoryService } from "./ports.js";
 import type { BotId } from "./types.js";
 
@@ -81,7 +82,7 @@ async function readMemoryBody(request: Request): Promise<{ value: string; expire
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     throw new AppError("VALIDATION_ERROR", "Request body must use application/json.", 415);
   }
-  const raw = await request.text();
+  const raw = await readBoundedRequestText(request, 8_000);
   if (new TextEncoder().encode(raw).byteLength > 8_000) {
     throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
   }

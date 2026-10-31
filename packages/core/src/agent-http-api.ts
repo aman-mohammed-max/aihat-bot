@@ -1,6 +1,7 @@
 import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import { validateStructuredOutputSchema } from "./structured-output.js";
 import type { AgentEngine, ApiConversationRepository, BotRepository } from "./ports.js";
 import type { BotId, JsonSchema } from "./types.js";
@@ -159,7 +160,7 @@ async function readMessageBody(
   }
   let input: unknown;
   try {
-    const raw = await request.text();
+    const raw = await readBoundedRequestText(request, 24_000);
     if (new TextEncoder().encode(raw).byteLength > 24_000) {
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     }

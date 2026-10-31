@@ -6,6 +6,7 @@ import {
 } from "./api-auth.js";
 import type { ApiTokenAuthenticator, ApiTokenScope } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import type { ApiTokenRepository, TenantMembershipRepository } from "./ports.js";
 import type { TenantId } from "./types.js";
 
@@ -105,7 +106,7 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
   }
   let value: unknown;
   try {
-    const serialized = await request.text();
+    const serialized = await readBoundedRequestText(request, MAX_BODY_BYTES);
     if (new TextEncoder().encode(serialized).byteLength > MAX_BODY_BYTES) {
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     }

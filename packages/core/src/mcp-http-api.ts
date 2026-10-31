@@ -1,6 +1,7 @@
 import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import type { BotRepository } from "./ports.js";
 import type { McpAuthenticationInput, McpManager } from "./mcp-manager.js";
 import type { BotId, McpServerConnection } from "./types.js";
@@ -272,7 +273,7 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
   }
   let text: string;
   try {
-    text = await request.text();
+    text = await readBoundedRequestText(request, 16_384);
     if (new TextEncoder().encode(text).byteLength > 16_384) {
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     }

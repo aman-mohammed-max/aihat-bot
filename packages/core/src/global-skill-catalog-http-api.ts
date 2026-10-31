@@ -1,4 +1,5 @@
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import { isOperatorRequestAuthorized, isOperatorTokenConfigured } from "./operator-auth.js";
 import { validateSkillCatalogPublication } from "./skill-data.js";
 import { validateSkillDefinitionForPublication } from "./skill-engine.js";
@@ -95,7 +96,7 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
   }
   let value: unknown;
   try {
-    const text = await request.text();
+    const text = await readBoundedRequestText(request, 16_384);
     if (new TextEncoder().encode(text).byteLength > 16_384) {
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     }

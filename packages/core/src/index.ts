@@ -48,6 +48,7 @@ export * from "./agent-http-api.js";
 export * from "./bot-access-http-api.js";
 export * from "./conversation-history-http-api.js";
 export * from "./usage.js";
+export * from "./http-body.js";
 export * from "./usage-http-api.js";
 export * from "./memory.js";
 export * from "./memory-http-api.js";

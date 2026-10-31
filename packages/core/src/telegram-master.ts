@@ -1,4 +1,5 @@
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import { type BotFactory, CREATION_STEPS } from "./bot-factory.js";
 import { DEFAULT_TELEGRAM_MASTER_REQUESTS_PER_MINUTE } from "./config.js";
 import type { FactoryAssistant } from "./factory-assistant.js";
@@ -545,7 +546,7 @@ async function readUpdate(
   if (Number.isFinite(contentLength) && contentLength > 65_536) {
     throw new AppError("VALIDATION_ERROR", "Telegram update is too large.", 413);
   }
-  const raw = await request.text();
+  const raw = await readBoundedRequestText(request, 65_536, "Telegram update is too large.");
   if (new TextEncoder().encode(raw).byteLength > 65_536) {
     throw new AppError("VALIDATION_ERROR", "Telegram update is too large.", 413);
   }

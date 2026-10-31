@@ -1,5 +1,6 @@
 import { API_TOKEN_SCOPES, createApiTokenMaterial } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import type { ApiTokenRepository, TelegramAuthRepository } from "./ports.js";
 import { telegramAccountIds } from "./telegram-auth.js";
 
@@ -262,7 +263,7 @@ async function readEmptyJsonBody(request: Request): Promise<void> {
     throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
   let body: unknown;
   try {
-    const text = await request.text();
+    const text = await readBoundedRequestText(request, 1024);
     if (new TextEncoder().encode(text).byteLength > 1024) {
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     }
@@ -286,7 +287,7 @@ async function readIdToken(request: Request): Promise<string> {
   }
   let body: unknown;
   try {
-    const text = await request.text();
+    const text = await readBoundedRequestText(request, TOKEN_MAX_BYTES + 1024);
     if (new TextEncoder().encode(text).byteLength > TOKEN_MAX_BYTES + 1024) {
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     }

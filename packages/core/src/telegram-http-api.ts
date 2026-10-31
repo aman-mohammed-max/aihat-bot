@@ -1,6 +1,7 @@
 import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import type { BotRepository, TelegramRepository } from "./ports.js";
 import type { BotId, TelegramDeploymentId } from "./types.js";
 import type { TelegramManager } from "./telegram.js";
@@ -193,7 +194,7 @@ async function readJsonBody(request: Request, maxBytes = 8192): Promise<Record<s
     throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
   let value: unknown;
   try {
-    const raw = await request.text();
+    const raw = await readBoundedRequestText(request, maxBytes);
     if (new TextEncoder().encode(raw).byteLength > maxBytes)
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     value = JSON.parse(raw);

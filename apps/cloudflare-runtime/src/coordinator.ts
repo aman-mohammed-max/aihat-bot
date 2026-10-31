@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { AppError, readBoundedRequestText } from "@aihat/core";
 
 interface ScheduledTaskInput {
   tenantId: string;
@@ -143,9 +144,11 @@ export class BotCoordinator extends DurableObject<Env> {
 async function readScheduledTask(request: Request): Promise<ScheduledTaskInput | Response> {
   let body: unknown;
   try {
-    body = await request.json();
-  } catch {
-    return new Response("Request body must be JSON.", { status: 400 });
+    body = JSON.parse(await readBoundedRequestText(request, 512));
+  } catch (cause) {
+    return new Response("Request body must be valid bounded JSON.", {
+      status: cause instanceof AppError ? cause.status : 400,
+    });
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return new Response("Invalid scheduled task.", { status: 400 });

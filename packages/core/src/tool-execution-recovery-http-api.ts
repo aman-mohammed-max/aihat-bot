@@ -1,6 +1,7 @@
 import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import type { ToolExecutionRepository } from "./ports.js";
 import type { BotId } from "./types.js";
 
@@ -72,7 +73,7 @@ async function readResolution(request: Request): Promise<"retry" | "close"> {
   }
   let value: unknown;
   try {
-    const raw = await request.text();
+    const raw = await readBoundedRequestText(request, 1024);
     if (new TextEncoder().encode(raw).byteLength > 1024) {
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     }

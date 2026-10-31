@@ -1,6 +1,7 @@
 import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import { validateSkillCatalogPublication, validateSkillInstallation } from "./skill-data.js";
 import { validateSkillDefinitionForPublication } from "./skill-engine.js";
 import type { BotRepository, SecretStore, SkillRepository } from "./ports.js";
@@ -166,7 +167,7 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
   }
   let value: unknown;
   try {
-    const text = await request.text();
+    const text = await readBoundedRequestText(request, 16_384);
     if (new TextEncoder().encode(text).byteLength > 16_384) {
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     }

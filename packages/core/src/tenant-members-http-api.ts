@@ -1,6 +1,7 @@
 import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import type { TenantMembershipRepository } from "./ports.js";
 import type { TenantRole, UserId } from "./types.js";
 
@@ -152,7 +153,7 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
   if (contentLength && Number(contentLength) > MAX_BODY_BYTES) {
     throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
   }
-  const text = await request.text();
+  const text = await readBoundedRequestText(request, MAX_BODY_BYTES);
   if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
     throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
   }

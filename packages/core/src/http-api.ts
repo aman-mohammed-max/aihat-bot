@@ -1,6 +1,7 @@
 import { recordApiAuthorizationDenial, API_TOKEN_SCOPES, createApiTokenMaterial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator, ApiTokenScope } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import type { ApiTokenRepository } from "./ports.js";
 
 /** Shared token-management API used by the Bun and Cloudflare entrypoints. */
@@ -104,7 +105,7 @@ async function readTokenRequest(request: Request): Promise<{
   }
   let value: unknown;
   try {
-    const body = await request.text();
+    const body = await readBoundedRequestText(request, 8192);
     if (new TextEncoder().encode(body).byteLength > 8192) {
       throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
     }

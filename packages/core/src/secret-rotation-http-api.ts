@@ -1,5 +1,6 @@
 import { EncryptedSecretStore } from "./encrypted-secrets.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import { isOperatorRequestAuthorized, isOperatorTokenConfigured } from "./operator-auth.js";
 import type { SecretKeyring, SecretRecordRepository } from "./ports.js";
 import type { SecretRotationCursor } from "./encrypted-secrets.js";
@@ -63,7 +64,7 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
   }
   let value: unknown;
   try {
-    const text = await request.text();
+    const text = await readBoundedRequestText(request, MAX_BODY_BYTES, "Rotation request is too large.");
     if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
       throw new AppError("VALIDATION_ERROR", "Rotation request is too large.", 413);
     }

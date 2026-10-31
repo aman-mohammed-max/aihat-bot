@@ -1,6 +1,7 @@
 import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
+import { readBoundedRequestText } from "./http-body.js";
 import type { BotOwnershipTransferRepository } from "./ports.js";
 import type { BotId, UserId } from "./types.js";
 
@@ -132,10 +133,9 @@ async function hashTransferToken(token: string): Promise<string> {
 }
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > MAX_BODY_BYTES) throw new AppError("VALIDATION_ERROR", "Request body is too large.", 413);
+  const text = await readBoundedRequestText(request, MAX_BODY_BYTES);
   try {
-    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    const parsed: unknown = JSON.parse(text);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("object required");
     return parsed as Record<string, unknown>;
   } catch {
