@@ -50,6 +50,17 @@ jobs:
           docker compose --env-file /dev/null config --quiet
           docker compose --env-file /dev/null --profile clamav --profile scanner-gateway config --quiet
 
+      - name: Validate scanner gateway Caddyfile
+        run: >-
+          docker run --rm --read-only
+          --volume "${GITHUB_WORKSPACE}/Caddyfile:/etc/caddy/Caddyfile:ro"
+          --tmpfs /tmp:rw,noexec,nosuid,size=16m
+          --tmpfs /data:rw,nosuid,nodev,size=16m
+          --tmpfs /config:rw,nosuid,nodev,size=16m
+          --env FILE_SCANNER_GATEWAY_DOMAIN=localhost
+          caddy:2.11.4-alpine
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
   dependency-scan:
     name: Scan locked dependencies
     runs-on: ubuntu-24.04
