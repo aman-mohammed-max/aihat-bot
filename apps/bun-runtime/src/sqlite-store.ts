@@ -2668,7 +2668,7 @@ export class BunSqliteRepositories
       .query(`
         UPDATE telegram_updates SET state = 'ready', response_text = ?, response_attachments_json = ?,
           lease_until = ?, updated_at = ?
-        WHERE deployment_id = ? AND update_id = ? AND state = 'processing'
+        WHERE deployment_id = ? AND update_id = ? AND state = 'processing' AND lease_until = ?
       `)
       .run(
         input.responseText,
@@ -2677,6 +2677,7 @@ export class BunSqliteRepositories
         input.now,
         input.deploymentId,
         input.updateId,
+        input.leaseUntil,
       );
     if (result.changes !== 1) throw new AppError("CONFLICT", "Telegram update lease was lost.", 409);
   }
@@ -2684,14 +2685,15 @@ export class BunSqliteRepositories
   async completeTelegramUpdate(input: {
     deploymentId: TelegramDeploymentId;
     updateId: number;
+    leaseUntil: string;
     now: string;
   }): Promise<void> {
     const result = this.#db
       .query(`
         UPDATE telegram_updates SET state = 'completed', response_text = NULL, updated_at = ?
-        WHERE deployment_id = ? AND update_id = ? AND state = 'ready'
+        WHERE deployment_id = ? AND update_id = ? AND state = 'ready' AND lease_until = ?
       `)
-      .run(input.now, input.deploymentId, input.updateId);
+      .run(input.now, input.deploymentId, input.updateId, input.leaseUntil);
     if (result.changes !== 1) throw new AppError("CONFLICT", "Telegram update could not be completed.", 409);
   }
 
@@ -2707,13 +2709,14 @@ export class BunSqliteRepositories
   async releaseTelegramUpdate(input: {
     deploymentId: TelegramDeploymentId;
     updateId: number;
+    leaseUntil: string;
     now: string;
   }): Promise<void> {
     this.#db
       .query(
-        "UPDATE telegram_updates SET lease_until = ?, updated_at = ? WHERE deployment_id = ? AND update_id = ? AND state != 'completed'",
+        "UPDATE telegram_updates SET lease_until = ?, updated_at = ? WHERE deployment_id = ? AND update_id = ? AND state != 'completed' AND lease_until = ?",
       )
-      .run(input.now, input.now, input.deploymentId, input.updateId);
+      .run(input.now, input.now, input.deploymentId, input.updateId, input.leaseUntil);
   }
 
   async createScheduledTask(input: { task: ScheduledTask; firstJobId: JobId; idempotencyKey: string }): Promise<void> {
@@ -3985,28 +3988,28 @@ export class BunSqliteRepositories
     const result = this.#db
       .query(`
         UPDATE master_bot_updates SET state = 'ready', response_json = ?, lease_until = ?, updated_at = ?
-        WHERE update_id = ? AND state = 'processing'
+        WHERE update_id = ? AND state = 'processing' AND lease_until = ?
       `)
-      .run(serialized, input.leaseUntil, input.now, input.updateId);
+      .run(serialized, input.leaseUntil, input.now, input.updateId, input.leaseUntil);
     if (result.changes !== 1) throw new AppError("CONFLICT", "Master bot update lease was lost.", 409);
   }
 
-  async completeMasterBotUpdate(input: { updateId: number; now: string }): Promise<void> {
+  async completeMasterBotUpdate(input: { updateId: number; leaseUntil: string; now: string }): Promise<void> {
     const result = this.#db
       .query(`
         UPDATE master_bot_updates SET state = 'completed', response_json = NULL, updated_at = ?
-        WHERE update_id = ? AND state = 'ready'
+        WHERE update_id = ? AND state = 'ready' AND lease_until = ?
       `)
-      .run(input.now, input.updateId);
+      .run(input.now, input.updateId, input.leaseUntil);
     if (result.changes !== 1) throw new AppError("CONFLICT", "Master bot update could not be completed.", 409);
   }
 
-  async releaseMasterBotUpdate(input: { updateId: number; now: string }): Promise<void> {
+  async releaseMasterBotUpdate(input: { updateId: number; leaseUntil: string; now: string }): Promise<void> {
     this.#db
       .query(
-        "UPDATE master_bot_updates SET lease_until = ?, updated_at = ? WHERE update_id = ? AND state != 'completed'",
+        "UPDATE master_bot_updates SET lease_until = ?, updated_at = ? WHERE update_id = ? AND state != 'completed' AND lease_until = ?",
       )
-      .run(input.now, input.now, input.updateId);
+      .run(input.now, input.now, input.updateId, input.leaseUntil);
   }
 
   async createCreationApproval(record: CreationApprovalRecord): Promise<void> {

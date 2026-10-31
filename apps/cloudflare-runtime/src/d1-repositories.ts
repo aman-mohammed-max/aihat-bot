@@ -3029,7 +3029,7 @@ export class CloudflareD1Repositories
       .prepare(`
         UPDATE telegram_updates SET state = 'ready', response_text = ?, response_attachments_json = ?,
           lease_until = ?, updated_at = ?
-        WHERE deployment_id = ? AND update_id = ? AND state = 'processing'
+        WHERE deployment_id = ? AND update_id = ? AND state = 'processing' AND lease_until = ?
       `)
       .bind(
         input.responseText,
@@ -3038,6 +3038,7 @@ export class CloudflareD1Repositories
         input.now,
         input.deploymentId,
         input.updateId,
+        input.leaseUntil,
       )
       .run();
     if (result.meta.changes !== 1) throw new AppError("CONFLICT", "Telegram update lease was lost.", 409);
@@ -3046,14 +3047,15 @@ export class CloudflareD1Repositories
   async completeTelegramUpdate(input: {
     deploymentId: TelegramDeploymentId;
     updateId: number;
+    leaseUntil: string;
     now: string;
   }): Promise<void> {
     const result = await this.db
       .prepare(`
         UPDATE telegram_updates SET state = 'completed', response_text = NULL, updated_at = ?
-        WHERE deployment_id = ? AND update_id = ? AND state = 'ready'
+        WHERE deployment_id = ? AND update_id = ? AND state = 'ready' AND lease_until = ?
       `)
-      .bind(input.now, input.deploymentId, input.updateId)
+      .bind(input.now, input.deploymentId, input.updateId, input.leaseUntil)
       .run();
     if (result.meta.changes !== 1) throw new AppError("CONFLICT", "Telegram update could not be completed.", 409);
   }
@@ -3071,13 +3073,14 @@ export class CloudflareD1Repositories
   async releaseTelegramUpdate(input: {
     deploymentId: TelegramDeploymentId;
     updateId: number;
+    leaseUntil: string;
     now: string;
   }): Promise<void> {
     await this.db
       .prepare(
-        "UPDATE telegram_updates SET lease_until = ?, updated_at = ? WHERE deployment_id = ? AND update_id = ? AND state != 'completed'",
+        "UPDATE telegram_updates SET lease_until = ?, updated_at = ? WHERE deployment_id = ? AND update_id = ? AND state != 'completed' AND lease_until = ?",
       )
-      .bind(input.now, input.now, input.deploymentId, input.updateId)
+      .bind(input.now, input.now, input.deploymentId, input.updateId, input.leaseUntil)
       .run();
   }
 
@@ -4456,30 +4459,30 @@ export class CloudflareD1Repositories
     const result = await this.db
       .prepare(`
         UPDATE master_bot_updates SET state = 'ready', response_json = ?, lease_until = ?, updated_at = ?
-        WHERE update_id = ? AND state = 'processing'
+        WHERE update_id = ? AND state = 'processing' AND lease_until = ?
       `)
-      .bind(serialized, input.leaseUntil, input.now, input.updateId)
+      .bind(serialized, input.leaseUntil, input.now, input.updateId, input.leaseUntil)
       .run();
     if (result.meta.changes !== 1) throw new AppError("CONFLICT", "Master bot update lease was lost.", 409);
   }
 
-  async completeMasterBotUpdate(input: { updateId: number; now: string }): Promise<void> {
+  async completeMasterBotUpdate(input: { updateId: number; leaseUntil: string; now: string }): Promise<void> {
     const result = await this.db
       .prepare(`
         UPDATE master_bot_updates SET state = 'completed', response_json = NULL, updated_at = ?
-        WHERE update_id = ? AND state = 'ready'
+        WHERE update_id = ? AND state = 'ready' AND lease_until = ?
       `)
-      .bind(input.now, input.updateId)
+      .bind(input.now, input.updateId, input.leaseUntil)
       .run();
     if (result.meta.changes !== 1) throw new AppError("CONFLICT", "Master bot update could not be completed.", 409);
   }
 
-  async releaseMasterBotUpdate(input: { updateId: number; now: string }): Promise<void> {
+  async releaseMasterBotUpdate(input: { updateId: number; leaseUntil: string; now: string }): Promise<void> {
     await this.db
       .prepare(
-        "UPDATE master_bot_updates SET lease_until = ?, updated_at = ? WHERE update_id = ? AND state != 'completed'",
+        "UPDATE master_bot_updates SET lease_until = ?, updated_at = ? WHERE update_id = ? AND state != 'completed' AND lease_until = ?",
       )
-      .bind(input.now, input.now, input.updateId)
+      .bind(input.now, input.now, input.updateId, input.leaseUntil)
       .run();
   }
 

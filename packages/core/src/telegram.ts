@@ -325,6 +325,7 @@ export class TelegramManager {
       await this.#repository.completeTelegramUpdate({
         deploymentId: id,
         updateId: update.update_id,
+        leaseUntil,
         now: this.#now().toISOString(),
       });
       shouldRelease = false;
@@ -336,6 +337,7 @@ export class TelegramManager {
           .releaseTelegramUpdate({
             deploymentId: id,
             updateId: update.update_id,
+            leaseUntil,
             now: this.#now().toISOString(),
           })
           .catch(() => undefined);

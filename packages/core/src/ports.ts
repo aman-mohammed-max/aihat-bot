@@ -498,6 +498,7 @@ export interface TelegramRepository {
   completeTelegramUpdate(input: {
     readonly deploymentId: TelegramDeploymentId;
     readonly updateId: number;
+    readonly leaseUntil: string;
     readonly now: string;
   }): Promise<void>;
   clearTelegramUpdateAttachments(input: {
@@ -507,6 +508,7 @@ export interface TelegramRepository {
   releaseTelegramUpdate(input: {
     readonly deploymentId: TelegramDeploymentId;
     readonly updateId: number;
+    readonly leaseUntil: string;
     readonly now: string;
   }): Promise<void>;
 }
@@ -927,8 +929,12 @@ export interface MasterBotRepository {
     readonly leaseUntil: string;
     readonly now: string;
   }): Promise<void>;
-  completeUpdate(input: { readonly updateId: number; readonly now: string }): Promise<void>;
-  releaseUpdate(input: { readonly updateId: number; readonly now: string }): Promise<void>;
+  completeUpdate(input: {
+    readonly updateId: number;
+    readonly leaseUntil: string;
+    readonly now: string;
+  }): Promise<void>;
+  releaseUpdate(input: { readonly updateId: number; readonly leaseUntil: string; readonly now: string }): Promise<void>;
 }
 
 export interface SkillRepository {

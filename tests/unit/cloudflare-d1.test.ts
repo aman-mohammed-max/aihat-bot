@@ -235,11 +235,20 @@ describe("Cloudflare D1 repositories", () => {
       const reply = { chat_id: masterSession.chatId, text: "Continue in the Mini App." };
       await repos.masterBot.saveUpdateReply({ ...reservation, reply });
       expect(await repos.masterBot.reserveUpdate(reservation)).toEqual({ state: "busy" });
-      expect(await repos.masterBot.reserveUpdate({ ...reservation, now: "2026-10-30T12:03:00.000Z" })).toEqual({
+      const retry = {
+        ...reservation,
+        now: "2026-10-30T12:03:00.000Z",
+        leaseUntil: "2026-10-30T12:05:00.000Z",
+      };
+      expect(await repos.masterBot.reserveUpdate(retry)).toEqual({
         state: "ready",
         reply,
       });
-      await repos.masterBot.completeUpdate({ updateId: 72, now: "2026-10-30T12:03:01.000Z" });
+      await repos.masterBot.completeUpdate({
+        updateId: 72,
+        leaseUntil: retry.leaseUntil,
+        now: "2026-10-30T12:03:01.000Z",
+      });
       expect(await repos.masterBot.reserveUpdate(reservation)).toEqual({ state: "completed" });
       await repos.masterBot.deleteSession(masterSession.telegramUserId);
       expect(await repos.masterBot.getSession(masterSession.telegramUserId)).toBeUndefined();
@@ -1034,6 +1043,7 @@ describe("Cloudflare D1 repositories", () => {
       await repos.completeTelegramUpdate({
         deploymentId,
         updateId: 17,
+        leaseUntil: "2026-10-30T00:02:11.000Z",
         now: "2026-10-30T00:00:12.000Z",
       });
       expect(

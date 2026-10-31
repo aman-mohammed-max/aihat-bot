@@ -21,6 +21,7 @@ import type {
   JobId,
   SkillCatalogPublication,
   ScheduledTaskId,
+  TelegramDeploymentId,
   TenantId,
   UserId,
 } from "../../packages/core/src/types.js";
@@ -340,6 +341,148 @@ describe("Bun and Cloudflare runtime repository parity", () => {
       );
       expect(results[0]).toEqual(results[1]);
       expect(results[0]).toEqual([true, true, false, true, true]);
+    } finally {
+      bunDatabase.close();
+      cloudflareDatabase.close();
+    }
+  });
+
+  test("Telegram webhook leases fence stale workers identically in Bun and D1", async () => {
+    const bunDatabase = openSqliteDatabase(":memory:");
+    const cloudflareDatabase = openSqliteDatabase(":memory:");
+    const bunRepositories = new BunSqliteRepositories(bunDatabase);
+    const cloudflareRepositories = new CloudflareD1Repositories(
+      new SqliteD1(cloudflareDatabase) as unknown as D1Database,
+    );
+    const start = "2026-10-30T12:00:00.000Z";
+    try {
+      seedTenant(bunDatabase);
+      seedTenant(cloudflareDatabase);
+      const repositories = [bunRepositories, cloudflareRepositories];
+      const deployments = await Promise.all(
+        repositories.map(async (repository, index) => {
+          const botId = await repository.createDraft({
+            tenantId,
+            ownerId,
+            idempotencyKey: `telegram-lease-fence-${index}`,
+            answers: creationAnswers(),
+          });
+          const credentialRef = `secret_${String(index + 1).repeat(32)}`;
+          const webhookSecretRef = `secret_${String(index + 3).repeat(32)}`;
+          for (const reference of [credentialRef, webhookSecretRef]) {
+            await repository.secretRecords.create({
+              tenantId,
+              reference,
+              keyId: "test-key",
+              nonce: "nonce",
+              ciphertext: "ciphertext",
+              version: 1,
+              createdAt: start,
+            });
+          }
+          const deploymentId = `dep_lease_fence_${index}` as TelegramDeploymentId;
+          await repository.createTelegramDeployment({
+            id: deploymentId,
+            tenantId,
+            botId,
+            externalId: `765432${index}`,
+            credentialRef,
+            webhookSecretRef,
+            status: "active",
+          });
+          return deploymentId;
+        }),
+      );
+
+      const customerOutcomes = await Promise.all(
+        repositories.map(async (repository, index) => {
+          const deploymentId = deployments[index];
+          if (!deploymentId) throw new Error("Telegram lease parity deployment was not created.");
+          const original = {
+            deploymentId,
+            updateId: 901,
+            now: start,
+            leaseUntil: "2026-10-30T12:02:00.000Z",
+          };
+          expect(await repository.reserveTelegramUpdate(original)).toEqual({ state: "acquired" });
+          const current = {
+            ...original,
+            now: original.leaseUntil,
+            leaseUntil: "2026-10-30T12:04:00.000Z",
+          };
+          expect(await repository.reserveTelegramUpdate(current)).toEqual({ state: "acquired" });
+          await expect(
+            repository.saveTelegramUpdateResponse({ ...original, responseText: "stale", now: current.now }),
+          ).rejects.toMatchObject({ code: "CONFLICT" });
+          await repository.releaseTelegramUpdate({ ...original, now: "2026-10-30T12:02:01.000Z" });
+          expect(
+            await repository.reserveTelegramUpdate({
+              ...current,
+              now: "2026-10-30T12:02:01.000Z",
+              leaseUntil: "2026-10-30T12:04:01.000Z",
+            }),
+          ).toEqual({ state: "busy" });
+          await repository.saveTelegramUpdateResponse({
+            ...current,
+            responseText: "current",
+            now: "2026-10-30T12:02:02.000Z",
+          });
+          await expect(
+            repository.completeTelegramUpdate({ ...original, now: "2026-10-30T12:02:03.000Z" }),
+          ).rejects.toMatchObject({ code: "CONFLICT" });
+          await repository.completeTelegramUpdate({ ...current, now: "2026-10-30T12:02:04.000Z" });
+          return repository.reserveTelegramUpdate({
+            ...current,
+            now: "2026-10-30T12:02:05.000Z",
+            leaseUntil: "2026-10-30T12:04:05.000Z",
+          });
+        }),
+      );
+      expect(customerOutcomes).toEqual([{ state: "completed" }, { state: "completed" }]);
+
+      const masterOutcomes = await Promise.all(
+        repositories.map(async (repository) => {
+          const original = {
+            updateId: 902,
+            now: start,
+            leaseUntil: "2026-10-30T12:02:00.000Z",
+          };
+          expect(await repository.masterBot.reserveUpdate(original)).toEqual({ state: "acquired" });
+          const current = {
+            ...original,
+            now: original.leaseUntil,
+            leaseUntil: "2026-10-30T12:04:00.000Z",
+          };
+          expect(await repository.masterBot.reserveUpdate(current)).toEqual({ state: "acquired" });
+          const staleReply = { chat_id: 1, text: "stale" };
+          await expect(repository.masterBot.saveUpdateReply({ ...original, reply: staleReply })).rejects.toMatchObject({
+            code: "CONFLICT",
+          });
+          await repository.masterBot.releaseUpdate({ ...original, now: "2026-10-30T12:02:01.000Z" });
+          expect(
+            await repository.masterBot.reserveUpdate({
+              ...current,
+              now: "2026-10-30T12:02:01.000Z",
+              leaseUntil: "2026-10-30T12:04:01.000Z",
+            }),
+          ).toEqual({ state: "busy" });
+          await repository.masterBot.saveUpdateReply({
+            ...current,
+            reply: { chat_id: 1, text: "current" },
+            now: "2026-10-30T12:02:02.000Z",
+          });
+          await expect(
+            repository.masterBot.completeUpdate({ ...original, now: "2026-10-30T12:02:03.000Z" }),
+          ).rejects.toMatchObject({ code: "CONFLICT" });
+          await repository.masterBot.completeUpdate({ ...current, now: "2026-10-30T12:02:04.000Z" });
+          return repository.masterBot.reserveUpdate({
+            ...current,
+            now: "2026-10-30T12:02:05.000Z",
+            leaseUntil: "2026-10-30T12:04:05.000Z",
+          });
+        }),
+      );
+      expect(masterOutcomes).toEqual([{ state: "completed" }, { state: "completed" }]);
     } finally {
       bunDatabase.close();
       cloudflareDatabase.close();

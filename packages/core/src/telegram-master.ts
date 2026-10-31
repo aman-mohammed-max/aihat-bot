@@ -153,13 +153,17 @@ export class TelegramMasterBot {
           now: this.#now().toISOString(),
         });
       }
-      await this.#sessions.completeUpdate({ updateId: update.updateId, now: this.#now().toISOString() });
+      await this.#sessions.completeUpdate({
+        updateId: update.updateId,
+        leaseUntil,
+        now: this.#now().toISOString(),
+      });
       reserved = false;
       return new Response(null, { status: 200 });
     } catch {
       if (reserved) {
         await this.#sessions
-          .releaseUpdate({ updateId: update.updateId, now: this.#now().toISOString() })
+          .releaseUpdate({ updateId: update.updateId, leaseUntil, now: this.#now().toISOString() })
           .catch(() => undefined);
       }
       return new Response(null, { status: 503 });
