@@ -1035,6 +1035,9 @@ function createDatabase(): Database {
     "0018_telegram_response_attachments.sql",
     "0019_tool_executions.sql",
     "0020_tenant_membership_status.sql",
+    "0021_tenant_invitations.sql",
+    "0022_uploaded_files.sql",
+    "0023_tool_execution_recovery.sql",
   ]) {
     const migration = readFileSync(new URL(`../../migrations/sqlite/${migrationName}`, import.meta.url), "utf8");
     db.exec(migration);

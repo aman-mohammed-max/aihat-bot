@@ -890,8 +890,67 @@ describe("Bun and Cloudflare runtime repository parity", () => {
       expect(bunBusyRuns.count).toBe(1);
       expect(cloudflareBusyRuns.count).toBe(1);
 
+      const checkFailedExecutionRecovery = async (
+        repositories: BunSqliteRepositories | CloudflareD1Repositories,
+        secrets: EncryptedSecretStore,
+        context: ToolContext,
+      ) => {
+        const runs = { count: 0 };
+        const recoveryContext = { ...context, executionKey: "d".repeat(64) };
+        const recoverable = new DurableToolRegistry({
+          registry: {
+            available: async () => [],
+            execute: async () => {
+              runs.count += 1;
+              if (runs.count === 1) throw new Error("The remote result was lost.");
+              return { completed: true };
+            },
+          },
+          executions: repositories.toolExecutions,
+          secrets,
+          secretWriter: secrets,
+          now: () => new Date(now),
+        });
+        await expect(recoverable.execute(recoveryContext, "remote_action", { action: "send" })).rejects.toThrow(
+          "The remote result was lost.",
+        );
+        await expect(recoverable.execute(recoveryContext, "remote_action", { action: "send" })).rejects.toMatchObject({
+          code: "CONFLICT",
+          status: 409,
+        });
+        expect(runs.count).toBe(1);
+        const [pending] = await repositories.toolExecutions.listOwnedRecoveries({
+          tenantId,
+          ownerId,
+          botId: context.botId,
+          now: now.toISOString(),
+          limit: 100,
+        });
+        expect(pending).toMatchObject({ toolName: "remote_action", status: "ambiguous" });
+        expect(
+          await repositories.toolExecutions.resolveOwnedRecovery({
+            tenantId,
+            ownerId,
+            botId: context.botId,
+            executionKey: recoveryContext.executionKey ?? "",
+            resolution: "retry",
+            now: now.toISOString(),
+          }),
+        ).toBe("retry_approved");
+        const retried = await recoverable.execute(recoveryContext, "remote_action", { action: "send" });
+        expect(retried).toEqual({ completed: true });
+        expect(runs.count).toBe(2);
+        expect(await recoverable.execute(recoveryContext, "remote_action", { action: "send" })).toEqual(retried);
+        expect(runs.count).toBe(2);
+      };
+      await Promise.all([
+        checkFailedExecutionRecovery(bunRepositories, bunSecrets, bunContext),
+        checkFailedExecutionRecovery(cloudflareRepositories, cloudflareSecrets, cloudflareContext),
+      ]);
+
       const checkLeaseRecovery = async (
         repositories: BunSqliteRepositories | CloudflareD1Repositories,
+        database: Database,
         botId: ToolContext["botId"],
       ) => {
         const key = "b".repeat(64);
@@ -910,11 +969,65 @@ describe("Bun and Cloudflare runtime repository parity", () => {
           leaseUntil: "2026-10-30T12:00:01.000Z",
         });
         expect(firstLease.state).toBe("acquired");
-        const recoveredLease = await repositories.toolExecutions.acquire({
+        const ambiguous = await repositories.toolExecutions.acquire({
           ...base,
           leaseToken: "recovered-lease",
           now: "2026-10-30T12:00:02.000Z",
           leaseUntil: "2026-10-30T12:02:32.000Z",
+        });
+        expect(ambiguous).toEqual({ state: "ambiguous" });
+        expect(
+          await repositories.toolExecutions.listOwnedRecoveries({
+            tenantId,
+            ownerId: memberId,
+            botId,
+            now: "2026-10-30T12:00:02.000Z",
+            limit: 100,
+          }),
+        ).toEqual([]);
+        expect(
+          await repositories.toolExecutions.resolveOwnedRecovery({
+            tenantId,
+            ownerId: memberId,
+            botId,
+            executionKey: key,
+            resolution: "retry",
+            now: "2026-10-30T12:00:02.000Z",
+          }),
+        ).toBeUndefined();
+        expect(
+          await repositories.toolExecutions.listOwnedRecoveries({
+            tenantId,
+            ownerId,
+            botId,
+            now: "2026-10-30T12:00:02.000Z",
+            limit: 100,
+          }),
+        ).toMatchObject([{ executionKey: key, status: "ambiguous", toolName: "recover_tool" }]);
+        expect(
+          await repositories.toolExecutions.resolveOwnedRecovery({
+            tenantId,
+            ownerId,
+            botId,
+            executionKey: key,
+            resolution: "retry",
+            now: "2026-10-30T12:00:02.000Z",
+          }),
+        ).toBe("retry_approved");
+        expect(
+          await repositories.toolExecutions.listOwnedRecoveries({
+            tenantId,
+            ownerId,
+            botId,
+            now: "2026-10-30T12:00:02.000Z",
+            limit: 100,
+          }),
+        ).toMatchObject([{ executionKey: key, status: "retry_approved" }]);
+        const recoveredLease = await repositories.toolExecutions.acquire({
+          ...base,
+          leaseToken: "recovered-lease",
+          now: "2026-10-30T12:00:03.000Z",
+          leaseUntil: "2026-10-30T12:02:33.000Z",
         });
         expect(recoveredLease).toEqual({ state: "acquired", leaseToken: "recovered-lease" });
         expect(
@@ -928,10 +1041,65 @@ describe("Bun and Cloudflare runtime repository parity", () => {
             expiresAt: base.expiresAt,
           }),
         ).toBe(false);
+
+        const closeKey = "e".repeat(64);
+        const closeInput = { ...base, executionKey: closeKey };
+        expect(
+          await repositories.toolExecutions.acquire({
+            ...closeInput,
+            leaseToken: "close-lease",
+            now: "2026-10-30T12:00:00.000Z",
+            leaseUntil: "2026-10-30T12:00:01.000Z",
+          }),
+        ).toMatchObject({ state: "acquired" });
+        expect(
+          await repositories.toolExecutions.acquire({
+            ...closeInput,
+            leaseToken: "close-expired",
+            now: "2026-10-30T12:00:02.000Z",
+            leaseUntil: "2026-10-30T12:02:32.000Z",
+          }),
+        ).toEqual({ state: "ambiguous" });
+        expect(
+          await repositories.toolExecutions.resolveOwnedRecovery({
+            tenantId,
+            ownerId,
+            botId,
+            executionKey: closeKey,
+            resolution: "close",
+            now: "2026-10-30T12:00:02.000Z",
+          }),
+        ).toBe("closed");
+        expect(
+          await repositories.toolExecutions.acquire({
+            ...closeInput,
+            leaseToken: "closed-retry",
+            now: "2026-10-30T12:00:03.000Z",
+            leaseUntil: "2026-10-30T12:02:33.000Z",
+          }),
+        ).toEqual({ state: "closed" });
+        const auditEvents = database
+          .query<{ action: string; metadata_json: string }, [string]>(`
+            SELECT action, metadata_json FROM audit_logs
+            WHERE tenant_id = ? AND resource_type = 'tool_execution' ORDER BY action
+          `)
+          .all(tenantId);
+        expect(auditEvents.map(({ action }) => action)).toEqual([
+          "tool.execution_closed",
+          "tool.execution_retry_approved",
+          "tool.execution_retry_approved",
+        ]);
+        for (const event of auditEvents) {
+          const metadata: unknown = JSON.parse(event.metadata_json);
+          expect(metadata).toHaveProperty("toolName");
+          expect(metadata).not.toHaveProperty("input");
+          expect(metadata).not.toHaveProperty("result");
+          expect(metadata).not.toHaveProperty("inputHash");
+        }
       };
       await Promise.all([
-        checkLeaseRecovery(bunRepositories, bunBotId),
-        checkLeaseRecovery(cloudflareRepositories, cloudflareBotId),
+        checkLeaseRecovery(bunRepositories, bunDatabase, bunBotId),
+        checkLeaseRecovery(cloudflareRepositories, cloudflareDatabase, cloudflareBotId),
       ]);
 
       const bunCiphertext = bunDatabase
@@ -947,20 +1115,20 @@ describe("Bun and Cloudflare runtime repository parity", () => {
         bunRepositories.toolExecutions.purgeExpired(tenantId, "2026-11-07T12:00:00.000Z", 10),
         cloudflareRepositories.toolExecutions.purgeExpired(tenantId, "2026-11-07T12:00:00.000Z", 10),
       ]);
-      expect(bunExpiredRefs).toHaveLength(2);
-      expect(cloudflareExpiredRefs).toHaveLength(2);
+      expect(bunExpiredRefs).toHaveLength(3);
+      expect(cloudflareExpiredRefs).toHaveLength(3);
       await Promise.all([
         ...bunExpiredRefs.map((reference) => bunSecrets.delete(tenantId, reference)),
         ...cloudflareExpiredRefs.map((reference) => cloudflareSecrets.delete(tenantId, reference)),
       ]);
       expect(
         await Promise.all(bunExpiredRefs.map((reference) => bunRepositories.secretRecords.get(tenantId, reference))),
-      ).toEqual([undefined, undefined]);
+      ).toEqual([undefined, undefined, undefined]);
       expect(
         await Promise.all(
           cloudflareExpiredRefs.map((reference) => cloudflareRepositories.secretRecords.get(tenantId, reference)),
         ),
-      ).toEqual([undefined, undefined]);
+      ).toEqual([undefined, undefined, undefined]);
     } finally {
       bunDatabase.close();
       cloudflareDatabase.close();
