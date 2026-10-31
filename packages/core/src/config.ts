@@ -4,6 +4,7 @@ import type { ScheduledTaskRetryPolicy } from "./scheduled-tasks.js";
 import type { TelegramRetryPolicy } from "./telegram.js";
 
 export const DEFAULT_TELEGRAM_MASTER_REQUESTS_PER_MINUTE = 30;
+export const DEFAULT_TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE = 30;
 
 export interface RuntimeConfig {
   readonly environment: "development" | "staging" | "production";
@@ -11,6 +12,7 @@ export interface RuntimeConfig {
   readonly modelRetryPolicy: ModelRetryPolicy;
   readonly telegramRetryPolicy: TelegramRetryPolicy;
   readonly telegramMasterRequestsPerMinute: number;
+  readonly telegramCustomerRequestsPerMinute: number;
   readonly scheduledTaskRetryPolicy: ScheduledTaskRetryPolicy;
 }
 
@@ -46,6 +48,13 @@ export function parseRuntimeConfig(env: Readonly<Record<string, string | undefin
     env.TELEGRAM_MASTER_REQUESTS_PER_MINUTE,
     "TELEGRAM_MASTER_REQUESTS_PER_MINUTE",
     DEFAULT_TELEGRAM_MASTER_REQUESTS_PER_MINUTE,
+    1,
+    1000,
+  );
+  const telegramCustomerRequestsPerMinute = parseIntegerSetting(
+    env.TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE,
+    "TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE",
+    DEFAULT_TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE,
     1,
     1000,
   );
@@ -85,6 +94,7 @@ export function parseRuntimeConfig(env: Readonly<Record<string, string | undefin
       maxRetryAfterSeconds: telegramMaxRetryAfterSeconds,
     },
     telegramMasterRequestsPerMinute,
+    telegramCustomerRequestsPerMinute,
     scheduledTaskRetryPolicy: {
       maxAttempts: scheduledTaskMaxAttempts,
       backoffMs: scheduledTaskBackoffMs,

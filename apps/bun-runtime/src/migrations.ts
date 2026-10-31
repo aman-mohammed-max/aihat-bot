@@ -157,6 +157,11 @@ const migrations: readonly Migration[] = [
     name: "telegram_master_rate_limits",
     sql: readFileSync(findMigration("0029_telegram_master_rate_limits.sql"), "utf8"),
   },
+  {
+    version: 30,
+    name: "telegram_customer_rate_limits",
+    sql: readFileSync(findMigration("0030_telegram_customer_rate_limits.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {

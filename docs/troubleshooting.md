@@ -28,6 +28,8 @@ Private master-bot messages are limited per Telegram user using a persistent fix
 
 ## Customer Telegram bots
 
+Approved senders are limited to 30 messages per minute by default. Set `TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE` from 1 to 1,000 in the runtime environment to change that limit. Messages above the limit are silently acknowledged; the window resets at the next UTC minute.
+
 - `GET /capabilities` must report `telegram: true`; the runtime needs a public HTTPS `TELEGRAM_WEBHOOK_BASE_URL`.
 - Customer bot tokens are validated with Telegram when connected. A failed validation usually means the token was copied incorrectly or belongs to a different bot.
 - Webhook requests require Telegram's secret-token header. Reconnect through the dashboard if an owner deleted or disabled the deployment.
@@ -47,7 +49,7 @@ Private master-bot messages are limited per Telegram user using a persistent fix
 
 - `encryptedSecrets` must be `true` in `/capabilities` before connecting model, Telegram, or skill credentials. Configure `SECRET_ACTIVE_KEY_ID` and `SECRET_KEYRING_JSON` as Worker secrets or Bun environment values.
 - Keep every key ID needed to decrypt existing records. Do not replace the keyring with a new single key unless existing encrypted records have been rotated. Use the secret-rotation workflow documented in the root README and Cloudflare runtime guide.
-- Cloudflare development has D1 migrations `0001` through `0029`. For a new environment, create its D1 database, set the returned ID in `wrangler.jsonc`, then apply migrations from `apps/cloudflare-runtime` with `wrangler d1 migrations apply <database-name> --remote`.
+- Cloudflare development has D1 migrations `0001` through `0030`. For a new environment, create its D1 database, set the returned ID in `wrangler.jsonc`, then apply migrations from `apps/cloudflare-runtime` with `wrangler d1 migrations apply <database-name> --remote`.
 - Staging and production also need distinct R2 buckets and Queues. The committed placeholder D1 IDs are not valid deployment IDs.
 - Local Bun migrations run at startup. For migration errors, inspect the stored migration checksum and database path; do not edit an already-applied migration. Add a forward-only migration instead.
 

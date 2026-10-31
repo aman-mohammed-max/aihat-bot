@@ -2402,6 +2402,40 @@ export class BunSqliteRepositories
     record.immediate();
   }
 
+  async consumeTelegramUserRequest(
+    input: Parameters<TelegramRepository["consumeTelegramUserRequest"]>[0],
+  ): Promise<boolean> {
+    if (!/^[a-f0-9]{64}$/.test(input.actorHash)) {
+      throw new AppError("VALIDATION_ERROR", "Telegram rate-limit actor hash is invalid.", 400);
+    }
+    const timestamp = Date.parse(input.now);
+    if (!Number.isFinite(timestamp)) throw new AppError("VALIDATION_ERROR", "Telegram request time is invalid.", 400);
+    if (!Number.isSafeInteger(input.limitPerMinute) || input.limitPerMinute < 1 || input.limitPerMinute > 1000) {
+      throw new AppError("VALIDATION_ERROR", "Telegram request limit is invalid.", 400);
+    }
+    const minuteWindow = Math.floor(timestamp / 60_000);
+    const consume = this.#db.transaction(() => {
+      this.#db
+        .query("DELETE FROM telegram_customer_request_usage WHERE deployment_id = ? AND minute_window < ?")
+        .run(input.deploymentId, minuteWindow - 1);
+      const result = this.#db
+        .query(`
+          INSERT INTO telegram_customer_request_usage (deployment_id, actor_hash, minute_window, request_count, updated_at)
+          VALUES (?, ?, ?, 1, ?)
+          ON CONFLICT(deployment_id, actor_hash) DO UPDATE SET
+            minute_window = excluded.minute_window,
+            request_count = CASE WHEN telegram_customer_request_usage.minute_window = excluded.minute_window
+              THEN telegram_customer_request_usage.request_count + 1 ELSE 1 END,
+            updated_at = excluded.updated_at
+          WHERE telegram_customer_request_usage.minute_window != excluded.minute_window
+            OR telegram_customer_request_usage.request_count < ?
+        `)
+        .run(input.deploymentId, input.actorHash, minuteWindow, input.now, input.limitPerMinute);
+      return result.changes === 1;
+    });
+    return consume.immediate();
+  }
+
   async replaceTelegramAllowedUsers(input: {
     deploymentId: TelegramDeploymentId;
     telegramUserIds: readonly number[];

@@ -307,6 +307,7 @@ export default {
       ...(malwareScanner ? { malwareScanner } : {}),
       webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
       retryPolicy: runtimeConfig.telegramRetryPolicy,
+      requestsPerMinute: runtimeConfig.telegramCustomerRequestsPerMinute,
       logger: runtimeLogger,
     });
     const scheduledTaskService = new ScheduledTaskService(d1, d1, telegram, scheduler(env));
@@ -506,6 +507,7 @@ export default {
       objects: objectStore(env),
       webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
       retryPolicy: runtimeConfig.telegramRetryPolicy,
+      requestsPerMinute: runtimeConfig.telegramCustomerRequestsPerMinute,
       logger: runtimeLogger,
     });
     const runner = new ScheduledTaskRunner(
@@ -557,6 +559,7 @@ function runtimeConfigFromEnv(env: Env) {
     TELEGRAM_RETRY_MAX_ATTEMPTS: env.TELEGRAM_RETRY_MAX_ATTEMPTS,
     TELEGRAM_RETRY_MAX_AFTER_SECONDS: env.TELEGRAM_RETRY_MAX_AFTER_SECONDS,
     TELEGRAM_MASTER_REQUESTS_PER_MINUTE: env.TELEGRAM_MASTER_REQUESTS_PER_MINUTE,
+    TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE: env.TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE,
     SCHEDULED_TASK_RETRY_MAX_ATTEMPTS: env.SCHEDULED_TASK_RETRY_MAX_ATTEMPTS,
     SCHEDULED_TASK_RETRY_BACKOFF_MS: env.SCHEDULED_TASK_RETRY_BACKOFF_MS,
     SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS: env.SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS,

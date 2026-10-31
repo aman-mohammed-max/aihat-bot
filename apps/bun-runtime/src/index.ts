@@ -201,6 +201,7 @@ const telegram = new TelegramManager({
   ...(malwareScanner ? { malwareScanner } : {}),
   webhookBaseUrl: process.env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
   retryPolicy: config.telegramRetryPolicy,
+  requestsPerMinute: config.telegramCustomerRequestsPerMinute,
   logger,
 });
 const scheduledTaskService = new ScheduledTaskService(repositories, repositories, telegram);

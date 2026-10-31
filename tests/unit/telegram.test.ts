@@ -28,6 +28,7 @@ describe("Telegram webhook integration", () => {
   test("stores credentials encrypted, verifies webhook secrets, and deduplicates successful updates", async () => {
     const db = openSqliteDatabase(":memory:");
     const repositories = new BunSqliteRepositories(db);
+    let currentTime = Date.now();
     const secrets = new Map<string, string>();
     const resolvedReferences: string[] = [];
     const secretStore = {
@@ -231,6 +232,8 @@ describe("Telegram webhook integration", () => {
           },
         },
         webhookBaseUrl: "https://public.example.test",
+        requestsPerMinute: 30,
+        now: () => new Date(currentTime),
         fetch: fetchMock,
       });
       const management = createTelegramManagementApiHandler(
@@ -564,6 +567,81 @@ describe("Telegram webhook integration", () => {
       );
       expect(duplicateImage?.status).toBe(200);
       expect(sentPhotos).toHaveLength(1);
+
+      const usage = db
+        .query<{ actor_hash: string }, [string]>(
+          "SELECT actor_hash FROM telegram_customer_request_usage WHERE deployment_id = ?",
+        )
+        .get(deployment.id);
+      expect(usage?.actor_hash).toMatch(/^[a-f0-9]{64}$/);
+      if (!usage) throw new Error("Telegram customer request usage was not recorded.");
+      db.query(
+        "UPDATE telegram_customer_request_usage SET minute_window = ?, request_count = 30 WHERE deployment_id = ? AND actor_hash = ?",
+      ).run(Math.floor(currentTime / 60_000), deployment.id, usage.actor_hash);
+      const callsBeforeLimit = engineCalls.length;
+      const sentMessagesBeforeLimit = sentMessages.length;
+      const limited = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9049,
+            message: { text: "Please skip expensive work", chat: { id: -10012345 }, from: { id: 54321 } },
+          }),
+        }),
+      );
+      expect(limited?.status).toBe(200);
+      expect(engineCalls).toHaveLength(callsBeforeLimit);
+      expect(sentMessages).toHaveLength(sentMessagesBeforeLimit);
+
+      currentTime += 60_000;
+      const afterWindow = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9050,
+            message: { text: "The next minute starts now", chat: { id: -10012345 }, from: { id: 54321 } },
+          }),
+        }),
+      );
+      expect(afterWindow?.status).toBe(200);
+      expect(engineCalls).toHaveLength(callsBeforeLimit + 1);
+      expect(
+        db
+          .query<{ request_count: number }, [string, string]>(
+            "SELECT request_count FROM telegram_customer_request_usage WHERE deployment_id = ? AND actor_hash = ?",
+          )
+          .get(deployment.id, usage.actor_hash),
+      ).toEqual({ request_count: 1 });
+      const afterWindowDuplicate = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9050,
+            message: { text: "The next minute starts now", chat: { id: -10012345 }, from: { id: 54321 } },
+          }),
+        }),
+      );
+      expect(afterWindowDuplicate?.status).toBe(200);
+      expect(engineCalls).toHaveLength(callsBeforeLimit + 1);
+      expect(
+        db
+          .query<{ request_count: number }, [string, string]>(
+            "SELECT request_count FROM telegram_customer_request_usage WHERE deployment_id = ? AND actor_hash = ?",
+          )
+          .get(deployment.id, usage.actor_hash),
+      ).toEqual({ request_count: 1 });
 
       await repositories.replaceTelegramAllowedUsers({
         deploymentId: deployment.id,

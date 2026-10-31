@@ -35,6 +35,83 @@ const weatherEndpoint = "https://weather.example.test/lookup";
 const mcpEndpoint = "https://mcp.example.test/mcp";
 
 describe("Bun and Cloudflare runtime repository parity", () => {
+  test("customer Telegram request limits are per deployment and sender and windowed identically", async () => {
+    const bunDatabase = openSqliteDatabase(":memory:");
+    const cloudflareDatabase = openSqliteDatabase(":memory:");
+    const bunRepositories = new BunSqliteRepositories(bunDatabase);
+    const cloudflareRepositories = new CloudflareD1Repositories(
+      new SqliteD1(cloudflareDatabase) as unknown as D1Database,
+    );
+    try {
+      seedTenant(bunDatabase);
+      seedTenant(cloudflareDatabase);
+      const repositories = [bunRepositories, cloudflareRepositories];
+      const botIds = await Promise.all(
+        repositories.map((repository) =>
+          repository.createDraft({
+            tenantId,
+            ownerId,
+            idempotencyKey: "telegram-customer-rate-limit-parity",
+            answers: creationAnswers(),
+          }),
+        ),
+      );
+      const results = await Promise.all(
+        repositories.map(async (repository, index) => {
+          const botId = botIds[index];
+          if (!botId) throw new Error("Telegram rate-limit parity bot was not created.");
+          const deploymentId =
+            `telegram_rate_limit_${index}` as import("../../packages/core/src/types.js").TelegramDeploymentId;
+          const credentialRef = `secret_${"a".repeat(32)}`;
+          const webhookSecretRef = `secret_${"b".repeat(32)}`;
+          for (const reference of [credentialRef, webhookSecretRef]) {
+            await repository.secretRecords.create({
+              tenantId,
+              reference,
+              keyId: "test-key",
+              nonce: "nonce",
+              ciphertext: "ciphertext",
+              version: 1,
+              createdAt,
+            });
+          }
+          await repository.createTelegramDeployment({
+            id: deploymentId,
+            tenantId,
+            botId,
+            externalId: `765432${index}`,
+            credentialRef,
+            webhookSecretRef,
+            status: "active",
+          });
+          const request = {
+            deploymentId,
+            actorHash: "c".repeat(64),
+            now: "2026-10-30T12:00:00.000Z",
+            limitPerMinute: 2,
+          };
+          const first = await repository.consumeTelegramUserRequest(request);
+          const second = await repository.consumeTelegramUserRequest(request);
+          const third = await repository.consumeTelegramUserRequest(request);
+          const anotherSender = await repository.consumeTelegramUserRequest({
+            ...request,
+            actorHash: "d".repeat(64),
+          });
+          const nextMinute = await repository.consumeTelegramUserRequest({
+            ...request,
+            now: "2026-10-30T12:01:00.000Z",
+          });
+          return [first, second, third, anotherSender, nextMinute];
+        }),
+      );
+      expect(results[0]).toEqual(results[1]);
+      expect(results[0]).toEqual([true, true, false, true, true]);
+    } finally {
+      bunDatabase.close();
+      cloudflareDatabase.close();
+    }
+  });
+
   test("Telegram master-bot request limits are per-user and windowed identically", async () => {
     const bunDatabase = openSqliteDatabase(":memory:");
     const cloudflareDatabase = openSqliteDatabase(":memory:");

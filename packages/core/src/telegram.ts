@@ -1,4 +1,5 @@
 import { AppError } from "./errors.js";
+import { DEFAULT_TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE } from "./config.js";
 import {
   DOCX_CONTENT_TYPE,
   EXTRACTED_DOCUMENT_MAX_CHARS,
@@ -51,6 +52,8 @@ export class TelegramManager {
   readonly #fetch: FetchLike;
   readonly #retryPolicy: TelegramRetryPolicy;
   readonly #logger: Pick<Logger, "warn"> | undefined;
+  readonly #requestsPerMinute: number;
+  readonly #now: () => Date;
 
   constructor(input: {
     readonly repository: TelegramRepository;
@@ -62,6 +65,8 @@ export class TelegramManager {
     readonly malwareScanner?: MalwareScanner;
     readonly fetch?: FetchLike;
     readonly retryPolicy?: TelegramRetryPolicy;
+    readonly requestsPerMinute?: number;
+    readonly now?: () => Date;
     readonly logger?: Pick<Logger, "warn">;
   }) {
     this.#repository = input.repository;
@@ -73,6 +78,19 @@ export class TelegramManager {
     this.#malwareScanner = input.malwareScanner;
     this.#fetch = input.fetch ?? globalThis.fetch.bind(globalThis);
     this.#retryPolicy = normalizeTelegramRetryPolicy(input.retryPolicy ?? DEFAULT_TELEGRAM_RETRY_POLICY);
+    this.#requestsPerMinute = input.requestsPerMinute ?? DEFAULT_TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE;
+    if (
+      !Number.isSafeInteger(this.#requestsPerMinute) ||
+      this.#requestsPerMinute < 1 ||
+      this.#requestsPerMinute > 1000
+    ) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        "Telegram customer request limit must be from 1 to 1,000 per minute.",
+        400,
+      );
+    }
+    this.#now = input.now ?? (() => new Date());
     this.#logger = input.logger;
   }
 
@@ -223,7 +241,7 @@ export class TelegramManager {
       return Response.json({ error: "VALIDATION_ERROR" }, { status: 400 });
     }
 
-    const now = new Date();
+    const now = this.#now();
     const leaseUntil = new Date(now.getTime() + 120_000).toISOString();
     let shouldRelease = false;
     try {
@@ -269,7 +287,7 @@ export class TelegramManager {
             responseText,
             ...(attachmentRefs.length ? { attachmentRefs } : {}),
             leaseUntil,
-            now: new Date().toISOString(),
+            now: this.#now().toISOString(),
           });
         } catch (cause) {
           await Promise.allSettled(
@@ -307,7 +325,7 @@ export class TelegramManager {
       await this.#repository.completeTelegramUpdate({
         deploymentId: id,
         updateId: update.update_id,
-        now: new Date().toISOString(),
+        now: this.#now().toISOString(),
       });
       shouldRelease = false;
       await this.#cleanupTelegramAttachments(deployment.tenantId, id, update.update_id, attachmentRefs);
@@ -318,7 +336,7 @@ export class TelegramManager {
           .releaseTelegramUpdate({
             deploymentId: id,
             updateId: update.update_id,
-            now: new Date().toISOString(),
+            now: this.#now().toISOString(),
           })
           .catch(() => undefined);
       }
@@ -360,10 +378,18 @@ export class TelegramManager {
       await this.#repository.recordTelegramAccessRequest({
         deploymentId: deployment.id,
         telegramUserId: message.from.id,
-        now: new Date().toISOString(),
+        now: this.#now().toISOString(),
       });
       return { text: "" };
     }
+    const actorHash = await hashTelegramIdentity(`${deployment.id}:${webhookSecret}:${message.from.id}`);
+    const withinLimit = await this.#repository.consumeTelegramUserRequest({
+      deploymentId: deployment.id,
+      actorHash,
+      now: this.#now().toISOString(),
+      limitPerMinute: this.#requestsPerMinute,
+    });
+    if (!withinLimit) return { text: "" };
     const bot = await this.#bots.get(deployment.tenantId, deployment.botId);
     if (bot?.status !== "published") return { text: "" };
     if (message.unsupportedAttachment && !message.photo?.length && !message.document) {

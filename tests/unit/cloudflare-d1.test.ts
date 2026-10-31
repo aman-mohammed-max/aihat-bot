@@ -1077,6 +1077,7 @@ function createDatabase(): Database {
     "0027_native_text_statistics.sql",
     "0028_mcp_reconnect_state.sql",
     "0029_telegram_master_rate_limits.sql",
+    "0030_telegram_customer_rate_limits.sql",
   ]) {
     const migration = readFileSync(new URL(`../../migrations/sqlite/${migrationName}`, import.meta.url), "utf8");
     db.exec(migration);

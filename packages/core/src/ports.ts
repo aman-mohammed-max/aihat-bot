@@ -442,6 +442,12 @@ export interface TelegramRepository {
     readonly telegramUserId: number;
     readonly now: string;
   }): Promise<void>;
+  consumeTelegramUserRequest(input: {
+    readonly deploymentId: TelegramDeploymentId;
+    readonly actorHash: string;
+    readonly now: string;
+    readonly limitPerMinute: number;
+  }): Promise<boolean>;
   replaceTelegramAllowedUsers(input: {
     readonly deploymentId: TelegramDeploymentId;
     readonly telegramUserIds: readonly number[];
