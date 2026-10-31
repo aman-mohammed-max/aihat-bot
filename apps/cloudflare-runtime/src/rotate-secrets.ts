@@ -1,4 +1,5 @@
 import { SECRET_ROTATION_ROUTE } from "@aihat/core";
+import { requestSecretRotationPage } from "./secret-rotation-client.js";
 
 const args = process.argv.slice(2);
 if (args.some((argument) => argument !== "--apply") || args.length > 1) {
@@ -37,30 +38,12 @@ let activeKeyId: string | undefined;
 const seenCursors = new Set<string>();
 
 for (;;) {
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${authorizationToken}`,
-      "content-type": "application/json",
-      "cache-control": "no-store",
-    },
-    body: JSON.stringify({ mode: apply ? "apply" : "dry_run", limit: 100, ...(after ? { after } : {}) }),
-    signal: AbortSignal.timeout(30_000),
+  const page = await requestSecretRotationPage({
+    endpoint,
+    authorizationToken,
+    mode: apply ? "apply" : "dry_run",
+    ...(after ? { after } : {}),
   });
-  let value: unknown;
-  try {
-    value = await response.json();
-  } catch {
-    throw new Error(`Cloudflare secret rotation returned invalid JSON (HTTP ${response.status}).`);
-  }
-  if (!response.ok || !isRecord(value)) {
-    const message = isRecord(value) && typeof value.message === "string" ? value.message : "Request failed.";
-    throw new Error(`Cloudflare secret rotation failed (HTTP ${response.status}): ${message}`);
-  }
-  const page = parsePage(value);
-  if (page.mode !== (apply ? "apply" : "dry_run")) {
-    throw new Error("Cloudflare secret rotation returned a mismatched mode.");
-  }
   if (activeKeyId !== undefined && activeKeyId !== page.activeKeyId) {
     throw new Error(
       "The active secret key changed during rotation; rerun the command after reviewing key configuration.",
@@ -81,48 +64,3 @@ for (;;) {
 process.stdout.write(
   `${JSON.stringify({ mode: apply ? "apply" : "dry_run", activeKeyId, scanned, needingRotation, rotated, concurrentlyChanged })}\n`,
 );
-
-function parsePage(value: Record<string, unknown>): {
-  readonly mode: string;
-  readonly activeKeyId: string;
-  readonly scanned: number;
-  readonly needingRotation: number;
-  readonly rotated: number;
-  readonly concurrentlyChanged: number;
-  readonly nextCursor?: { tenantId: string; reference: string };
-} {
-  if (
-    typeof value.mode !== "string" ||
-    typeof value.activeKeyId !== "string" ||
-    !Number.isSafeInteger(value.scanned) ||
-    !Number.isSafeInteger(value.needingRotation) ||
-    !Number.isSafeInteger(value.rotated) ||
-    !Number.isSafeInteger(value.concurrentlyChanged)
-  ) {
-    throw new Error("Cloudflare secret rotation returned an invalid page.");
-  }
-  let nextCursor: { tenantId: string; reference: string } | undefined;
-  if (value.nextCursor !== undefined) {
-    if (
-      !isRecord(value.nextCursor) ||
-      typeof value.nextCursor.tenantId !== "string" ||
-      typeof value.nextCursor.reference !== "string"
-    ) {
-      throw new Error("Cloudflare secret rotation returned an invalid cursor.");
-    }
-    nextCursor = { tenantId: value.nextCursor.tenantId, reference: value.nextCursor.reference };
-  }
-  return {
-    mode: value.mode,
-    activeKeyId: value.activeKeyId,
-    scanned: value.scanned as number,
-    needingRotation: value.needingRotation as number,
-    rotated: value.rotated as number,
-    concurrentlyChanged: value.concurrentlyChanged as number,
-    ...(nextCursor ? { nextCursor } : {}),
-  };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
