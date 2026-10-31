@@ -230,6 +230,140 @@ describe("tenant membership repositories", () => {
         db.close();
       }
     });
+
+    test(`${adapter.name} creates, accepts, expires, and revokes tenant invitations consistently`, async () => {
+      const db = createDatabase();
+      const repositories = adapter.create(db);
+      seedTenant(db);
+      try {
+        const invitation = await repositories.tenantMembers.createInvitation({
+          tenantId,
+          actorId: ownerId,
+          invitationId: "invite_members_admin",
+          tokenHash: "a".repeat(64),
+          role: "admin",
+          createdAt,
+          expiresAt: "2026-11-06T00:00:00.000Z",
+        });
+        expect(invitation).toMatchObject({ id: "invite_members_admin", role: "admin", status: "pending" });
+        const listed = await repositories.tenantMembers.listInvitations({ tenantId, actorId: ownerId, now: createdAt });
+        expect(listed).toEqual([invitation]);
+
+        const accepted = await repositories.tenantMembers.acceptInvitation({
+          tokenHash: "a".repeat(64),
+          userId: memberId,
+          now: "2026-10-30T00:01:00.000Z",
+        });
+        expect(accepted).toEqual({ tenantId, role: "admin" });
+        expect(await repositories.tenantMembers.getActiveRole({ tenantId, userId: memberId })).toBe("admin");
+        await expect(
+          repositories.tenantMembers.acceptInvitation({
+            tokenHash: "a".repeat(64),
+            userId: secondOwnerId,
+            now: "2026-10-30T00:02:00.000Z",
+          }),
+        ).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+        await expect(
+          repositories.tenantMembers.acceptInvitation({
+            tokenHash: "a".repeat(64),
+            userId: memberId,
+            now: "2026-10-30T00:02:00.000Z",
+          }),
+        ).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+
+        await repositories.tenantMembers.deactivateMember({
+          tenantId,
+          actorId: ownerId,
+          memberId,
+          now: "2026-10-30T00:03:00.000Z",
+        });
+        await repositories.tenantMembers.createInvitation({
+          tenantId,
+          actorId: ownerId,
+          invitationId: "invite_members_reactivation",
+          tokenHash: "b".repeat(64),
+          role: "member",
+          createdAt: "2026-10-30T00:04:00.000Z",
+          expiresAt: "2026-11-06T00:00:00.000Z",
+        });
+        await repositories.tenantMembers.acceptInvitation({
+          tokenHash: "b".repeat(64),
+          userId: memberId,
+          now: "2026-10-30T00:05:00.000Z",
+        });
+        expect(await repositories.tenantMembers.getActiveRole({ tenantId, userId: memberId })).toBe("member");
+
+        await repositories.tenantMembers.createInvitation({
+          tenantId,
+          actorId: ownerId,
+          invitationId: "invite_members_revoked",
+          tokenHash: "c".repeat(64),
+          role: "member",
+          createdAt: "2026-10-30T00:06:00.000Z",
+          expiresAt: "2026-11-06T00:00:00.000Z",
+        });
+        expect(
+          await repositories.tenantMembers.revokeInvitation({
+            tenantId,
+            actorId: ownerId,
+            invitationId: "invite_members_revoked",
+            now: "2026-10-30T00:07:00.000Z",
+          }),
+        ).toMatchObject({ status: "revoked" });
+        await expect(
+          repositories.tenantMembers.acceptInvitation({
+            tokenHash: "c".repeat(64),
+            userId: secondOwnerId,
+            now: "2026-10-30T00:08:00.000Z",
+          }),
+        ).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+
+        await repositories.tenantMembers.createInvitation({
+          tenantId,
+          actorId: ownerId,
+          invitationId: "invite_members_expired",
+          tokenHash: "d".repeat(64),
+          role: "member",
+          createdAt: "2026-10-30T00:09:00.000Z",
+          expiresAt: "2026-10-30T00:10:00.000Z",
+        });
+        expect(
+          (
+            await repositories.tenantMembers.listInvitations({
+              tenantId,
+              actorId: ownerId,
+              now: "2026-10-30T00:11:00.000Z",
+            })
+          ).find((item) => item.id === "invite_members_expired")?.status,
+        ).toBe("expired");
+        await expect(
+          repositories.tenantMembers.acceptInvitation({
+            tokenHash: "d".repeat(64),
+            userId: secondOwnerId,
+            now: "2026-10-30T00:11:00.000Z",
+          }),
+        ).rejects.toMatchObject({ status: 404, code: "NOT_FOUND" });
+
+        expect(
+          db
+            .query<{ action: string }, []>(
+              "SELECT action FROM audit_logs WHERE resource_type = 'tenant_invitation' ORDER BY created_at, action",
+            )
+            .all()
+            .map(({ action }) => action),
+        ).toEqual([
+          "tenant.invitation.created",
+          "tenant.invitation.accepted",
+          "tenant.invitation.created",
+          "tenant.invitation.accepted",
+          "tenant.invitation.created",
+          "tenant.invitation.revoked",
+          "tenant.invitation.created",
+        ]);
+      } finally {
+        db.close();
+      }
+    });
   }
 });
 

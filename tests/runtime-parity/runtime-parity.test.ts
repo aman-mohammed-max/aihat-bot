@@ -478,6 +478,81 @@ describe("Bun and Cloudflare runtime repository parity", () => {
     }
   });
 
+  test("one-use workspace invitations produce the same Bun and D1 memberships", async () => {
+    const bunDatabase = openSqliteDatabase(":memory:");
+    const cloudflareDatabase = openSqliteDatabase(":memory:");
+    const bunRepositories = new BunSqliteRepositories(bunDatabase);
+    const cloudflareRepositories = new CloudflareD1Repositories(
+      new SqliteD1(cloudflareDatabase) as unknown as D1Database,
+    );
+    const invitation = {
+      tenantId,
+      actorId: ownerId,
+      invitationId: "invite_runtime_parity",
+      tokenHash: "e".repeat(64),
+      role: "member" as const,
+      createdAt,
+      expiresAt: "2026-11-06T00:00:00.000Z",
+    };
+    try {
+      seedTenant(bunDatabase);
+      seedTenant(cloudflareDatabase);
+      for (const db of [bunDatabase, cloudflareDatabase]) {
+        db.query("INSERT INTO users (id, auth_issuer, auth_subject, created_at) VALUES (?, 'parity-test', ?, ?)").run(
+          memberId,
+          memberId,
+          createdAt,
+        );
+      }
+      const [bunInvitation, d1Invitation] = await Promise.all([
+        bunRepositories.tenantMembers.createInvitation(invitation),
+        cloudflareRepositories.tenantMembers.createInvitation(invitation),
+      ]);
+      expect(bunInvitation).toEqual(d1Invitation);
+      const [bunAccepted, d1Accepted] = await Promise.all([
+        bunRepositories.tenantMembers.acceptInvitation({
+          tokenHash: invitation.tokenHash,
+          userId: memberId,
+          now: "2026-10-30T00:01:00.000Z",
+        }),
+        cloudflareRepositories.tenantMembers.acceptInvitation({
+          tokenHash: invitation.tokenHash,
+          userId: memberId,
+          now: "2026-10-30T00:01:00.000Z",
+        }),
+      ]);
+      expect(bunAccepted).toEqual(d1Accepted);
+      const [bunWorkspaces, d1Workspaces] = await Promise.all([
+        bunRepositories.tenantMembers.listWorkspacesForUser(memberId),
+        cloudflareRepositories.tenantMembers.listWorkspacesForUser(memberId),
+      ]);
+      expect(bunWorkspaces).toEqual(d1Workspaces);
+      expect(bunWorkspaces).toContainEqual({
+        tenantId,
+        name: "Parity test",
+        role: "member",
+        createdAt: "2026-10-30T00:01:00.000Z",
+      });
+      const [bunAcceptedInvitation, d1AcceptedInvitation] = await Promise.all([
+        bunRepositories.tenantMembers.listInvitations({
+          tenantId,
+          actorId: ownerId,
+          now: "2026-10-30T00:01:00.000Z",
+        }),
+        cloudflareRepositories.tenantMembers.listInvitations({
+          tenantId,
+          actorId: ownerId,
+          now: "2026-10-30T00:01:00.000Z",
+        }),
+      ]);
+      expect(bunAcceptedInvitation).toEqual(d1AcceptedInvitation);
+      expect(bunAcceptedInvitation[0]?.status).toBe("accepted");
+    } finally {
+      bunDatabase.close();
+      cloudflareDatabase.close();
+    }
+  });
+
   test("creation approval issuance and outcomes are audited consistently", async () => {
     const bunDatabase = openSqliteDatabase(":memory:");
     const cloudflareDatabase = openSqliteDatabase(":memory:");

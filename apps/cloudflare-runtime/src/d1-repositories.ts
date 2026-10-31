@@ -67,6 +67,7 @@ import type {
   PublicBotListing,
   AuditLogEvent,
   TenantMember,
+  TenantInvitation,
   TenantRole,
   TenantWorkspace,
   MasterBotRepository,
@@ -338,6 +339,18 @@ interface TenantMemberRow {
   owned_bot_count: number;
 }
 
+interface TenantInvitationRow {
+  id: string;
+  tenant_id: string;
+  role: Exclude<TenantRole, "owner">;
+  status: "pending" | "accepted" | "revoked";
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+  accepted_by: string | null;
+  accepted_at: string | null;
+}
+
 /** D1 implementation of the same tenant-scoped contracts used by Bun SQLite. */
 export class CloudflareD1Repositories
   implements
@@ -445,6 +458,10 @@ export class CloudflareD1Repositories
       addMember: (input) => this.addTenantMember(input),
       changeMemberRole: (input) => this.changeTenantMemberRole(input),
       deactivateMember: (input) => this.deactivateTenantMember(input),
+      listInvitations: (input) => this.listTenantInvitations(input),
+      createInvitation: (input) => this.createTenantInvitation(input),
+      revokeInvitation: (input) => this.revokeTenantInvitation(input),
+      acceptInvitation: (input) => this.acceptTenantInvitation(input),
     };
     this.mcp = {
       listServers: (tenantId, botId) => this.listMcpServers(tenantId, botId),
@@ -2880,6 +2897,189 @@ export class CloudflareD1Repositories
     return this.#getTenantMember(input.tenantId, input.memberId);
   }
 
+  async listTenantInvitations(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly now: string;
+  }): Promise<readonly TenantInvitation[]> {
+    const actor = await this.db
+      .prepare(`
+        SELECT role FROM tenant_memberships
+        WHERE tenant_id = ? AND user_id = ? AND status = 'active'
+      `)
+      .bind(input.tenantId, input.actorId)
+      .first<{ role: TenantRole }>();
+    if (!actor || (actor.role !== "owner" && actor.role !== "admin")) {
+      throw new AppError("FORBIDDEN", "Tenant owner or admin role is required to list invitations.", 403);
+    }
+    const result = await this.db
+      .prepare(`
+        SELECT id, tenant_id, role, status, created_by, created_at, expires_at, accepted_by, accepted_at
+        FROM tenant_invitations
+        WHERE tenant_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 100
+      `)
+      .bind(input.tenantId)
+      .all<TenantInvitationRow>();
+    return result.results.map((row) => mapTenantInvitation(row, input.now));
+  }
+
+  async createTenantInvitation(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly invitationId: string;
+    readonly tokenHash: string;
+    readonly role: Exclude<TenantRole, "owner">;
+    readonly createdAt: string;
+    readonly expiresAt: string;
+  }): Promise<TenantInvitation> {
+    await this.#assertTenantOwner(input.tenantId, input.actorId);
+    const results = await this.db.batch([
+      this.db
+        .prepare(`
+          INSERT INTO tenant_invitations
+            (id, tenant_id, token_hash, role, status, created_by, created_at, expires_at)
+          SELECT ?, ?, ?, ?, 'pending', ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM tenant_memberships
+            WHERE tenant_id = ? AND user_id = ? AND role = 'owner' AND status = 'active'
+          )
+        `)
+        .bind(
+          input.invitationId,
+          input.tenantId,
+          input.tokenHash,
+          input.role,
+          input.actorId,
+          input.createdAt,
+          input.expiresAt,
+          input.tenantId,
+          input.actorId,
+        ),
+      this.db
+        .prepare(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          SELECT ?, ?, ?, 'tenant.invitation.created', 'tenant_invitation', ?, ?, ? WHERE changes() = 1
+        `)
+        .bind(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.tenantId,
+          input.actorId,
+          input.invitationId,
+          JSON.stringify({ role: input.role, expiresAt: input.expiresAt }),
+          input.createdAt,
+        ),
+    ]);
+    if (results[0]?.meta.changes !== 1) {
+      throw new AppError("CONFLICT", "Invitation could not be created for this workspace.", 409);
+    }
+    return this.#getTenantInvitation(input.tenantId, input.invitationId, input.createdAt);
+  }
+
+  async revokeTenantInvitation(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly invitationId: string;
+    readonly now: string;
+  }): Promise<TenantInvitation> {
+    await this.#assertTenantOwner(input.tenantId, input.actorId);
+    const results = await this.db.batch([
+      this.db
+        .prepare(`
+          UPDATE tenant_invitations SET status = 'revoked'
+          WHERE tenant_id = ? AND id = ? AND status = 'pending'
+            AND EXISTS (
+              SELECT 1 FROM tenant_memberships
+              WHERE tenant_id = ? AND user_id = ? AND role = 'owner' AND status = 'active'
+            )
+        `)
+        .bind(input.tenantId, input.invitationId, input.tenantId, input.actorId),
+      this.db
+        .prepare(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          SELECT ?, ?, ?, 'tenant.invitation.revoked', 'tenant_invitation', ?,
+                 json_object('role', (SELECT role FROM tenant_invitations WHERE tenant_id = ? AND id = ?)), ?
+          WHERE changes() = 1
+        `)
+        .bind(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.tenantId,
+          input.actorId,
+          input.invitationId,
+          input.tenantId,
+          input.invitationId,
+          input.now,
+        ),
+    ]);
+    if (results[0]?.meta.changes !== 1) {
+      throw new AppError("NOT_FOUND", "Pending invitation was not found.", 404);
+    }
+    return this.#getTenantInvitation(input.tenantId, input.invitationId, input.now);
+  }
+
+  async acceptTenantInvitation(input: {
+    readonly tokenHash: string;
+    readonly userId: UserId;
+    readonly now: string;
+  }): Promise<{ readonly tenantId: TenantId; readonly role: Exclude<TenantRole, "owner"> }> {
+    const invitation = await this.db
+      .prepare(`
+        SELECT id, tenant_id, role, status, created_by, created_at, expires_at, accepted_by, accepted_at
+        FROM tenant_invitations WHERE token_hash = ?
+      `)
+      .bind(input.tokenHash)
+      .first<TenantInvitationRow>();
+    if (!invitation || invitation.status !== "pending" || invitation.expires_at <= input.now) {
+      throw new AppError("NOT_FOUND", "Invitation is invalid, expired, or already used.", 404);
+    }
+    if (await this.getActiveTenantRole({ tenantId: invitation.tenant_id as TenantId, userId: input.userId })) {
+      throw new AppError("CONFLICT", "This account already belongs to the invited workspace.", 409);
+    }
+    const results = await this.db.batch([
+      this.db
+        .prepare(`
+          UPDATE tenant_invitations SET status = 'accepted', accepted_by = ?, accepted_at = ?
+          WHERE token_hash = ? AND status = 'pending' AND expires_at > ?
+            AND NOT EXISTS (
+              SELECT 1 FROM tenant_memberships
+              WHERE tenant_id = ? AND user_id = ? AND status = 'active'
+            )
+        `)
+        .bind(input.userId, input.now, input.tokenHash, input.now, invitation.tenant_id, input.userId),
+      this.db
+        .prepare(`
+          INSERT INTO tenant_memberships (tenant_id, user_id, role, created_at, status)
+          SELECT tenant_id, ?, role, ?, 'active' FROM tenant_invitations
+          WHERE token_hash = ? AND status = 'accepted' AND accepted_by = ? AND accepted_at = ? AND changes() = 1
+          ON CONFLICT (tenant_id, user_id) DO UPDATE SET role = excluded.role, status = 'active'
+          WHERE tenant_memberships.status = 'inactive'
+        `)
+        .bind(input.userId, input.now, input.tokenHash, input.userId, input.now),
+      this.db
+        .prepare(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          SELECT ?, ?, ?, 'tenant.invitation.accepted', 'tenant_invitation', ?, json_object('role', ?), ?
+          WHERE changes() = 1
+        `)
+        .bind(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          invitation.tenant_id,
+          input.userId,
+          invitation.id,
+          invitation.role,
+          input.now,
+        ),
+    ]);
+    if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+      if (await this.getActiveTenantRole({ tenantId: invitation.tenant_id as TenantId, userId: input.userId })) {
+        throw new AppError("CONFLICT", "This account already belongs to the invited workspace.", 409);
+      }
+      throw new AppError("NOT_FOUND", "Invitation is invalid, expired, or already used.", 404);
+    }
+    return { tenantId: invitation.tenant_id as TenantId, role: invitation.role };
+  }
+
   async #assertTenantOwner(tenantId: TenantId, actorId: UserId): Promise<void> {
     const row = await this.db
       .prepare(`
@@ -2914,6 +3114,18 @@ export class CloudflareD1Repositories
       .first<TenantMemberRow>();
     if (!row) throw new AppError("INTERNAL_ERROR", "Tenant member could not be loaded after an update.", 500);
     return mapTenantMember(row);
+  }
+
+  async #getTenantInvitation(tenantId: TenantId, invitationId: string, now: string): Promise<TenantInvitation> {
+    const row = await this.db
+      .prepare(`
+        SELECT id, tenant_id, role, status, created_by, created_at, expires_at, accepted_by, accepted_at
+        FROM tenant_invitations WHERE tenant_id = ? AND id = ?
+      `)
+      .bind(tenantId, invitationId)
+      .first<TenantInvitationRow>();
+    if (!row) throw new AppError("INTERNAL_ERROR", "Tenant invitation could not be loaded after an update.", 500);
+    return mapTenantInvitation(row, now);
   }
 
   async consumeApiRequest(input: {
@@ -4476,6 +4688,20 @@ function mapTenantMember(row: TenantMemberRow): TenantMember {
     status: row.status,
     createdAt: row.created_at,
     ownedBotCount: row.owned_bot_count,
+  };
+}
+
+function mapTenantInvitation(row: TenantInvitationRow, now: string): TenantInvitation {
+  const status = row.status === "pending" && row.expires_at <= now ? "expired" : row.status;
+  return {
+    id: row.id,
+    role: row.role,
+    status,
+    createdBy: row.created_by as UserId,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    ...(row.accepted_by === null ? {} : { acceptedBy: row.accepted_by as UserId }),
+    ...(row.accepted_at === null ? {} : { acceptedAt: row.accepted_at }),
   };
 }
 

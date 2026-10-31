@@ -23,6 +23,17 @@ export interface TenantMember {
   ownedBotCount: number;
 }
 
+export interface TenantInvitation {
+  id: string;
+  role: "admin" | "member";
+  status: "pending" | "accepted" | "revoked" | "expired";
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedBy?: string;
+  acceptedAt?: string;
+}
+
 export interface WorkspaceMembership {
   tenantId: string;
   name: string;

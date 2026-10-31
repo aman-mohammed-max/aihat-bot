@@ -18,6 +18,7 @@ import type {
   StoredConversationMessage,
   TelegramSettings,
   TenantMember,
+  TenantInvitation,
   WorkspaceMembership,
   UsageSummary,
 } from "./types.js";
@@ -54,6 +55,15 @@ declare global {
 const TOKEN_KEY = "aihat.owner-token";
 const SESSION_TOKEN_ID_KEY = "aihat.telegram-session-token-id";
 const SESSION_KEY = "aihat.factory-session";
+const WORKSPACE_INVITATION_KEY = "aihat.workspace-invitation";
+const initialQuery = new URLSearchParams(location.search);
+const linkedInvitation = initialQuery.get("invite");
+if (linkedInvitation && /^ahf_invite_[A-Za-z0-9_-]{43}$/.test(linkedInvitation)) {
+  sessionStorage.setItem(WORKSPACE_INVITATION_KEY, linkedInvitation);
+  initialQuery.delete("invite");
+  const remainingQuery = initialQuery.toString();
+  history.replaceState(null, "", `${location.pathname}${remainingQuery ? `?${remainingQuery}` : ""}${location.hash}`);
+}
 const app = getAppRoot();
 
 const state: UiState = createInitialState();
@@ -115,6 +125,7 @@ async function boot(): Promise<void> {
     await loadWorkspace();
     await restoreFactorySession();
     await applyRoute();
+    await acceptPendingWorkspaceInvitation();
   } catch (error) {
     clearSession();
     renderLogin(asMessage(error));
@@ -239,12 +250,21 @@ async function applyRoute(): Promise<void> {
     }
     state.tenantMembers = [];
     state.tenantMembersError = undefined;
+    state.tenantInvitations = [];
+    state.tenantInvitationsError = undefined;
+    state.newWorkspaceInvitation = undefined;
     if (state.principal?.scopes.includes("members:manage")) {
       try {
         const response = await api<{ items: TenantMember[] }>("/v1/members");
         state.tenantMembers = response.items;
       } catch (error) {
         state.tenantMembersError = asMessage(error);
+      }
+      try {
+        const response = await api<{ items: TenantInvitation[] }>("/v1/invitations");
+        state.tenantInvitations = response.items;
+      } catch (error) {
+        state.tenantInvitationsError = asMessage(error);
       }
     }
     state.workspaces = [];
@@ -453,7 +473,13 @@ async function handleClick(event: MouseEvent): Promise<void> {
     else if (action === "toggle-menu") document.getElementById("sidebar")?.classList.toggle("sidebar-open");
     else if (action === "copy-miniapp-url") await copyText(`${location.origin}/miniapp/`, "Mini App URL copied");
     else if (action === "switch-workspace") await switchWorkspace(target.dataset.tenantId ?? "");
-    else if (action === "deactivate-tenant-member") await deactivateTenantMember(target.dataset.userId ?? "");
+    else if (action === "copy-workspace-invitation") {
+      await copyText(state.newWorkspaceInvitation?.url ?? "", "Workspace invitation link copied");
+    } else if (action === "copy-workspace-invitation-token") {
+      await copyText(state.newWorkspaceInvitation?.token ?? "", "Workspace invitation token copied");
+    } else if (action === "revoke-workspace-invitation") {
+      await revokeWorkspaceInvitation(target.dataset.invitationId ?? "");
+    } else if (action === "deactivate-tenant-member") await deactivateTenantMember(target.dataset.userId ?? "");
     else if (action === "reactivate-tenant-member") {
       await reactivateTenantMember(target.dataset.userId ?? "", target.dataset.role ?? "member");
     } else if (action === "copy-invitation") await copyText(state.invitationToken ?? "", "Invitation token copied");
@@ -523,6 +549,14 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
         break;
       case "tenant-member-add-form":
         await addTenantMember(data);
+        form.reset();
+        break;
+      case "tenant-invitation-form":
+        await createWorkspaceInvitation(data);
+        form.reset();
+        break;
+      case "workspace-invitation-accept-form":
+        await acceptWorkspaceInvitation(String(data.get("token") ?? "").trim());
         form.reset();
         break;
       case "tenant-member-role-form":
@@ -640,6 +674,7 @@ async function logIn(token: string): Promise<void> {
   await loadWorkspace();
   await restoreFactorySession();
   await applyRoute();
+  await acceptPendingWorkspaceInvitation();
 }
 
 function clearSession(): void {
@@ -659,6 +694,9 @@ function clearSession(): void {
   state.pendingFactoryCredential = undefined;
   state.tenantMembers = [];
   state.tenantMembersError = undefined;
+  state.tenantInvitations = [];
+  state.tenantInvitationsError = undefined;
+  state.newWorkspaceInvitation = undefined;
   state.workspaces = [];
   state.workspacesError = undefined;
   sessionStorage.removeItem(TOKEN_KEY);
@@ -1418,6 +1456,75 @@ async function loadTenantMembers(): Promise<void> {
   state.tenantMembers = response.items;
   state.tenantMembersError = undefined;
   render();
+}
+
+async function loadTenantInvitations(): Promise<void> {
+  const response = await api<{ items: TenantInvitation[] }>("/v1/invitations");
+  state.tenantInvitations = response.items;
+  state.tenantInvitationsError = undefined;
+  render();
+}
+
+async function createWorkspaceInvitation(data: FormData): Promise<void> {
+  const result = await api<{ item: TenantInvitation; token: string }>("/v1/invitations", {
+    method: "POST",
+    body: jsonBody({ role: String(data.get("role") ?? "member"), expiresInDays: Number(data.get("expiresInDays")) }),
+  });
+  const url = new URL("/miniapp/", location.origin);
+  url.searchParams.set("invite", result.token);
+  state.newWorkspaceInvitation = {
+    invitationId: result.item.id,
+    token: result.token,
+    url: url.toString(),
+    expiresAt: result.item.expiresAt,
+  };
+  await loadTenantInvitations();
+  showToast("Workspace invitation created");
+}
+
+async function revokeWorkspaceInvitation(invitationId: string): Promise<void> {
+  if (!invitationId) throw new Error("Choose an invitation first.");
+  const confirmed = await askConfirmation(
+    "Revoke this workspace invitation?",
+    "Anyone with this link will no longer be able to join using it.",
+    "Revoke invitation",
+    true,
+  );
+  if (!confirmed) return;
+  await api(`/v1/invitations/${encodeURIComponent(invitationId)}`, { method: "DELETE" });
+  if (state.newWorkspaceInvitation?.invitationId === invitationId) state.newWorkspaceInvitation = undefined;
+  await loadTenantInvitations();
+  showToast("Workspace invitation revoked");
+}
+
+async function acceptPendingWorkspaceInvitation(): Promise<void> {
+  const token = sessionStorage.getItem(WORKSPACE_INVITATION_KEY);
+  if (!token) return;
+  try {
+    await acceptWorkspaceInvitation(token);
+  } catch (error) {
+    if (error instanceof ApiError && error.status < 500) sessionStorage.removeItem(WORKSPACE_INVITATION_KEY);
+    state.pageError = `Workspace invitation could not be accepted: ${asMessage(error)}`;
+    render();
+  }
+}
+
+async function acceptWorkspaceInvitation(token: string): Promise<void> {
+  if (!/^ahf_invite_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("Enter a valid workspace invitation token.");
+  const accepted = await api<{ tenantId: string; role: "admin" | "member" }>("/v1/invitations/accept", {
+    method: "POST",
+    body: jsonBody({ token }),
+  });
+  sessionStorage.removeItem(WORKSPACE_INVITATION_KEY);
+  try {
+    const response = await api<{ items: WorkspaceMembership[] }>("/v1/workspaces");
+    state.workspaces = response.items;
+    await switchWorkspace(accepted.tenantId);
+    showToast("Invitation accepted and workspace opened");
+  } catch {
+    navigate("security");
+    showToast("Invitation accepted. Switch to the workspace in Security settings.");
+  }
 }
 
 async function addTenantMember(data: FormData): Promise<void> {

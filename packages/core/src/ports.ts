@@ -32,6 +32,7 @@ import type {
   WorkflowExecutionAcquisition,
   ToolExecutionAcquisition,
   TenantMember,
+  TenantInvitation,
   TenantRole,
   TenantWorkspace,
 } from "./types.js";
@@ -112,6 +113,31 @@ export interface TenantMembershipRepository {
     readonly memberId: UserId;
     readonly now: string;
   }): Promise<TenantMember>;
+  listInvitations(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly now: string;
+  }): Promise<readonly TenantInvitation[]>;
+  createInvitation(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly invitationId: string;
+    readonly tokenHash: string;
+    readonly role: Exclude<TenantRole, "owner">;
+    readonly createdAt: string;
+    readonly expiresAt: string;
+  }): Promise<TenantInvitation>;
+  revokeInvitation(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly invitationId: string;
+    readonly now: string;
+  }): Promise<TenantInvitation>;
+  acceptInvitation(input: {
+    readonly tokenHash: string;
+    readonly userId: UserId;
+    readonly now: string;
+  }): Promise<{ readonly tenantId: TenantId; readonly role: Exclude<TenantRole, "owner"> }>;
 }
 
 export interface ConversationRepository {

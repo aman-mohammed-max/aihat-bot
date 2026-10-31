@@ -4940,6 +4940,16 @@ kbd {
   margin-top: 8px;
   border-top: 1px solid rgba(153, 198, 193, 0.09);
 }
+
+.invitation-management {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--line, rgba(255, 255, 255, 0.08));
+}
+
+.invitation-management h3 {
+  margin: 0;
+}
 .member-add-form .field {
   display: grid;
   gap: 6px;

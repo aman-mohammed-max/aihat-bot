@@ -31,7 +31,7 @@ describe("Telegram Mini App authentication", () => {
       expect(session.tokenId).toMatch(/^token_[a-f0-9-]{36}$/);
       expect(Date.parse(session.expiresAt) - fixedNow.getTime()).toBe(12 * 60 * 60 * 1000);
 
-      const principal = await new ApiTokenAuthenticator(repositories.apiTokens).authenticate(
+      const principal = await new ApiTokenAuthenticator(repositories.apiTokens, { now: () => fixedNow }).authenticate(
         new Request("https://local.test/v1/whoami", {
           headers: { authorization: `Bearer ${session.token}` },
         }),

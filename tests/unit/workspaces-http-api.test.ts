@@ -172,6 +172,16 @@ function createMemberships(overrides: Partial<TenantMembershipRepository> = {}):
     deactivateMember: async () => {
       throw new Error("not used");
     },
+    listInvitations: async () => [],
+    createInvitation: async () => {
+      throw new Error("not used");
+    },
+    revokeInvitation: async () => {
+      throw new Error("not used");
+    },
+    acceptInvitation: async () => {
+      throw new Error("not used");
+    },
     listWorkspacesForUser: async () => [],
     getActiveRole: async () => undefined,
     ...overrides,

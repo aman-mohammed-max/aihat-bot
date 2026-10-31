@@ -159,6 +159,19 @@ export interface TenantMember {
   readonly ownedBotCount: number;
 }
 
+export type TenantInvitationStatus = "pending" | "accepted" | "revoked" | "expired";
+
+export interface TenantInvitation {
+  readonly id: string;
+  readonly role: Exclude<TenantRole, "owner">;
+  readonly status: TenantInvitationStatus;
+  readonly createdBy: UserId;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly acceptedBy?: UserId;
+  readonly acceptedAt?: string;
+}
+
 export interface TenantWorkspace {
   readonly tenantId: TenantId;
   readonly name: string;

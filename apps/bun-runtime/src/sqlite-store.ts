@@ -80,6 +80,7 @@ import type {
   PublicBotListing,
   AuditLogEvent,
   TenantMember,
+  TenantInvitation,
   TenantRole,
   TenantWorkspace,
   UsageRecord,
@@ -343,6 +344,17 @@ interface TenantMemberRow {
   owned_bot_count: number;
 }
 
+interface TenantInvitationRow {
+  id: string;
+  role: Exclude<TenantRole, "owner">;
+  status: "pending" | "accepted" | "revoked";
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+  accepted_by: string | null;
+  accepted_at: string | null;
+}
+
 /** Bun-specific SQLite repositories. Every read and write carries the owning tenant. */
 export class BunSqliteRepositories
   implements
@@ -452,6 +464,10 @@ export class BunSqliteRepositories
       addMember: (input) => this.addTenantMember(input),
       changeMemberRole: (input) => this.changeTenantMemberRole(input),
       deactivateMember: (input) => this.deactivateTenantMember(input),
+      listInvitations: (input) => this.listTenantInvitations(input),
+      createInvitation: (input) => this.createTenantInvitation(input),
+      revokeInvitation: (input) => this.revokeTenantInvitation(input),
+      acceptInvitation: (input) => this.acceptTenantInvitation(input),
     };
     this.mcp = {
       listServers: (tenantId, botId) => this.listMcpServers(tenantId, botId),
@@ -2585,6 +2601,176 @@ export class BunSqliteRepositories
     return deactivate.immediate();
   }
 
+  async listTenantInvitations(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly now: string;
+  }): Promise<readonly TenantInvitation[]> {
+    const actor = this.#db
+      .query<{ role: TenantRole }, [string, string]>(`
+        SELECT role FROM tenant_memberships
+        WHERE tenant_id = ? AND user_id = ? AND status = 'active'
+      `)
+      .get(input.tenantId, input.actorId);
+    if (!actor || (actor.role !== "owner" && actor.role !== "admin")) {
+      throw new AppError("FORBIDDEN", "Tenant owner or admin role is required to list invitations.", 403);
+    }
+    const rows = this.#db
+      .query<TenantInvitationRow, [string]>(`
+        SELECT id, role, status, created_by, created_at, expires_at, accepted_by, accepted_at
+        FROM tenant_invitations
+        WHERE tenant_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 100
+      `)
+      .all(input.tenantId);
+    return rows.map((row) => mapTenantInvitation(row, input.now));
+  }
+
+  async createTenantInvitation(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly invitationId: string;
+    readonly tokenHash: string;
+    readonly role: Exclude<TenantRole, "owner">;
+    readonly createdAt: string;
+    readonly expiresAt: string;
+  }): Promise<TenantInvitation> {
+    const create = this.#db.transaction(() => {
+      this.#assertTenantOwner(input.tenantId, input.actorId);
+      this.#db
+        .query(`
+          INSERT INTO tenant_invitations
+            (id, tenant_id, token_hash, role, status, created_by, created_at, expires_at)
+          VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+        `)
+        .run(
+          input.invitationId,
+          input.tenantId,
+          input.tokenHash,
+          input.role,
+          input.actorId,
+          input.createdAt,
+          input.expiresAt,
+        );
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          VALUES (?, ?, ?, 'tenant.invitation.created', 'tenant_invitation', ?, ?, ?)
+        `)
+        .run(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.tenantId,
+          input.actorId,
+          input.invitationId,
+          JSON.stringify({ role: input.role, expiresAt: input.expiresAt }),
+          input.createdAt,
+        );
+      return this.#getTenantInvitation(input.tenantId, input.invitationId, input.createdAt);
+    });
+    return create.immediate();
+  }
+
+  async revokeTenantInvitation(input: {
+    readonly tenantId: TenantId;
+    readonly actorId: UserId;
+    readonly invitationId: string;
+    readonly now: string;
+  }): Promise<TenantInvitation> {
+    const revoke = this.#db.transaction(() => {
+      this.#assertTenantOwner(input.tenantId, input.actorId);
+      const row = this.#db
+        .query<TenantInvitationRow, [string, string]>(`
+          SELECT id, role, status, created_by, created_at, expires_at, accepted_by, accepted_at
+          FROM tenant_invitations WHERE tenant_id = ? AND id = ?
+        `)
+        .get(input.tenantId, input.invitationId);
+      if (!row) throw new AppError("NOT_FOUND", "Pending invitation was not found.", 404);
+      if (row.status !== "pending") throw new AppError("CONFLICT", "Only pending invitations can be revoked.", 409);
+      this.#db
+        .query("UPDATE tenant_invitations SET status = 'revoked' WHERE tenant_id = ? AND id = ? AND status = 'pending'")
+        .run(input.tenantId, input.invitationId);
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          VALUES (?, ?, ?, 'tenant.invitation.revoked', 'tenant_invitation', ?, ?, ?)
+        `)
+        .run(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.tenantId,
+          input.actorId,
+          input.invitationId,
+          JSON.stringify({ role: row.role }),
+          input.now,
+        );
+      return this.#getTenantInvitation(input.tenantId, input.invitationId, input.now);
+    });
+    return revoke.immediate();
+  }
+
+  async acceptTenantInvitation(input: {
+    readonly tokenHash: string;
+    readonly userId: UserId;
+    readonly now: string;
+  }): Promise<{ readonly tenantId: TenantId; readonly role: Exclude<TenantRole, "owner"> }> {
+    const accept = this.#db.transaction(() => {
+      const invitation = this.#db
+        .query<TenantInvitationRow & { tenant_id: string }, [string]>(`
+          SELECT id, tenant_id, role, status, created_by, created_at, expires_at, accepted_by, accepted_at
+          FROM tenant_invitations WHERE token_hash = ?
+        `)
+        .get(input.tokenHash);
+      if (!invitation || invitation.status !== "pending" || invitation.expires_at <= input.now) {
+        throw new AppError("NOT_FOUND", "Invitation is invalid, expired, or already used.", 404);
+      }
+      const membership = this.#db
+        .query<{ status: "active" | "inactive" }, [string, string]>(`
+          SELECT status FROM tenant_memberships WHERE tenant_id = ? AND user_id = ?
+        `)
+        .get(invitation.tenant_id, input.userId);
+      if (membership?.status === "active") {
+        throw new AppError("CONFLICT", "This account already belongs to the invited workspace.", 409);
+      }
+      if (membership) {
+        this.#db
+          .query(
+            "UPDATE tenant_memberships SET role = ?, status = 'active' WHERE tenant_id = ? AND user_id = ? AND status = 'inactive'",
+          )
+          .run(invitation.role, invitation.tenant_id, input.userId);
+      } else {
+        this.#db
+          .query(`
+            INSERT INTO tenant_memberships (tenant_id, user_id, role, created_at, status)
+            VALUES (?, ?, ?, ?, 'active')
+          `)
+          .run(invitation.tenant_id, input.userId, invitation.role, input.now);
+      }
+      const accepted = this.#db
+        .query(`
+          UPDATE tenant_invitations SET status = 'accepted', accepted_by = ?, accepted_at = ?
+          WHERE id = ? AND status = 'pending' AND expires_at > ?
+        `)
+        .run(input.userId, input.now, invitation.id, input.now);
+      if (accepted.changes !== 1)
+        throw new AppError("CONFLICT", "Invitation changed before it could be accepted.", 409);
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          VALUES (?, ?, ?, 'tenant.invitation.accepted', 'tenant_invitation', ?, ?, ?)
+        `)
+        .run(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          invitation.tenant_id,
+          input.userId,
+          invitation.id,
+          JSON.stringify({ role: invitation.role }),
+          input.now,
+        );
+      return { tenantId: invitation.tenant_id as TenantId, role: invitation.role };
+    });
+    return accept.immediate();
+  }
+
   #assertTenantOwner(tenantId: TenantId, actorId: UserId): void {
     const row = this.#db
       .query<{ role: TenantRole }, [string, string]>(`
@@ -2616,6 +2802,17 @@ export class BunSqliteRepositories
       .get(tenantId, memberId);
     if (!row) throw new AppError("INTERNAL_ERROR", "Tenant member could not be loaded after an update.", 500);
     return mapTenantMember(row);
+  }
+
+  #getTenantInvitation(tenantId: TenantId, invitationId: string, now: string): TenantInvitation {
+    const row = this.#db
+      .query<TenantInvitationRow, [string, string]>(`
+        SELECT id, role, status, created_by, created_at, expires_at, accepted_by, accepted_at
+        FROM tenant_invitations WHERE tenant_id = ? AND id = ?
+      `)
+      .get(tenantId, invitationId);
+    if (!row) throw new AppError("INTERNAL_ERROR", "Tenant invitation could not be loaded after an update.", 500);
+    return mapTenantInvitation(row, now);
   }
 
   #recordTenantMembershipEvent(
@@ -4085,6 +4282,20 @@ function mapTenantMember(row: TenantMemberRow): TenantMember {
     status: row.status,
     createdAt: row.created_at,
     ownedBotCount: row.owned_bot_count,
+  };
+}
+
+function mapTenantInvitation(row: TenantInvitationRow, now: string): TenantInvitation {
+  const status = row.status === "pending" && row.expires_at <= now ? "expired" : row.status;
+  return {
+    id: row.id,
+    role: row.role,
+    status,
+    createdBy: row.created_by as UserId,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    ...(row.accepted_by === null ? {} : { acceptedBy: row.accepted_by as UserId }),
+    ...(row.accepted_at === null ? {} : { acceptedAt: row.accepted_at }),
   };
 }
 

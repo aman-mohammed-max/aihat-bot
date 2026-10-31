@@ -112,6 +112,11 @@ const migrations: readonly Migration[] = [
     name: "tenant_membership_status",
     sql: readFileSync(findMigration("0020_tenant_membership_status.sql"), "utf8"),
   },
+  {
+    version: 21,
+    name: "tenant_invitations",
+    sql: readFileSync(findMigration("0021_tenant_invitations.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {

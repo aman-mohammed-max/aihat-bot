@@ -18,6 +18,7 @@ import type {
   TelegramSettings,
   StoredConversationMessage,
   TenantMember,
+  TenantInvitation,
   WorkspaceMembership,
   UsageSummary,
 } from "./types.js";
@@ -55,6 +56,9 @@ export interface UiState {
   auditLogs: AuditLogEvent[];
   tenantMembers: TenantMember[];
   tenantMembersError?: string | undefined;
+  tenantInvitations: TenantInvitation[];
+  tenantInvitationsError?: string | undefined;
+  newWorkspaceInvitation?: { invitationId: string; token: string; url: string; expiresAt: string } | undefined;
   workspaces: WorkspaceMembership[];
   workspacesError?: string | undefined;
   factorySession?: CreationSession | undefined;
@@ -95,6 +99,7 @@ export function createInitialState(): UiState {
     memoryRecords: [],
     auditLogs: [],
     tenantMembers: [],
+    tenantInvitations: [],
     workspaces: [],
     factoryModels: [],
     factoryModelsBusy: false,
