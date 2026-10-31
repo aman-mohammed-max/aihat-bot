@@ -6,26 +6,26 @@ The working tree was inspected before implementation. At audit time it contained
 
 Environment checks found Node.js v24.22.2 and Docker 29.9.2. `bun` and `wrangler` were not installed. There is consequently no existing build or test command to inspect or run, and no application behavior that can be claimed as working.
 
-## Existing architecture and inventory
+## Initial repository state (before implementation)
 
-There is no application architecture yet. The repository has no dependencies, TypeScript compiler configuration, runtime entrypoints, persistence layer, authentication, integrations, or dashboard. No third-party dependencies or dependency vulnerabilities can be assessed because there is no dependency manifest or lockfile.
+This section records the initial audit, not the current repository. At that time there were no dependencies, TypeScript compiler configuration, runtime entrypoints, persistence layer, authentication, integrations, or dashboard. Third-party dependencies and dependency vulnerabilities could not be assessed because there was no dependency manifest or lockfile.
 
-## Problems and risks
+## Initial problems and risks
 
-1. The requested product is wholly unimplemented; every expected deliverable remains outstanding.
-2. There is no runtime or shared core, so Bun/Workers parity and runtime compatibility cannot be evaluated.
-3. There is no identity, tenant authorization, secret storage, encryption, SSRF policy, rate limiting, audit log, or webhook verification. The product must not accept real credentials or expose a public endpoint until those controls exist.
-4. There is no data model or migration strategy for tenant-owned bots, versions, credentials, conversations, jobs, skills, MCP, or usage.
-5. There is no test, lint, format, typecheck, build, or deployment validation setup.
-6. Bun and Wrangler are unavailable in the audit environment. Cloudflare deployment credentials and resource identifiers are also not established in the repository.
+1. The requested product was wholly unimplemented; every expected deliverable remained outstanding.
+2. There was no runtime or shared core, so Bun/Workers parity and runtime compatibility could not be evaluated.
+3. There was no identity, tenant authorization, secret storage, encryption, SSRF policy, rate limiting, audit log, or webhook verification. The product could not accept real credentials or expose a public endpoint until those controls existed.
+4. There was no data model or migration strategy for tenant-owned bots, versions, credentials, conversations, jobs, skills, MCP, or usage.
+5. There was no test, lint, format, typecheck, build, or deployment validation setup.
+6. Bun and Wrangler were unavailable in the audit environment. Cloudflare deployment credentials and resource identifiers were also not established in the repository.
 
-## Proposed architecture
+## Initial proposed architecture
 
 Keep business rules in a dependency-light TypeScript core. Define explicit ports for persistence, secret operations, queues, scheduling, object storage, HTTP, and logging. Bun and Cloudflare entrypoints should compose runtime-specific adapters around the same application services; they must report unsupported capabilities explicitly. Provider, skill, MCP, Telegram, and dashboard features should be added behind small interfaces when their authorization and tenant boundaries are defined.
 
 Use D1 for Cloudflare relational records and SQLite-backed Durable Objects only for state that needs single-key coordination. Use a self-hosted relational adapter for Bun. Keep dialect-specific migrations explicit rather than pretending SQL dialects are interchangeable. Treat credentials as secret references and never include them in API response types or logs. Gate high-impact actions such as publishing and personal-data integrations on explicit owner approval.
 
-## Prioritized implementation plan
+## Initial prioritized implementation plan
 
 1. Foundation: workspace, shared domain contracts, runtime capability reporting, environment validation, error handling, and logging.
 2. Core agent path: bot lifecycle, provider interface and capability negotiation, prompt assembly, tool registry and authorization, conversation persistence.
@@ -35,7 +35,7 @@ Use D1 for Cloudflare relational records and SQLite-backed Durable Objects only 
 6. Telegram and dashboard: independently routed bot integrations and tenant-scoped management UI.
 7. Automation and production readiness: persistent schedules, recovery, parity/security tests, Docker/Wrangler validation, deployment and troubleshooting docs.
 
-This plan is intentionally a sequence, not a claim that any item is complete. Do not launch public bots until authentication, tenant isolation, credential handling, permission enforcement, and abuse controls are implemented and verified.
+This plan records the proposed sequence at the start of implementation; it is not a claim that the listed work remains incomplete. The implementation updates below and [DEVELOPMENT_STATUS.md](../DEVELOPMENT_STATUS.md) describe current behavior and outstanding work. Do not launch public bots until authentication, tenant isolation, credential handling, permission enforcement, and abuse controls are implemented and verified.
 
 ## Dashboard implementation update
 
