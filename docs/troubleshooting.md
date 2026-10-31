@@ -67,7 +67,7 @@ Approved senders are limited to 30 messages per minute by default. Set `TELEGRAM
 
 - `encryptedSecrets` must be `true` in `/capabilities` before connecting model, Telegram, or skill credentials. Configure `SECRET_ACTIVE_KEY_ID` and `SECRET_KEYRING_JSON` as Worker secrets or Bun environment values.
 - Keep every key ID needed to decrypt existing records. Do not replace the keyring with a new single key unless existing encrypted records have been rotated. Use the secret-rotation workflow documented in the root README and Cloudflare runtime guide.
-- Cloudflare development has D1 migrations `0001` through `0031`. For a new environment, create its D1 database, set the returned ID in `wrangler.jsonc`, then apply migrations from `apps/cloudflare-runtime` with `wrangler d1 migrations apply <database-name> --remote`.
+- Cloudflare development has D1 migrations `0001` through `0032`. For a new environment, create its D1 database, set the returned ID in `wrangler.jsonc`, then apply migrations from `apps/cloudflare-runtime` with `wrangler d1 migrations apply <database-name> --remote`.
 - Staging and production use separate D1 databases, R2 buckets, and Queues. Run `bun run cloudflare:provision -- --env staging` for an account inventory and dry-run; add `--apply` only after reviewing the plan. It updates the matching D1/R2 bindings and applies D1 migrations, but does not deploy the Worker or set secrets. Repeat with `--env production` only when intentionally provisioning production.
 - Local Bun migrations run at startup. For migration errors, inspect the stored migration checksum and database path; do not edit an already-applied migration. Add a forward-only migration instead.
 
