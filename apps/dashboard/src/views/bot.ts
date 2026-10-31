@@ -14,6 +14,7 @@ export function botManagementView(state: UiState): string {
     ["versions", "History", "clock"],
     ["access", "Access", "shield"],
     ["telegram", "Telegram", "globe"],
+    ["files", "Files", "paperclip"],
     ["conversations", "Conversations", "chat"],
     ["memory", "Memory", "spark"],
     ["skills", "Skills", "spark"],
@@ -41,6 +42,8 @@ function renderBotTab(state: UiState, bot: Bot): string {
       return versionsTab(state, bot);
     case "telegram":
       return telegramTab(state);
+    case "files":
+      return filesTab(state, bot);
     case "access":
       return accessTab(state, bot);
     case "conversations":
@@ -56,6 +59,36 @@ function renderBotTab(state: UiState, bot: Bot): string {
     default:
       return overviewTab(state, bot);
   }
+}
+
+function filesTab(state: UiState, bot: Bot): string {
+  const scanningAvailable = state.capabilities?.features.fileMalwareScanning === true;
+  const files = state.uploadedFiles.length
+    ? `<div class="uploaded-file-list">${state.uploadedFiles
+        .map((file) => {
+          const statusLabel = {
+            pending_scan: "Quarantined",
+            clean: "Scan passed",
+            rejected: "Rejected",
+            scan_failed: "Scan failed",
+          }[file.scanStatus];
+          const statusClass =
+            file.scanStatus === "clean"
+              ? "status-connected"
+              : file.scanStatus === "rejected"
+                ? "status-failed"
+                : "status-paused";
+          return `<article class="uploaded-file-row"><div class="uploaded-file-icon">${icon(file.contentType.startsWith("image/") ? "image" : "file", 18)}</div><div class="uploaded-file-copy"><b title="${escapeHtml(file.fileName)}">${escapeHtml(file.fileName)}</b><small>${escapeHtml(file.contentType)} · ${formatBytes(file.size)} · added ${escapeHtml(formatDate(file.createdAt))}</small>${file.scanner ? `<small>Scanned by ${escapeHtml(file.scanner)}${file.scannedAt ? ` · ${escapeHtml(formatDate(file.scannedAt))}` : ""}</small>` : ""}</div><span class="status-pill ${statusClass}"><span class="status-dot"></span>${statusLabel}</span><div class="uploaded-file-actions">${file.scanStatus === "clean" ? `<button class="button button-secondary button-small" data-action="download-uploaded-file" data-file-id="${escapeHtml(file.id)}">${icon("download", 14)}<span>Download</span></button>` : ""}${scanningAvailable && (file.scanStatus === "pending_scan" || file.scanStatus === "scan_failed") ? `<button class="button button-secondary button-small" data-action="scan-uploaded-file" data-file-id="${escapeHtml(file.id)}">${icon("shield", 14)}<span>Scan</span></button>` : ""}<button class="icon-button icon-danger" aria-label="Delete ${escapeHtml(file.fileName)}" data-action="delete-uploaded-file" data-file-id="${escapeHtml(file.id)}">${icon("trash", 15)}</button></div></article>`;
+        })
+        .join("")}</div>`
+    : `<div class="tools-empty">No files are stored for ${escapeHtml(bot.name)} yet.</div>`;
+  return `<section class="panel form-panel uploaded-files-intro"><div class="panel-heading"><div><div class="eyebrow">BOT FILES</div><h2>Upload reference files</h2><p class="panel-subtitle">Keep private documents and images with this bot. Files are limited to 25 MiB each and 250 MiB per bot.</p></div><span class="quiet-badge">${state.uploadedFiles.length} / 100</span></div>${scanningAvailable ? `<div class="alert alert-info compact-alert">New uploads are scanned before they can be downloaded or used. Infected files are rejected.</div>` : `<div class="alert alert-info compact-alert">Malware scanning is not configured on this runtime. Uploads stay quarantined and cannot be downloaded; configure the scanner before using files with this bot. Telegram attachments are also blocked until scanning is available.</div>`}<form id="uploaded-file-form" class="uploaded-file-form"><label class="field"><span>Choose files</span><input type="file" name="files" accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.md,.csv,image/jpeg,image/png,image/webp,application/pdf,text/plain,text/markdown,text/csv" multiple required /><small>Supported: JPEG, PNG, WebP, PDF, TXT, Markdown, and CSV. Keep each file under 25 MiB.</small></label><button class="button button-primary" type="submit">${icon("upload", 16)}<span>Upload selected files</span></button></form></section><section class="panel uploaded-files-panel"><div class="panel-heading"><div><div class="eyebrow">PRIVATE STORAGE</div><h2>Files for ${escapeHtml(bot.name)}</h2></div><span class="quiet-badge">${state.uploadedFiles.length} files</span></div>${files}</section>`;
+}
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function versionsTab(state: UiState, bot: Bot): string {

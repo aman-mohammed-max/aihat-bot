@@ -467,7 +467,9 @@ export class TelegramManager {
     if (imageRequested) {
       if (!imageType) return { unsupported: "That image format isn't supported. Send a JPEG, PNG, or WebP image." };
       if (!(await this.#scanAttachment(name, imageType, bytes))) {
-        return { unsupported: "That image could not pass security scanning. Ask the bot owner to check the file scanner." };
+        return {
+          unsupported: "That image could not pass security scanning. Ask the bot owner to check the file scanner.",
+        };
       }
       const objectId = `tg_${crypto.randomUUID().replaceAll("-", "")}`;
       try {
@@ -492,7 +494,9 @@ export class TelegramManager {
     }
     if (text.includes("\0")) return { unsupported: "That file doesn't look like a text document." };
     if (!(await this.#scanAttachment(name, "text/plain", bytes))) {
-      return { unsupported: "That document could not pass security scanning. Ask the bot owner to check the file scanner." };
+      return {
+        unsupported: "That document could not pass security scanning. Ask the bot owner to check the file scanner.",
+      };
     }
     const objectId = `tg_${crypto.randomUUID().replaceAll("-", "")}`;
     try {

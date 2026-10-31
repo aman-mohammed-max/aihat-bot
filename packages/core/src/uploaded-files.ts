@@ -72,6 +72,7 @@ export class UploadedFilesService {
     await this.#requireOwnedBot(input);
     validateFileName(input.fileName);
     const contentType = normalizeContentType(input.contentType);
+    validateExtension(input.fileName, contentType);
     validateFileBytes(contentType, input.bytes);
     const usage = await this.#files.getOwnedUploadedFileUsage({
       tenantId: input.tenantId,
@@ -208,12 +209,20 @@ export function validateFileName(fileName: string): void {
     fileName.length < 1 ||
     fileName.length > 255 ||
     fileName.trim() !== fileName ||
-    /[\\/\u0000-\u001f\u007f]/.test(fileName) ||
+    hasInvalidPathCharacters(fileName) ||
     fileName === "." ||
     fileName === ".."
   ) {
     throw new AppError("VALIDATION_ERROR", "File name is invalid.", 400);
   }
+}
+
+function hasInvalidPathCharacters(value: string): boolean {
+  if (value.includes("/") || value.includes("\\")) return true;
+  return Array.from(value).some((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code <= 0x1f || code === 0x7f;
+  });
 }
 
 export function normalizeContentType(contentType: string): string {
@@ -222,6 +231,26 @@ export function normalizeContentType(contentType: string): string {
     throw new AppError("UNSUPPORTED_CAPABILITY", "This file type is not supported.", 415);
   }
   return normalized;
+}
+
+function validateExtension(fileName: string, contentType: string): void {
+  const separator = fileName.lastIndexOf(".");
+  if (separator < 0) return;
+  const extension = fileName.slice(separator + 1).toLowerCase();
+  const expected: Readonly<Record<string, string>> = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    pdf: "application/pdf",
+    txt: "text/plain",
+    md: "text/markdown",
+    markdown: "text/markdown",
+    csv: "text/csv",
+  };
+  if (expected[extension] !== contentType) {
+    throw new AppError("VALIDATION_ERROR", "File name extension does not match its supported content type.", 415);
+  }
 }
 
 export function validateFileBytes(contentType: string, bytes: Uint8Array): void {

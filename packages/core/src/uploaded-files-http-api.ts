@@ -1,7 +1,7 @@
 import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
-import { MAX_UPLOADED_FILE_BYTES, UploadedFilesService, validateFileName } from "./uploaded-files.js";
+import { MAX_UPLOADED_FILE_BYTES, type UploadedFilesService, validateFileName } from "./uploaded-files.js";
 import type { BotId } from "./types.js";
 
 const BOT = "(bot_[a-f0-9-]{36})";
@@ -55,7 +55,7 @@ export function createUploadedFilesApiHandler(
           tenantId: principal.tenantId,
           ownerId: principal.ownerId,
           botId,
-          fileId: content[2]!,
+          fileId: content[2] ?? "",
         });
         return new Response(result.body, {
           headers: {
@@ -75,7 +75,7 @@ export function createUploadedFilesApiHandler(
           tenantId: principal.tenantId,
           ownerId: principal.ownerId,
           botId,
-          fileId: scan[2]!,
+          fileId: scan[2] ?? "",
         });
         return Response.json({ file }, { ...noStore, status: 200 });
       }
@@ -85,7 +85,7 @@ export function createUploadedFilesApiHandler(
           tenantId: principal.tenantId,
           ownerId: principal.ownerId,
           botId,
-          fileId: item[2]!,
+          fileId: item[2] ?? "",
         });
         return Response.json({ file }, noStore);
       }
@@ -95,7 +95,7 @@ export function createUploadedFilesApiHandler(
           tenantId: principal.tenantId,
           ownerId: principal.ownerId,
           botId,
-          fileId: item[2]!,
+          fileId: item[2] ?? "",
         });
         return new Response(null, { status: 204, headers: noStore.headers });
       }
@@ -133,7 +133,10 @@ function decodeFileName(header: string | null): string {
 
 async function readUploadBytes(request: Request): Promise<Uint8Array> {
   const declared = request.headers.get("content-length");
-  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) < 1 || Number(declared) > MAX_UPLOADED_FILE_BYTES)) {
+  if (
+    declared !== null &&
+    (!/^\d+$/.test(declared) || Number(declared) < 1 || Number(declared) > MAX_UPLOADED_FILE_BYTES)
+  ) {
     throw new AppError("VALIDATION_ERROR", "File size is outside the supported range.", 413);
   }
   if (!request.body) throw new AppError("VALIDATION_ERROR", "File data is required.", 400);

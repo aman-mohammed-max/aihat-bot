@@ -138,6 +138,19 @@ export interface ScheduledTask {
   updatedAt: string;
 }
 
+export interface UploadedFile {
+  id: string;
+  botId: string;
+  fileName: string;
+  contentType: string;
+  size: number;
+  scanStatus: "pending_scan" | "clean" | "rejected" | "scan_failed";
+  scanner?: string;
+  scannedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ConversationSummary {
   id: string;
   platform: "internal" | "telegram" | "web_chat" | "api";

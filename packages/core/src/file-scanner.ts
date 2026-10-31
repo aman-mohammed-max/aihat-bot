@@ -2,12 +2,13 @@ import { AppError } from "./errors.js";
 import type { MalwareScanner } from "./ports.js";
 
 const MAX_SCAN_RESPONSE_BYTES = 4_096;
+type ScannerFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export interface HttpMalwareScannerOptions {
   readonly endpoint: string;
   readonly token: string;
   readonly allowedOrigins: ReadonlySet<string>;
-  readonly fetch?: typeof fetch;
+  readonly fetch?: ScannerFetch;
   readonly timeoutMs?: number;
 }
 
@@ -15,13 +16,17 @@ export function createOptionalHttpMalwareScanner(input: {
   readonly endpoint?: string;
   readonly token?: string;
   readonly allowedOrigins: ReadonlySet<string>;
-  readonly fetch?: typeof fetch;
+  readonly fetch?: ScannerFetch;
 }): HttpMalwareScanner | undefined {
   const endpoint = input.endpoint?.trim() ?? "";
   const token = input.token?.trim() ?? "";
   if (!endpoint && !token && input.allowedOrigins.size === 0) return undefined;
   if (!endpoint || !token || input.allowedOrigins.size === 0) {
-    throw new AppError("VALIDATION_ERROR", "File scanner endpoint, credential, and allowed origin must be configured together.", 500);
+    throw new AppError(
+      "VALIDATION_ERROR",
+      "File scanner endpoint, credential, and allowed origin must be configured together.",
+      500,
+    );
   }
   return new HttpMalwareScanner({
     endpoint,
@@ -35,7 +40,7 @@ export function createOptionalHttpMalwareScanner(input: {
 export class HttpMalwareScanner implements MalwareScanner {
   readonly #endpoint: string;
   readonly #token: string;
-  readonly #fetch: typeof fetch;
+  readonly #fetch: ScannerFetch;
   readonly #timeoutMs: number;
 
   constructor(options: HttpMalwareScannerOptions) {
@@ -74,7 +79,11 @@ export class HttpMalwareScanner implements MalwareScanner {
     readonly bytes: Uint8Array;
     readonly signal?: AbortSignal;
   }): Promise<{ readonly verdict: "clean" | "infected"; readonly scanner: string }> {
-    if (!(input.bytes instanceof Uint8Array) || input.bytes.byteLength < 1 || input.bytes.byteLength > 25 * 1024 * 1024) {
+    if (
+      !(input.bytes instanceof Uint8Array) ||
+      input.bytes.byteLength < 1 ||
+      input.bytes.byteLength > 25 * 1024 * 1024
+    ) {
       throw new AppError("VALIDATION_ERROR", "File scan input exceeds the supported size.", 413);
     }
     const controller = new AbortController();

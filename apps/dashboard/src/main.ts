@@ -21,6 +21,7 @@ import type {
   TenantInvitation,
   WorkspaceMembership,
   UsageSummary,
+  UploadedFile,
 } from "./types.js";
 import { escapeHtml, icon } from "./view-utils.js";
 import { botManagementView } from "./views/bot.js";
@@ -293,17 +294,19 @@ async function loadBotResources(botId: string): Promise<void> {
     state.conversationHasMore = false;
     state.memoryRecords = [];
     state.botVersions = [];
+    state.uploadedFiles = [];
     state.botAccess = undefined;
     state.invitationToken = undefined;
   }
   activeBotResourcesId = botId;
   const base = `/v1/bots/${encodeURIComponent(botId)}`;
-  const [bot, telegram, skills, servers, tasks] = await Promise.allSettled([
+  const [bot, telegram, skills, servers, tasks, files] = await Promise.allSettled([
     api<Bot>(base),
     api<TelegramSettings>(`${base}/telegram`),
     api<Skill[]>(`${base}/skills`),
     api<McpServer[]>(`${base}/mcp-servers`),
     api<{ tasks: ScheduledTask[] }>(`${base}/scheduled-tasks`),
+    api<{ items: UploadedFile[] }>(`${base}/files`),
   ]);
   state.pageError = undefined;
   if (bot.status === "fulfilled") state.activeBot = bot.value;
@@ -315,6 +318,7 @@ async function loadBotResources(botId: string): Promise<void> {
   state.installedSkills = skills.status === "fulfilled" ? skills.value : [];
   state.servers = servers.status === "fulfilled" ? servers.value : [];
   state.tasks = tasks.status === "fulfilled" ? tasks.value.tasks : [];
+  state.uploadedFiles = files.status === "fulfilled" ? files.value.items : [];
   const tools = await Promise.all(
     state.servers
       .filter((server) => server.status === "connected")
@@ -509,6 +513,9 @@ async function handleClick(event: MouseEvent): Promise<void> {
     else if (action === "disable-bot" || action === "enable-bot") await toggleBot(action === "disable-bot");
     else if (action === "disconnect-telegram") await disconnectTelegram();
     else if (action === "delete-bot") await deleteBot();
+    else if (action === "scan-uploaded-file") await scanUploadedFile(target.dataset.fileId ?? "");
+    else if (action === "delete-uploaded-file") await deleteUploadedFile(target.dataset.fileId ?? "");
+    else if (action === "download-uploaded-file") await downloadUploadedFile(target.dataset.fileId ?? "");
     else if (action.startsWith("mcp-connect:")) await connectMcp(action.slice("mcp-connect:".length));
     else if (action.startsWith("mcp-delete:")) await deleteMcp(action.slice("mcp-delete:".length));
     else if (action === "toggle-mcp-tool") await toggleMcpTool(target);
@@ -618,6 +625,10 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
       case "memory-record-form":
         await saveBotMemory(data);
         break;
+      case "uploaded-file-form":
+        await uploadBotFiles(data);
+        form.reset();
+        break;
     }
   } catch (error) {
     if (form.id === "login-form") {
@@ -682,6 +693,7 @@ function clearSession(): void {
   accessToken = "";
   state.principal = undefined;
   state.bots = [];
+  state.uploadedFiles = [];
   state.catalog = [];
   state.activeBot = undefined;
   state.newToken = undefined;
@@ -1129,6 +1141,122 @@ async function deleteBotMemory(key: string): Promise<void> {
   state.memoryRecords = state.memoryRecords.filter((item) => item.key !== key);
   render();
   showToast("Memory note deleted");
+}
+
+async function uploadBotFiles(data: FormData): Promise<void> {
+  const bot = requireActiveBot();
+  const files = data.getAll("files").filter((value): value is File => value instanceof File);
+  if (files.length === 0) throw new Error("Choose at least one file to upload.");
+  for (const file of files) {
+    const contentType = supportedUploadedFileType(file);
+    const result = await api<{ file: UploadedFile }>(`${botBase(bot.id)}/files`, {
+      method: "POST",
+      headers: {
+        "content-type": contentType,
+        "x-file-name-encoded": encodeURIComponent(file.name),
+      },
+      body: file,
+    });
+    state.uploadedFiles = [result.file, ...state.uploadedFiles.filter((item) => item.id !== result.file.id)];
+  }
+  await loadUploadedFiles(bot.id);
+  render();
+  showToast(files.length === 1 ? "File uploaded" : `${files.length} files uploaded`);
+}
+
+async function scanUploadedFile(fileId: string): Promise<void> {
+  const bot = requireActiveBot();
+  if (!fileId) throw new Error("Choose a file to scan.");
+  const result = await api<{ file: UploadedFile }>(`${botBase(bot.id)}/files/${encodeURIComponent(fileId)}/scan`, {
+    method: "POST",
+  });
+  state.uploadedFiles = state.uploadedFiles.map((file) => (file.id === fileId ? result.file : file));
+  render();
+  showToast(result.file.scanStatus === "clean" ? "File passed malware scanning" : "File scan completed");
+}
+
+async function deleteUploadedFile(fileId: string): Promise<void> {
+  const bot = requireActiveBot();
+  const file = state.uploadedFiles.find((item) => item.id === fileId);
+  if (!fileId || !file) throw new Error("Choose a stored file first.");
+  if (
+    !(await askConfirmation(
+      `Delete “${file.fileName}”?`,
+      "This permanently removes the stored file.",
+      "Delete file",
+      true,
+    ))
+  )
+    return;
+  await api(`${botBase(bot.id)}/files/${encodeURIComponent(fileId)}`, { method: "DELETE" });
+  state.uploadedFiles = state.uploadedFiles.filter((item) => item.id !== fileId);
+  render();
+  showToast("File deleted");
+}
+
+async function downloadUploadedFile(fileId: string): Promise<void> {
+  const bot = requireActiveBot();
+  const file = state.uploadedFiles.find((item) => item.id === fileId);
+  if (file?.scanStatus !== "clean") throw new Error("Only a file that passed scanning can be downloaded.");
+  const response = await fetch(`${botBase(bot.id)}/files/${encodeURIComponent(fileId)}/content`, {
+    headers: { authorization: `Bearer ${accessToken}`, "cache-control": "no-store" },
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    let error: unknown;
+    try {
+      error = await response.json();
+    } catch {
+      error = undefined;
+    }
+    const message = error && typeof error === "object" ? (error as Record<string, unknown>).message : undefined;
+    throw new ApiError(
+      typeof message === "string" ? message : `File download failed (${response.status}).`,
+      response.status,
+    );
+  }
+  const objectUrl = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = file.fileName;
+  link.hidden = true;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1_000);
+}
+
+async function loadUploadedFiles(botId: string): Promise<void> {
+  const result = await api<{ items: UploadedFile[] }>(`${botBase(botId)}/files`);
+  state.uploadedFiles = result.items;
+}
+
+function supportedUploadedFileType(file: File): string {
+  const allowed = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "application/pdf",
+    "text/plain",
+    "text/markdown",
+    "text/csv",
+  ]);
+  const hasExtension = file.name.includes(".");
+  const extension = hasExtension ? file.name.split(".").at(-1)?.toLowerCase() : undefined;
+  const byExtension: Record<string, string> = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    pdf: "application/pdf",
+    txt: "text/plain",
+    md: "text/markdown",
+    csv: "text/csv",
+  };
+  const contentType = hasExtension ? byExtension[extension ?? ""] : allowed.has(file.type) ? file.type : undefined;
+  if (!contentType) throw new Error(`“${file.name}” has an unsupported file type.`);
+  return contentType;
 }
 
 async function toggleBot(disable: boolean): Promise<void> {
