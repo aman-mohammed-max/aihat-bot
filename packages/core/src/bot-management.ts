@@ -4,12 +4,22 @@ import { AppError } from "./errors.js";
 import type { BotManagementRepository, BotRepository } from "./ports.js";
 import type { SecretWriter } from "./ports.js";
 import type { BotCredentialApprovalService } from "./bot-credential-approvals.js";
-import type { BotDefinition, BotId, BotVersionHistoryItem, ModelConfig, ModelRetryPolicySettings } from "./types.js";
+import type {
+  BotCollaboratorRole,
+  BotDefinition,
+  BotId,
+  BotVersionHistoryItem,
+  ModelConfig,
+  ModelRetryPolicySettings,
+  UserId,
+} from "./types.js";
 import type { BotSettingsPatch } from "./ports.js";
 
 const BOT_ID = "bot_[a-f0-9-]{36}";
 const BOT_COLLECTION = "/v1/bots";
 const BOT_ITEM_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})$`);
+const BOT_COLLABORATORS_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/collaborators$`);
+const BOT_COLLABORATOR_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/collaborators/([^/]+)$`);
 const BOT_VERSIONS_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/versions$`);
 const BOT_ACTION_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/(enable|disable)$`);
 const BOT_CREDENTIAL_APPROVAL_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/credential-approval$`);
@@ -70,6 +80,8 @@ export function createBotManagementApiHandler(
     const pathname = url.pathname;
     const isCollection = pathname === BOT_COLLECTION;
     const item = BOT_ITEM_ROUTE.exec(pathname);
+    const collaborators = BOT_COLLABORATORS_ROUTE.exec(pathname);
+    const collaborator = BOT_COLLABORATOR_ROUTE.exec(pathname);
     const versions = BOT_VERSIONS_ROUTE.exec(pathname);
     const action = BOT_ACTION_ROUTE.exec(pathname);
     const credentialApproval = BOT_CREDENTIAL_APPROVAL_ROUTE.exec(pathname);
@@ -79,6 +91,8 @@ export function createBotManagementApiHandler(
     if (
       !isCollection &&
       !item &&
+      !collaborators &&
+      !collaborator &&
       !versions &&
       !action &&
       !credentialApproval &&
@@ -93,8 +107,59 @@ export function createBotManagementApiHandler(
       if (isCollection) {
         await requireApiScope(principal, "bots:read");
         if (request.method !== "GET") return methodNotAllowed("GET");
-        const owned = await management.listOwned(principal.tenantId, principal.ownerId);
-        return Response.json(owned.map(botSummary), { headers: { "cache-control": "no-store" } });
+        const [owned, shared] = await Promise.all([
+          management.listOwned(principal.tenantId, principal.ownerId),
+          management.listCollaborated({ tenantId: principal.tenantId, userId: principal.ownerId }),
+        ]);
+        const summaries = [
+          ...owned.map((bot) => botSummary(bot)),
+          ...shared.map(({ bot, role }) => botSummary(bot, role)),
+        ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id));
+        return Response.json(summaries, { headers: { "cache-control": "no-store" } });
+      }
+
+      if (collaborators || collaborator) {
+        const botId = (collaborators?.[1] ?? collaborator?.[1]) as BotId;
+        if (collaborators && request.method === "GET") {
+          await requireApiScope(principal, "bots:read");
+          const items = await management.listBotCollaborators({
+            tenantId: principal.tenantId,
+            ownerId: principal.ownerId,
+            botId,
+          });
+          return Response.json({ items }, { headers: { "cache-control": "no-store" } });
+        }
+        if (collaborators && request.method === "PUT") {
+          await requireApiScope(principal, "bots:write");
+          const body = await readJsonBody(request, 4096);
+          if (Object.keys(body).some((key) => !["userId", "role"].includes(key))) {
+            throw new AppError("VALIDATION_ERROR", "Collaborator update contains unsupported fields.", 400);
+          }
+          const userId = parseCollaboratorUserId(body.userId);
+          const role = parseCollaboratorRole(body.role);
+          const item = await management.setBotCollaborator({
+            tenantId: principal.tenantId,
+            ownerId: principal.ownerId,
+            botId,
+            userId,
+            role,
+            now: new Date().toISOString(),
+          });
+          return Response.json({ item }, { status: 200, headers: { "cache-control": "no-store" } });
+        }
+        if (collaborator && request.method === "DELETE") {
+          await requireApiScope(principal, "bots:write");
+          const userId = decodeCollaboratorUserId(collaborator[2] ?? "");
+          await management.removeBotCollaborator({
+            tenantId: principal.tenantId,
+            ownerId: principal.ownerId,
+            botId,
+            userId,
+            now: new Date().toISOString(),
+          });
+          return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+        }
+        return methodNotAllowed(collaborators ? "GET, PUT" : "DELETE");
       }
 
       if (versions) {
@@ -239,12 +304,44 @@ export function createBotManagementApiHandler(
       if (request.method === "GET") {
         await requireApiScope(principal, "bots:read");
         const bot = await bots.get(principal.tenantId, botId);
-        if (!bot || bot.ownerId !== principal.ownerId) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
-        return Response.json(botSummary(bot), { headers: { "cache-control": "no-store" } });
+        if (bot?.ownerId === principal.ownerId) {
+          return Response.json(botSummary(bot), { headers: { "cache-control": "no-store" } });
+        }
+        const shared = await management.getCollaborated({
+          tenantId: principal.tenantId,
+          botId,
+          userId: principal.ownerId,
+        });
+        if (!shared) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+        return Response.json(botSummary(shared.bot, shared.role), { headers: { "cache-control": "no-store" } });
       }
       if (request.method === "PATCH") {
         await requireApiScope(principal, "bots:write");
         const body = await readJsonBody(request);
+        const currentBot = await bots.get(principal.tenantId, botId);
+        if (!currentBot) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+        if (currentBot.ownerId !== principal.ownerId) {
+          if (
+            Object.keys(body).some((key) => !["expectedVersion", "name", "description", "systemPrompt"].includes(key))
+          ) {
+            throw new AppError("VALIDATION_ERROR", "Collaborators can update only bot identity settings.", 400);
+          }
+          if (!Number.isSafeInteger(body.expectedVersion) || (body.expectedVersion as number) < 1) {
+            throw new AppError("VALIDATION_ERROR", "expectedVersion must be a positive integer.", 400);
+          }
+          const settings: Record<string, unknown> = {};
+          for (const key of ["name", "description", "systemPrompt"] as const) {
+            if (body[key] !== undefined) settings[key] = body[key];
+          }
+          const updated = await management.updateCollaborated({
+            tenantId: principal.tenantId,
+            userId: principal.ownerId,
+            botId,
+            expectedVersion: body.expectedVersion as number,
+            patch: validateBotSettingsPatch(settings),
+          });
+          return Response.json(botSummary(updated, "editor"), { headers: { "cache-control": "no-store" } });
+        }
         if (
           Object.keys(body).some(
             (key) =>
@@ -469,7 +566,7 @@ function optionalModelIdentifier(value: unknown, field: string): string | undefi
   return value.trim();
 }
 
-function botSummary(bot: BotDefinition) {
+function botSummary(bot: BotDefinition, collaboratorRole?: BotCollaboratorRole) {
   const { credentialRef, ...model } = bot.model;
   return {
     id: bot.id,
@@ -477,13 +574,39 @@ function botSummary(bot: BotDefinition) {
     description: bot.description,
     systemPrompt: bot.systemPrompt,
     memoryEnabled: bot.memoryEnabled ?? false,
-    model: { ...model, hasCredential: credentialRef !== undefined },
+    model: collaboratorRole
+      ? { providerId: model.providerId, model: model.model, hasCredential: credentialRef !== undefined }
+      : { ...model, hasCredential: credentialRef !== undefined },
     visibility: bot.visibility,
     status: bot.status,
     version: bot.version,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
+    ...(collaboratorRole ? { collaboratorRole } : {}),
   };
+}
+
+function parseCollaboratorUserId(value: unknown): UserId {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) {
+    throw new AppError("VALIDATION_ERROR", "Collaborator user ID is invalid.", 400);
+  }
+  return value as UserId;
+}
+
+function decodeCollaboratorUserId(value: string): UserId {
+  try {
+    return parseCollaboratorUserId(decodeURIComponent(value));
+  } catch (cause) {
+    if (cause instanceof AppError) throw cause;
+    throw new AppError("VALIDATION_ERROR", "Collaborator user ID is invalid.", 400);
+  }
+}
+
+function parseCollaboratorRole(value: unknown): BotCollaboratorRole {
+  if (value !== "viewer" && value !== "editor") {
+    throw new AppError("VALIDATION_ERROR", "Collaborator role must be viewer or editor.", 400);
+  }
+  return value;
 }
 
 async function readJsonBody(request: Request, maxBytes = 16_384): Promise<Record<string, unknown>> {

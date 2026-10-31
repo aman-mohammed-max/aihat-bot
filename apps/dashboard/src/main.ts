@@ -4,6 +4,7 @@ import { createInitialState, type UiState } from "./state.js";
 import type {
   Bot,
   BotAccessSettings,
+  BotCollaborator,
   BotVersion,
   BotMemoryRecord,
   AuditLogEvent,
@@ -260,6 +261,12 @@ async function applyRoute(): Promise<void> {
   }
   if (state.page === "bot" && state.botId) {
     if (activeBotResourcesId !== state.botId) await loadBotResources(state.botId);
+    if (state.activeBot?.collaboratorRole && !["overview", "configuration"].includes(state.botTab)) {
+      state.botTab = "overview";
+      const safeHash = `#/bot/${encodeURIComponent(state.botId)}/overview`;
+      history.replaceState(null, "", `${location.pathname}${location.search}${safeHash}`);
+      state.route = safeHash.slice(2);
+    }
     if (state.botTab === "versions") {
       try {
         if (activeBotVersionsId !== state.botId) await loadBotVersions(state.botId);
@@ -295,13 +302,14 @@ async function applyRoute(): Promise<void> {
     }
     if (state.botTab === "access") {
       try {
-        await loadBotAccess(state.botId);
+        await Promise.all([loadBotAccess(state.botId), loadBotCollaborators(state.botId)]);
       } catch (error) {
         state.pageError = asMessage(error);
       }
     }
   } else if (["mcp", "automation", "skills"].includes(state.page)) {
-    const selected = state.botId ?? state.bots[0]?.id;
+    const ownedBots = state.bots.filter((bot) => !bot.collaboratorRole);
+    const selected = ownedBots.find((bot) => bot.id === state.botId)?.id ?? ownedBots[0]?.id;
     state.botId = selected;
     if (selected && activeBotResourcesId !== selected) await loadBotResources(selected);
   }
@@ -369,10 +377,31 @@ async function loadBotResources(botId: string): Promise<void> {
     state.uploadedFiles = [];
     state.toolRecoveries = [];
     state.botAccess = undefined;
+    state.botCollaborators = [];
     state.invitationToken = undefined;
   }
   activeBotResourcesId = botId;
   const base = `/v1/bots/${encodeURIComponent(botId)}`;
+  if (state.bots.find((bot) => bot.id === botId)?.collaboratorRole) {
+    try {
+      state.activeBot = await api<Bot>(base);
+      state.pageError = undefined;
+    } catch (error) {
+      state.activeBot = undefined;
+      state.pageError = asMessage(error);
+    }
+    state.telegram = undefined;
+    state.installedSkills = [];
+    state.servers = [];
+    state.toolsByServer = {};
+    state.tasks = [];
+    state.uploadedFiles = [];
+    state.toolRecoveries = [];
+    state.botAccess = undefined;
+    state.botCollaborators = [];
+    state.botOwnershipTransfer = { item: null };
+    return;
+  }
   const [bot, telegram, skills, servers, tasks, files, toolRecoveries, ownershipTransfer] = await Promise.allSettled([
     api<Bot>(base),
     api<TelegramSettings>(`${base}/telegram`),
@@ -397,6 +426,7 @@ async function loadBotResources(botId: string): Promise<void> {
   state.toolRecoveries = toolRecoveries.status === "fulfilled" ? toolRecoveries.value.recoveries : [];
   state.botOwnershipTransfer =
     ownershipTransfer.status === "fulfilled" ? { item: ownershipTransfer.value.item } : { item: null };
+  state.botCollaborators = [];
   const tools = await Promise.all(
     state.servers
       .filter((server) => server.status === "connected")
@@ -414,6 +444,11 @@ async function loadBotResources(botId: string): Promise<void> {
 
 async function loadBotAccess(botId: string): Promise<void> {
   state.botAccess = await api<BotAccessSettings>(`${botBase(botId)}/access`);
+}
+
+async function loadBotCollaborators(botId: string): Promise<void> {
+  const response = await api<{ items: BotCollaborator[] }>(`${botBase(botId)}/collaborators`);
+  state.botCollaborators = response.items;
 }
 
 async function loadBotVersions(botId: string): Promise<void> {
@@ -611,6 +646,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
     else if (action === "load-telegram-grants") await loadTelegramGrants(Number(target.dataset.userId));
     else if (action === "load-older-conversation-messages") await loadOlderConversationMessages();
     else if (action === "revoke-bot-grant") await revokeBotGrant(target.dataset.grantId ?? "");
+    else if (action === "remove-bot-collaborator") await removeBotCollaborator(target.dataset.userId ?? "");
     else if (action === "delete-memory-record") await deleteBotMemory(target.dataset.memoryKey ?? "");
     else if (action === "toggle-task") await toggleTask(target);
     else if (action === "retry-task") await retryScheduledTask(target);
@@ -683,6 +719,10 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
         break;
       case "bot-user-grant-form":
         await createBotAccessGrant(data, false);
+        form.reset();
+        break;
+      case "bot-collaborator-form":
+        await saveBotCollaborator(data);
         form.reset();
         break;
       case "bot-invitation-form":
@@ -1241,6 +1281,38 @@ async function revokeBotGrant(grantId: string): Promise<void> {
   await loadBotAccess(bot.id);
   render();
   showToast("Bot access revoked");
+}
+
+async function saveBotCollaborator(data: FormData): Promise<void> {
+  const bot = requireActiveBot();
+  const userId = String(data.get("userId") ?? "").trim();
+  const role = String(data.get("role") ?? "");
+  if (!userId) throw new Error("Enter an active workspace member ID.");
+  await api(`${botBase(bot.id)}/collaborators`, {
+    method: "PUT",
+    body: jsonBody({ userId, role }),
+  });
+  await loadBotCollaborators(bot.id);
+  render();
+  showToast("Bot collaborator saved");
+}
+
+async function removeBotCollaborator(userId: string): Promise<void> {
+  const bot = requireActiveBot();
+  if (!userId) return;
+  if (
+    !(await askConfirmation(
+      "Remove bot collaborator?",
+      "They will lose access to this bot immediately. Their workspace membership is unchanged.",
+      "Remove collaborator",
+    ))
+  ) {
+    return;
+  }
+  await api(`${botBase(bot.id)}/collaborators/${encodeURIComponent(userId)}`, { method: "DELETE" });
+  await loadBotCollaborators(bot.id);
+  render();
+  showToast("Bot collaborator removed");
 }
 
 async function toggleBotMemory(data: FormData): Promise<void> {
@@ -2088,7 +2160,11 @@ function requireActiveBot(): Bot {
 
 function selectedBotId(selectId: string): string {
   const value = document.getElementById(selectId);
-  const selected = value instanceof HTMLSelectElement ? value.value : (state.botId ?? state.bots[0]?.id);
+  const ownedBots = state.bots.filter((bot) => !bot.collaboratorRole);
+  const selected =
+    value instanceof HTMLSelectElement
+      ? value.value
+      : (ownedBots.find((bot) => bot.id === state.botId)?.id ?? ownedBots[0]?.id);
   if (!selected) throw new Error("Create a bot before setting up this feature.");
   return selected;
 }

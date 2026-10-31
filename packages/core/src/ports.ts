@@ -3,6 +3,9 @@ import type {
   AgentResponse,
   BotDefinition,
   BotVersionHistoryItem,
+  BotCollaborator,
+  BotCollaboratorRole,
+  CollaboratedBot,
   BotId,
   ConversationId,
   ConversationSummary,
@@ -51,8 +54,46 @@ export type BotSettingsPatch = Partial<
   Pick<BotDefinition, "name" | "description" | "systemPrompt" | "model" | "memoryEnabled">
 >;
 
+export type BotCollaboratorSettingsPatch = Partial<Pick<BotDefinition, "name" | "description" | "systemPrompt">>;
+
 export interface BotManagementRepository {
   listOwned(tenantId: TenantId, ownerId: UserId): Promise<readonly BotDefinition[]>;
+  listCollaborated(input: {
+    readonly tenantId: TenantId;
+    readonly userId: UserId;
+  }): Promise<readonly CollaboratedBot[]>;
+  getCollaborated(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly userId: UserId;
+  }): Promise<CollaboratedBot | undefined>;
+  listBotCollaborators(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+  }): Promise<readonly BotCollaborator[]>;
+  setBotCollaborator(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly userId: UserId;
+    readonly role: BotCollaboratorRole;
+    readonly now: string;
+  }): Promise<BotCollaborator>;
+  removeBotCollaborator(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly userId: UserId;
+    readonly now: string;
+  }): Promise<void>;
+  updateCollaborated(input: {
+    readonly tenantId: TenantId;
+    readonly userId: UserId;
+    readonly botId: BotId;
+    readonly expectedVersion: number;
+    readonly patch: BotCollaboratorSettingsPatch;
+  }): Promise<BotDefinition>;
   listVersions(input: {
     readonly tenantId: TenantId;
     readonly ownerId: UserId;

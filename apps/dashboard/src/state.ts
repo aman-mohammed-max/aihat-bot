@@ -2,6 +2,7 @@ import type {
   Bot,
   BotMemoryRecord,
   BotAccessSettings,
+  BotCollaborator,
   BotVersion,
   AuditLogEvent,
   CreationSession,
@@ -57,6 +58,7 @@ export interface UiState {
   conversationHasMore: boolean;
   memoryRecords: BotMemoryRecord[];
   botAccess?: BotAccessSettings | undefined;
+  botCollaborators: BotCollaborator[];
   invitationToken?: string | undefined;
   usage?: UsageSummary | undefined;
   auditLogs: AuditLogEvent[];
@@ -114,6 +116,7 @@ export function createInitialState(): UiState {
     factoryAssistantBusy: false,
     factoryAssistantIdea: "",
     botAccess: undefined,
+    botCollaborators: [],
     botOwnershipTransfer: { item: null },
     invitationToken: undefined,
     chatLines: [],

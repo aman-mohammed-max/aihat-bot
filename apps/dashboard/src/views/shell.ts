@@ -3,7 +3,7 @@ import { button, escapeHtml, icon } from "../view-utils.js";
 
 const navigation = [
   { id: "dashboard", label: "Overview", glyph: "home" },
-  { id: "bots", label: "My bots", glyph: "bots", count: true },
+  { id: "bots", label: "Bots", glyph: "bots", count: true },
   { id: "skills", label: "Skills", glyph: "spark" },
   { id: "mcp", label: "MCP servers", glyph: "plug" },
   { id: "automation", label: "Automation", glyph: "clock" },
@@ -89,7 +89,7 @@ export function shell(state: UiState, title: string, subtitle: string, content: 
 export function pageTitle(page: string, botName?: string): { title: string; subtitle: string } {
   const labels: Record<string, [string, string]> = {
     dashboard: ["Overview", "Create, configure, and launch your Telegram bots."],
-    bots: ["My bots", "Create, configure, and operate your AI assistants."],
+    bots: ["Bots", "Manage your bots and the bots shared with you."],
     create: ["Create a bot", "A guided setup for a purpose-built Telegram assistant."],
     skills: ["Skills marketplace", "Install reviewed capabilities on the bots you own."],
     mcp: ["MCP connections", "Connect remote tools and grant each one deliberately."],

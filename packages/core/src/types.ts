@@ -99,6 +99,22 @@ export interface BotDefinition {
   readonly updatedAt: string;
 }
 
+export type BotCollaboratorRole = "viewer" | "editor";
+
+/** A workspace member explicitly trusted to view or edit a bot's creative identity. */
+export interface BotCollaborator {
+  readonly userId: UserId;
+  readonly role: BotCollaboratorRole;
+  readonly memberStatus: "active" | "inactive";
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface CollaboratedBot {
+  readonly bot: BotDefinition;
+  readonly role: BotCollaboratorRole;
+}
+
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
 export interface ConversationImage {

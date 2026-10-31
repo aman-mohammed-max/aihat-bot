@@ -8,20 +8,25 @@ export function botManagementView(state: UiState): string {
   if (!bot)
     return `<section class="panel empty-panel"><div class="empty-state"><span class="empty-icon">${icon("bots", 24)}</span><h3>Bot not found</h3><p>This bot may have been deleted or may not belong to this workspace.</p><button class="button button-primary" data-route="bots">Back to my bots</button></div></section>`;
 
-  const tabs = [
-    ["overview", "Overview", "home"],
-    ["configuration", "Configuration", "sliders"],
-    ["versions", "History", "clock"],
-    ["access", "Access", "shield"],
-    ["telegram", "Telegram", "globe"],
-    ["files", "Files", "paperclip"],
-    ["conversations", "Conversations", "chat"],
-    ["memory", "Memory", "spark"],
-    ["skills", "Skills", "spark"],
-    ["mcp", "MCP tools", "plug"],
-    ["automation", "Automation", "clock"],
-    ["tool-recovery", "Tool recovery", "shield"],
-  ];
+  const tabs = bot.collaboratorRole
+    ? [
+        ["overview", "Overview", "home"],
+        ["configuration", "Configuration", "sliders"],
+      ]
+    : [
+        ["overview", "Overview", "home"],
+        ["configuration", "Configuration", "sliders"],
+        ["versions", "History", "clock"],
+        ["access", "Access", "shield"],
+        ["telegram", "Telegram", "globe"],
+        ["files", "Files", "paperclip"],
+        ["conversations", "Conversations", "chat"],
+        ["memory", "Memory", "spark"],
+        ["skills", "Skills", "spark"],
+        ["mcp", "MCP tools", "plug"],
+        ["automation", "Automation", "clock"],
+        ["tool-recovery", "Tool recovery", "shield"],
+      ];
   const tabMarkup = tabs
     .map(
       ([id, label, glyph]) =>
@@ -29,7 +34,8 @@ export function botManagementView(state: UiState): string {
     )
     .join("");
 
-  return `<section class="bot-detail-head"><button class="back-link" data-route="bots">${icon("chevron", 14)} My bots</button><div class="bot-title-line"><span class="bot-avatar bot-avatar-large">${escapeHtml(monogram(bot.name))}</span><div class="bot-title-copy"><div class="bot-name-row"><h2>${escapeHtml(bot.name)}</h2>${statusPill(bot.status)}</div><p>${escapeHtml(bot.description || "No description yet.")}</p></div><div class="bot-head-actions">${bot.status === "published" ? button("Disable", "disable-bot", "secondary", "pause") : bot.status === "disabled" ? button("Enable", "enable-bot", "primary", "play") : ""}<button class="icon-button icon-danger" aria-label="Delete bot" title="Delete bot" data-action="delete-bot">${icon("trash", 17)}</button></div></div><div class="bot-meta-line"><span>Bot ID <code>${escapeHtml(bot.id)}</code></span><span>Version ${bot.version}</span><span>Updated ${escapeHtml(formatDate(bot.updatedAt))}</span><span class="bot-meta-model">${icon("spark", 13)} ${escapeHtml(bot.model.providerId)} / ${escapeHtml(bot.model.model)}</span></div></section>
+  return `<section class="bot-detail-head"><button class="back-link" data-route="bots">${icon("chevron", 14)} ${bot.collaboratorRole ? "Bots" : "My bots"}</button><div class="bot-title-line"><span class="bot-avatar bot-avatar-large">${escapeHtml(monogram(bot.name))}</span><div class="bot-title-copy"><div class="bot-name-row"><h2>${escapeHtml(bot.name)}</h2>${statusPill(bot.status)}</div><p>${escapeHtml(bot.description || "No description yet.")}</p></div>${bot.collaboratorRole ? `<span class="quiet-badge">${bot.collaboratorRole === "editor" ? "Editor access" : "Viewer access"}</span>` : `<div class="bot-head-actions">${bot.status === "published" ? button("Disable", "disable-bot", "secondary", "pause") : bot.status === "disabled" ? button("Enable", "enable-bot", "primary", "play") : ""}<button class="icon-button icon-danger" aria-label="Delete bot" title="Delete bot" data-action="delete-bot">${icon("trash", 17)}</button></div>`}</div><div class="bot-meta-line"><span>Bot ID <code>${escapeHtml(bot.id)}</code></span><span>Version ${bot.version}</span><span>Updated ${escapeHtml(formatDate(bot.updatedAt))}</span><span class="bot-meta-model">${icon("spark", 13)} ${escapeHtml(bot.model.providerId)} / ${escapeHtml(bot.model.model)}</span></div></section>
+    ${bot.collaboratorRole ? `<div class="alert alert-info compact-alert">You have ${bot.collaboratorRole} access to this bot. Workspace membership and other bot controls remain with the owner.</div>` : ""}
     <nav class="detail-tabs" aria-label="Bot settings">${tabMarkup}</nav>
     ${state.pageError ? `<div class="alert alert-error" role="alert">${escapeHtml(state.pageError)}</div>` : ""}
     ${renderBotTab(state, bot)}`;
@@ -134,11 +140,25 @@ function accessTab(state: UiState, bot: Bot): string {
         )
         .join("")
     : `<div class="tools-empty">No direct grants or invitations yet.</div>`;
+  const collaborators = state.botCollaborators;
+  const collaboratorRows = collaborators.length
+    ? collaborators
+        .map(
+          (item) =>
+            `<article class="access-grant-row"><div class="access-grant-icon">${icon("user", 16)}</div><div class="access-grant-copy"><b>${escapeHtml(item.userId)}</b><small>${item.role === "editor" ? "Can edit name, description, and system prompt" : "Can view bot identity"}</small></div><span class="status-pill ${item.memberStatus === "active" ? "status-connected" : "status-paused"}"><span class="status-dot"></span>${item.memberStatus === "active" ? item.role : "workspace inactive"}</span><button class="button button-danger-outline button-small" data-action="remove-bot-collaborator" data-user-id="${escapeHtml(item.userId)}">Remove</button></article>`,
+        )
+        .join("")
+    : `<div class="tools-empty">No workspace collaborators yet.</div>`;
 
   return `<section class="panel access-overview"><div class="panel-heading"><div><div class="eyebrow">WHO CAN USE THIS BOT</div><h2>${escapeHtml(visibilityLabel)} access</h2><p class="panel-subtitle">${escapeHtml(modeCopy[bot.visibility])}</p></div><span class="quiet-badge">${escapeHtml(bot.visibility)}</span></div>${bot.visibility === "private" ? '<div class="alert alert-info compact-alert">This bot stays unlisted. You can grant access directly to a specific signed-in user; invitation links and public listings require a wider visibility.</div>' : ""}${bot.status !== "published" ? '<div class="alert alert-info compact-alert">Access takes effect when this bot is published and enabled.</div>' : ""}</section>
     ${listing ? `<section class="panel form-panel access-policy-panel"><div class="panel-heading"><div><div class="eyebrow">PUBLIC BOT LIMITS</div><h2>Set per-user usage limits</h2><p class="panel-subtitle">These limits apply independently to each signed-in user.</p></div><span class="quiet-badge">/${escapeHtml(listing.slug)}</span></div><form id="bot-access-policy-form" class="form-grid"><label class="field"><span>Requests per UTC day</span><input type="number" name="dailyUsageLimit" value="${listing.dailyUsageLimit}" min="1" max="10000" required /></label><label class="field"><span>Requests per minute</span><input type="number" name="rateLimitPerMinute" value="${listing.rateLimitPerMinute}" min="1" max="600" required /></label><div class="form-actions field-wide"><p class="field-hint">A signed-in user can still be individually revoked below.</p><button class="button button-primary" type="submit">Save limits</button></div></form></section>` : bot.visibility === "public" ? `<section class="panel info-panel"><div class="eyebrow">PUBLIC LISTING</div><h2>Publish this bot to list it</h2><p class="panel-subtitle">The public listing appears after the bot is published. Per-user limits can be set here afterward.</p></section>` : ""}
     ${canShare ? `<section class="content-grid access-create-grid"><section class="panel form-panel"><div class="panel-heading"><div><div class="eyebrow">DIRECT ACCESS</div><h2>Grant a signed-in user</h2><p class="panel-subtitle">Use the user ID shown in their workspace settings.</p></div></div><form id="bot-user-grant-form" class="stack-form"><label class="field"><span>User ID</span><input name="userId" required maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,127}" placeholder="user ID from Settings" /></label><div class="form-grid"><label class="field"><span>Daily requests <small>optional</small></span><input type="number" name="dailyUsageLimit" min="1" max="10000" placeholder="Default" /></label><label class="field"><span>Requests per minute <small>optional</small></span><input type="number" name="rateLimitPerMinute" min="1" max="600" placeholder="Default" /></label></div><label class="field"><span>Expiry <small>optional</small></span><input name="expiresAt" type="datetime-local" /></label><button class="button button-secondary" type="submit">Grant access</button></form></section>${bot.visibility === "shared" || bot.visibility === "invitation" ? `<section class="panel form-panel"><div class="panel-heading"><div><div class="eyebrow">ONE-TIME INVITATION</div><h2>Create an invite token</h2><p class="panel-subtitle">The token is shown once. The recipient must sign in and accept it.</p></div></div><form id="bot-invitation-form" class="stack-form"><div class="form-grid"><label class="field"><span>Daily requests <small>optional</small></span><input type="number" name="dailyUsageLimit" min="1" max="10000" placeholder="Default" /></label><label class="field"><span>Requests per minute <small>optional</small></span><input type="number" name="rateLimitPerMinute" min="1" max="600" placeholder="Default" /></label></div><label class="field"><span>Expiry <small>optional</small></span><input name="expiresAt" type="datetime-local" /></label><button class="button button-primary" type="submit">Create invitation</button></form>${state.invitationToken ? `<div class="one-time-invitation"><div><b>Copy this invitation token now</b><code>${escapeHtml(state.invitationToken)}</code></div><button class="button button-secondary button-small" data-action="copy-invitation">${icon("copy", 14)}<span>Copy</span></button></div>` : ""}</section>` : ""}</section>` : ""}
-    ${canShare ? `<section class="panel access-grants-panel"><div class="panel-heading"><div><div class="eyebrow">ACCESS GRANTS</div><h2>People and invitations</h2><p class="panel-subtitle">Revoking access takes effect on their next message.</p></div><span class="quiet-badge">${grants.length}</span></div><div class="access-grant-list">${grantRows}</div></section>` : ""}`;
+    ${
+      canShare
+        ? `<section class="panel access-grants-panel"><div class="panel-heading"><div><div class="eyebrow">ACCESS GRANTS</div><h2>People and invitations</h2><p class="panel-subtitle">Revoking access takes effect on their next message.</p></div><span class="quiet-badge">${grants.length}</span></div><div class="access-grant-list">${grantRows}</div></section>
+    <section class="panel access-grants-panel"><div class="panel-heading"><div><div class="eyebrow">BOT COLLABORATORS</div><h2>Manage this bot together</h2><p class="panel-subtitle">Collaborators must be active members of this workspace. Admin and member roles do not grant bot access by themselves.</p></div><span class="quiet-badge">${collaborators.length}</span></div><form id="bot-collaborator-form" class="form-grid"><label class="field"><span>Workspace member ID</span><input name="userId" required maxlength="128" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,127}" placeholder="user ID from Settings" /></label><label class="field"><span>Bot role</span><select name="role"><option value="viewer">Viewer · read identity</option><option value="editor">Editor · update identity</option></select></label><div class="form-actions field-wide"><p class="field-hint">Editors can change the name, description, and system prompt. Bot model credentials, privacy, publishing, tools, files, and schedules remain owner-controlled.</p><button class="button button-secondary" type="submit">Save collaborator</button></div></form><div class="access-grant-list">${collaboratorRows}</div></section>`
+        : ""
+    }`;
 }
 
 function conversationsTab(state: UiState, bot: Bot): string {
@@ -192,6 +212,9 @@ function memoryTab(state: UiState, bot: Bot): string {
 }
 
 function overviewTab(state: UiState, bot: Bot): string {
+  if (bot.collaboratorRole) {
+    return `<section class="panel form-panel"><div class="panel-heading"><div><div class="eyebrow">SHARED BOT</div><h2>${escapeHtml(bot.name)}</h2><p class="panel-subtitle">${escapeHtml(bot.description || "No description yet.")}</p></div>${statusPill(bot.status)}</div><div class="model-readonly-grid"><div><span>Access level</span><b>${bot.collaboratorRole === "editor" ? "Editor" : "Viewer"}</b></div><div><span>Bot version</span><b>v${bot.version}</b></div></div><div class="prompt-snapshot"><div class="eyebrow">PERSONALITY</div><h3>System prompt</h3><p>${escapeHtml(bot.systemPrompt || "No system prompt set.")}</p></div>${bot.collaboratorRole === "editor" ? `<button class="button button-secondary" data-route="bot/${escapeHtml(bot.id)}/configuration">Edit bot identity</button>` : ""}</section>`;
+  }
   const installedCount = state.installedSkills.filter((skill) => skill.enabled).length;
   const connected = state.telegram?.status === "active";
   return `<div class="content-grid bot-overview-grid"><section class="panel preview-panel"><div class="panel-heading"><div><div class="eyebrow">LIVE PREVIEW</div><h2>Talk to ${escapeHtml(bot.name)}</h2></div><span class="preview-model">${icon("spark", 14)} ${escapeHtml(bot.model.model)}</span></div><div class="preview-transcript" id="chat-transcript">${state.chatLines.length ? state.chatLines.map(renderChatLine).join("") : `<div class="preview-empty"><span class="preview-empty-orb">${icon("chat", 23)}</span><b>Give your assistant a first prompt.</b><span>This preview uses the same agent engine as your bot.</span></div>`}</div><form id="chat-form" class="chat-composer"><textarea name="message" rows="1" maxlength="10000" placeholder="Ask ${escapeHtml(bot.name)} anything…" required></textarea><button class="send-button" type="submit" aria-label="Send message" ${bot.status === "disabled" ? "disabled" : ""}>${icon("send", 17)}</button></form><div class="preview-foot"><span>${icon("shield", 13)} Private owner preview</span><span>Messages persist in the bot conversation store</span></div></section>
@@ -201,6 +224,7 @@ function overviewTab(state: UiState, bot: Bot): string {
 }
 
 function configurationTab(state: UiState, bot: Bot): string {
+  if (bot.collaboratorRole) return collaboratorConfigurationTab(bot);
   const params = bot.model.parameters ?? {};
   const temperature = typeof params.temperature === "number" ? params.temperature : 0.7;
   return `<section class="panel form-panel config-form-panel"><div class="panel-heading"><div><div class="eyebrow">BOT IDENTITY</div><h2>Make it sound and behave like yours</h2><p class="panel-subtitle">Saving creates version ${bot.version + 1}. Current version ${bot.version} stays available in storage.</p></div><span class="quiet-badge">v${bot.version}</span></div>
@@ -208,6 +232,13 @@ function configurationTab(state: UiState, bot: Bot): string {
     <section class="panel model-readonly"><div class="panel-heading"><div><div class="eyebrow">MODEL PROVIDER</div><h2>Generation settings</h2></div><span class="quiet-badge">${bot.model.hasCredential ? "Credential encrypted" : "No bot credential"}</span></div><div class="model-readonly-grid"><div><span>Provider</span><b>${escapeHtml(bot.model.providerId)}</b></div><div><span>Chat model</span><b>${escapeHtml(bot.model.model)}</b></div><div><span>Image model</span><b>${escapeHtml(bot.model.imageModel || "Not selected")}</b></div><div><span>Search model</span><b>${escapeHtml(bot.model.searchModel || "Not selected")}</b></div><div class="model-endpoint"><span>API endpoint</span><code>${escapeHtml(bot.model.endpoint ?? "Provider default")}</code></div><div><span>Temperature</span><b>${escapeHtml(temperature)}</b></div></div><p class="field-hint">The API key is never returned to this page. The key is sent only to the configured model endpoint.</p>
       <form id="bot-model-form" class="stack-form credential-rotation-form"><input type="hidden" name="expectedVersion" value="${bot.version}" /><div class="form-grid"><label class="field"><span>Provider ID</span><input name="providerId" value="${escapeHtml(bot.model.providerId)}" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" /></label><label class="field"><span>Chat model ID</span><input name="model" value="${escapeHtml(bot.model.model)}" required maxlength="128" /></label><label class="field"><span>Image model ID <small>optional</small></span><input name="imageModel" value="${escapeHtml(bot.model.imageModel ?? "")}" maxlength="128" placeholder="gpt-image-1" /></label><label class="field"><span>Search model ID <small>optional</small></span><input name="searchModel" value="${escapeHtml(bot.model.searchModel ?? "")}" maxlength="128" placeholder="Provider search model" /></label><label class="field field-wide"><span>HTTPS API endpoint <small>optional</small></span><input name="endpoint" type="url" value="${escapeHtml(bot.model.endpoint ?? "")}" placeholder="https://api.example.com/v1" /></label><label class="field"><span>Temperature</span><input name="temperature" type="number" min="0" max="2" step="0.1" value="${temperature}" required /></label><label class="field field-wide"><span>New model API key</span><input name="credential" type="password" autocomplete="new-password" maxlength="65536" placeholder="Enter a new provider key" required /></label></div><div class="form-actions"><p class="field-hint">Changing provider settings also replaces the credential and saves a new version. The endpoint must be allowed by the deployment before model requests can reach it. You’ll confirm before the key is encrypted.</p><button class="button button-primary" type="submit">${icon("shield", 15)}<span>Save model settings</span></button></div></form>
       <form id="bot-credential-form" class="stack-form credential-rotation-form"><input type="hidden" name="expectedVersion" value="${bot.version}" /><label class="field"><span>${bot.model.hasCredential ? "Replace model API key" : "Connect model API key"}</span><input name="credential" type="password" autocomplete="new-password" maxlength="65536" placeholder="Enter a new provider key" required /></label><div class="form-actions"><p class="field-hint">Replace only the key while keeping the provider settings. You’ll confirm before the new key is encrypted.</p><button class="button button-secondary" type="submit">${icon("key", 15)}<span>${bot.model.hasCredential ? "Replace key only" : "Connect key only"}</span></button></div></form></section>${modelRetryPolicyPanel(bot)}${ownershipTransferPanel(state)}`;
+}
+
+function collaboratorConfigurationTab(bot: Bot): string {
+  if (bot.collaboratorRole === "viewer") {
+    return `<section class="panel form-panel"><div class="panel-heading"><div><div class="eyebrow">BOT IDENTITY</div><h2>Shared configuration</h2><p class="panel-subtitle">The owner has shared this bot with you as a viewer.</p></div><span class="quiet-badge">Read only</span></div><dl class="shared-identity"><dt>Name</dt><dd>${escapeHtml(bot.name)}</dd><dt>Description</dt><dd>${escapeHtml(bot.description || "No description")}</dd><dt>System prompt</dt><dd><pre>${escapeHtml(bot.systemPrompt)}</pre></dd></dl></section>`;
+  }
+  return `<section class="panel form-panel config-form-panel"><div class="panel-heading"><div><div class="eyebrow">BOT IDENTITY</div><h2>Edit shared bot identity</h2><p class="panel-subtitle">Saving creates version ${bot.version + 1}. Model, privacy, and integrations stay under the owner’s control.</p></div><span class="quiet-badge">Editor</span></div><form id="bot-config-form" class="stack-form"><input type="hidden" name="expectedVersion" value="${bot.version}" /><div class="form-grid"><label class="field"><span>Bot name</span><input name="name" value="${escapeHtml(bot.name)}" required minlength="1" maxlength="80" /></label><label class="field"><span>Short description</span><input name="description" value="${escapeHtml(bot.description)}" maxlength="2000" /></label><label class="field field-wide"><span>System prompt</span><textarea name="systemPrompt" rows="8" required maxlength="12000">${escapeHtml(bot.systemPrompt)}</textarea><small>Describe the bot’s role, style, and boundaries.</small></label></div><div class="form-actions"><p class="field-hint">Editors can change only the bot name, description, and system prompt.</p><button class="button button-primary" type="submit">${icon("check", 16)}<span>Save bot identity</span></button></div></form></section>`;
 }
 
 function ownershipTransferPanel(state: UiState): string {

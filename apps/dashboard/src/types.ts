@@ -62,6 +62,15 @@ export interface Bot {
   version: number;
   createdAt: string;
   updatedAt: string;
+  collaboratorRole?: "viewer" | "editor";
+}
+
+export interface BotCollaborator {
+  userId: string;
+  role: "viewer" | "editor";
+  memberStatus: "active" | "inactive";
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface BotVersion {

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   ApiTokenAuthenticator,
+  AppError,
   BotCredentialApprovalService,
   createApiTokenMaterial,
   createBotManagementApiHandler,
@@ -31,7 +32,153 @@ const bot: BotDefinition = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
+function managementRepository(overrides: Partial<BotManagementRepository> = {}): BotManagementRepository {
+  return {
+    listOwned: async () => [],
+    listCollaborated: async () => [],
+    getCollaborated: async () => undefined,
+    listBotCollaborators: async () => [],
+    setBotCollaborator: async (input) => ({
+      userId: input.userId,
+      role: input.role,
+      memberStatus: "active",
+      createdAt: input.now,
+      updatedAt: input.now,
+    }),
+    removeBotCollaborator: async () => {},
+    updateCollaborated: async (input) => ({ ...bot, ...input.patch, version: input.expectedVersion + 1 }),
+    listVersions: async () => [],
+    updateOwned: async () => bot,
+    setDisabled: async () => {},
+    deleteOwned: async () => {},
+    ...overrides,
+  };
+}
+
 describe("bot management API", () => {
+  test("supports least-privilege bot collaborators without exposing owner model settings", async () => {
+    const token = await createApiTokenMaterial();
+    let principal = { tenantId, ownerId, tokenId: "token-collaborators", scopes: ["bots:read", "bots:write"] };
+    const editorId = "workspace-editor" as UserId;
+    const viewerId = "workspace-viewer" as UserId;
+    const collaboratorRows: Array<{
+      userId: UserId;
+      role: "viewer" | "editor";
+      memberStatus: "active" | "inactive";
+      createdAt: string;
+      updatedAt: string;
+    }> = [];
+    let collaboratorUpdate: unknown;
+    const handler = createBotManagementApiHandler(
+      new ApiTokenAuthenticator({
+        findActive: async () => principal,
+        create: async () => {},
+        revoke: async () => {},
+        consumeApiRequest: async () => true,
+        recordApiMutation: async () => {},
+      }),
+      { get: async () => bot, saveDraft: async () => {} },
+      managementRepository({
+        listOwned: async (_tenant, userId) => (userId === ownerId ? [bot] : []),
+        listCollaborated: async ({ userId }) =>
+          userId === editorId ? [{ bot, role: "editor" }] : userId === viewerId ? [{ bot, role: "viewer" }] : [],
+        getCollaborated: async ({ userId }) =>
+          userId === editorId ? { bot, role: "editor" } : userId === viewerId ? { bot, role: "viewer" } : undefined,
+        listBotCollaborators: async () => collaboratorRows,
+        setBotCollaborator: async (input) => {
+          const current = collaboratorRows.find((item) => item.userId === input.userId);
+          const item = {
+            userId: input.userId,
+            role: input.role,
+            memberStatus: "active" as const,
+            createdAt: current?.createdAt ?? input.now,
+            updatedAt: input.now,
+          };
+          if (current) Object.assign(current, item);
+          else collaboratorRows.push(item);
+          return item;
+        },
+        removeBotCollaborator: async ({ userId }) => {
+          const index = collaboratorRows.findIndex((item) => item.userId === userId);
+          if (index >= 0) collaboratorRows.splice(index, 1);
+        },
+        updateCollaborated: async (input) => {
+          collaboratorUpdate = input;
+          if (principal.ownerId === viewerId) throw new AppError("FORBIDDEN", "Editor access is required.", 403);
+          return { ...bot, ...input.patch, version: input.expectedVersion + 1 };
+        },
+      }),
+    );
+    const headers = { authorization: `Bearer ${token.token}`, "content-type": "application/json" };
+
+    const granted = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}/collaborators`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ userId: editorId, role: "editor" }),
+      }),
+    );
+    expect(granted?.status).toBe(200);
+    expect(await granted?.json()).toMatchObject({ item: { userId: editorId, role: "editor" } });
+
+    const roster = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}/collaborators`, { headers }),
+    );
+    expect(roster?.status).toBe(200);
+    expect(await roster?.json()).toMatchObject({ items: [{ userId: editorId, role: "editor" }] });
+
+    principal = { tenantId, ownerId: editorId, tokenId: "token-editor", scopes: ["bots:read", "bots:write"] };
+    const sharedBots = await handler(new Request("https://factory.example.test/v1/bots", { headers }));
+    expect(await sharedBots?.json()).toMatchObject([{ id: botId, collaboratorRole: "editor" }]);
+    const sharedDetail = await handler(new Request(`https://factory.example.test/v1/bots/${botId}`, { headers }));
+    const sharedText = await sharedDetail?.text();
+    expect(sharedText).toContain('"collaboratorRole":"editor"');
+    expect(sharedText).not.toContain("https://api.example.test/v1");
+    expect(sharedText).not.toContain(bot.model.credentialRef);
+
+    const edited = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ expectedVersion: 1, description: "Editor changed the description" }),
+      }),
+    );
+    expect(edited?.status).toBe(200);
+    expect(collaboratorUpdate).toMatchObject({
+      userId: editorId,
+      patch: { description: "Editor changed the description" },
+    });
+
+    const modelEdit = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ expectedVersion: 2, memoryEnabled: false }),
+      }),
+    );
+    expect(modelEdit?.status).toBe(400);
+
+    principal = { tenantId, ownerId: viewerId, tokenId: "token-viewer", scopes: ["bots:read", "bots:write"] };
+    const viewerEdit = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ expectedVersion: 1, name: "Viewer must not edit" }),
+      }),
+    );
+    expect(viewerEdit?.status).toBe(403);
+
+    principal = { tenantId, ownerId, tokenId: "token-collaborators", scopes: ["bots:read", "bots:write"] };
+    const removed = await handler(
+      new Request(`https://factory.example.test/v1/bots/${botId}/collaborators/${editorId}`, {
+        method: "DELETE",
+        headers,
+      }),
+    );
+    expect(removed?.status).toBe(204);
+    expect(collaboratorRows).toEqual([]);
+  });
+
   test("lists owner bots, versions edits, and never returns credential references", async () => {
     const token = await createApiTokenMaterial();
     const principal = { tenantId, ownerId, tokenId: "token-bots", scopes: ["bots:read", "bots:write"] };
@@ -45,7 +192,7 @@ describe("bot management API", () => {
         recordApiMutation: async () => {},
       }),
       { get: async () => bot, saveDraft: async () => {} } satisfies BotRepository,
-      {
+      managementRepository({
         listOwned: async () => [bot],
         listVersions: async () => [
           {
@@ -66,7 +213,7 @@ describe("bot management API", () => {
         },
         setDisabled: async () => {},
         deleteOwned: async () => {},
-      } satisfies BotManagementRepository,
+      }),
     );
     const headers = { authorization: `Bearer ${token.token}`, "content-type": "application/json" };
     const listed = await handler(new Request("https://factory.example.test/v1/bots", { headers }));
@@ -152,7 +299,7 @@ describe("bot management API", () => {
     const handler = createBotManagementApiHandler(
       auth,
       { get: async () => currentBot, saveDraft: async () => {} },
-      {
+      managementRepository({
         listOwned: async () => [currentBot],
         listVersions: async () => [],
         updateOwned: async (input) => {
@@ -162,7 +309,7 @@ describe("bot management API", () => {
         },
         setDisabled: async () => {},
         deleteOwned: async () => {},
-      },
+      }),
       approvals,
       secrets,
     );
@@ -267,7 +414,7 @@ describe("bot management API", () => {
     const handler = createBotManagementApiHandler(
       auth,
       { get: async () => currentBot, saveDraft: async () => {} },
-      {
+      managementRepository({
         listOwned: async () => [currentBot],
         listVersions: async () => [],
         updateOwned: async (input) => {
@@ -278,7 +425,7 @@ describe("bot management API", () => {
         },
         setDisabled: async () => {},
         deleteOwned: async () => {},
-      },
+      }),
     );
     const headers = { authorization: `Bearer ${token.token}`, "content-type": "application/json" };
     const saved = await handler(
@@ -330,7 +477,7 @@ describe("bot management API", () => {
         recordApiMutation: async () => {},
       }),
       { get: async () => ({ ...bot, ownerId: "other-owner" as UserId }), saveDraft: async () => {} },
-      {
+      managementRepository({
         listOwned: async () => [],
         listVersions: async () => [],
         updateOwned: async () => bot,
@@ -338,7 +485,7 @@ describe("bot management API", () => {
           disabled = input.disabled;
         },
         deleteOwned: async () => {},
-      },
+      }),
     );
     const headers = { authorization: `Bearer ${token.token}`, "content-type": "application/json" };
     const hidden = await handler(new Request(`https://factory.example.test/v1/bots/${botId}`, { headers }));

@@ -19,7 +19,11 @@ import type {
   BotCredentialApprovalRepository,
   BotDraftPublisher,
   BotManagementRepository,
+  BotCollaboratorSettingsPatch,
   BotVersionHistoryItem,
+  BotCollaborator,
+  BotCollaboratorRole,
+  CollaboratedBot,
   BotRepository,
   BotSettingsPatch,
   ConversationRepository,
@@ -110,6 +114,14 @@ interface BotVersionRow {
   current_version: number;
   configuration_json: string;
   created_at: string;
+}
+
+interface BotCollaboratorRow {
+  user_id: string;
+  role: BotCollaboratorRole;
+  member_status: "active" | "inactive";
+  created_at: string;
+  updated_at: string;
 }
 
 interface ConversationRow {
@@ -549,6 +561,257 @@ export class BunSqliteRepositories
     return rows.map(mapBot);
   }
 
+  async listCollaborated(input: {
+    readonly tenantId: TenantId;
+    readonly userId: UserId;
+  }): Promise<readonly CollaboratedBot[]> {
+    const rows = this.#db
+      .query<BotRow & { collaborator_role: BotCollaboratorRole }, [string, string]>(`
+        SELECT b.id, b.tenant_id, b.owner_id, b.name, b.description, b.status,
+               b.visibility, b.current_version, b.created_at, b.updated_at,
+               v.configuration_json, c.role AS collaborator_role
+        FROM bot_collaborators AS c
+        JOIN tenant_memberships AS m
+          ON m.tenant_id = c.tenant_id AND m.user_id = c.user_id AND m.status = 'active'
+        JOIN bots AS b ON b.id = c.bot_id AND b.tenant_id = c.tenant_id
+        JOIN bot_versions AS v
+          ON v.bot_id = b.id AND v.tenant_id = b.tenant_id AND v.version = b.current_version
+        WHERE c.tenant_id = ? AND c.user_id = ? AND b.owner_id <> c.user_id
+        ORDER BY b.updated_at DESC, b.id
+      `)
+      .all(input.tenantId, input.userId);
+    return rows.map((row) => ({ bot: mapBot(row), role: row.collaborator_role }));
+  }
+
+  async getCollaborated(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly userId: UserId;
+  }): Promise<CollaboratedBot | undefined> {
+    const row = this.#db
+      .query<BotRow & { collaborator_role: BotCollaboratorRole }, [string, string, string]>(`
+        SELECT b.id, b.tenant_id, b.owner_id, b.name, b.description, b.status,
+               b.visibility, b.current_version, b.created_at, b.updated_at,
+               v.configuration_json, c.role AS collaborator_role
+        FROM bot_collaborators AS c
+        JOIN tenant_memberships AS m
+          ON m.tenant_id = c.tenant_id AND m.user_id = c.user_id AND m.status = 'active'
+        JOIN bots AS b ON b.id = c.bot_id AND b.tenant_id = c.tenant_id
+        JOIN bot_versions AS v
+          ON v.bot_id = b.id AND v.tenant_id = b.tenant_id AND v.version = b.current_version
+        WHERE c.tenant_id = ? AND c.bot_id = ? AND c.user_id = ? AND b.owner_id <> c.user_id
+      `)
+      .get(input.tenantId, input.botId, input.userId);
+    return row ? { bot: mapBot(row), role: row.collaborator_role } : undefined;
+  }
+
+  async listBotCollaborators(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+  }): Promise<readonly BotCollaborator[]> {
+    this.requireOwnedAccessBot(input.tenantId, input.ownerId, input.botId);
+    const rows = this.#db
+      .query<BotCollaboratorRow, [string, string]>(`
+        SELECT c.user_id, c.role, m.status AS member_status, c.created_at, c.updated_at
+        FROM bot_collaborators AS c
+        JOIN tenant_memberships AS m ON m.tenant_id = c.tenant_id AND m.user_id = c.user_id
+        WHERE c.tenant_id = ? AND c.bot_id = ?
+          AND c.user_id <> (SELECT owner_id FROM bots WHERE tenant_id = c.tenant_id AND id = c.bot_id)
+        ORDER BY c.created_at, c.user_id
+      `)
+      .all(input.tenantId, input.botId);
+    return rows.map(mapBotCollaborator);
+  }
+
+  async setBotCollaborator(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly userId: UserId;
+    readonly role: BotCollaboratorRole;
+    readonly now: string;
+  }): Promise<BotCollaborator> {
+    if (input.userId === input.ownerId) {
+      throw new AppError("VALIDATION_ERROR", "The bot owner cannot be added as a collaborator.", 400);
+    }
+    const set = this.#db.transaction(() => {
+      this.requireActiveBotOwner(input.tenantId, input.ownerId, input.botId);
+      const member = this.#db
+        .query<{ status: "active" | "inactive" }, [string, string]>(`
+          SELECT status FROM tenant_memberships WHERE tenant_id = ? AND user_id = ?
+        `)
+        .get(input.tenantId, input.userId);
+      if (member?.status !== "active") {
+        throw new AppError("NOT_FOUND", "Active workspace member was not found.", 404);
+      }
+      this.#db
+        .query(`
+          INSERT INTO bot_collaborators (tenant_id, bot_id, user_id, role, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT (tenant_id, bot_id, user_id)
+          DO UPDATE SET role = excluded.role, updated_at = excluded.updated_at
+        `)
+        .run(input.tenantId, input.botId, input.userId, input.role, input.now, input.now);
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          VALUES (?, ?, ?, 'bot.collaborator.set', 'bot', ?, ?, ?)
+        `)
+        .run(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.tenantId,
+          input.ownerId,
+          input.botId,
+          JSON.stringify({ userId: input.userId, role: input.role }),
+          input.now,
+        );
+      return this.getBotCollaborator(input.tenantId, input.botId, input.userId);
+    });
+    return set.immediate();
+  }
+
+  async removeBotCollaborator(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly userId: UserId;
+    readonly now: string;
+  }): Promise<void> {
+    const remove = this.#db.transaction(() => {
+      this.requireActiveBotOwner(input.tenantId, input.ownerId, input.botId);
+      const result = this.#db
+        .query("DELETE FROM bot_collaborators WHERE tenant_id = ? AND bot_id = ? AND user_id = ?")
+        .run(input.tenantId, input.botId, input.userId);
+      if (result.changes !== 1) throw new AppError("NOT_FOUND", "Bot collaborator was not found.", 404);
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          VALUES (?, ?, ?, 'bot.collaborator.removed', 'bot', ?, ?, ?)
+        `)
+        .run(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.tenantId,
+          input.ownerId,
+          input.botId,
+          JSON.stringify({ userId: input.userId }),
+          input.now,
+        );
+    });
+    remove.immediate();
+  }
+
+  async updateCollaborated(input: {
+    readonly tenantId: TenantId;
+    readonly userId: UserId;
+    readonly botId: BotId;
+    readonly expectedVersion: number;
+    readonly patch: BotCollaboratorSettingsPatch;
+  }): Promise<BotDefinition> {
+    const keys = Object.keys(input.patch);
+    if (keys.length === 0 || keys.some((key) => !["name", "description", "systemPrompt"].includes(key))) {
+      throw new AppError("VALIDATION_ERROR", "Collaborators can update only bot identity settings.", 400);
+    }
+    const patch = validateBotSettingsPatch(input.patch);
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new AppError("VALIDATION_ERROR", "Expected bot version is invalid.", 400);
+    }
+    const update = this.#db.transaction(() => {
+      const row = this.#db
+        .query<BotRow & { collaborator_role: BotCollaboratorRole }, [string, string, string]>(`
+          SELECT b.id, b.tenant_id, b.owner_id, b.name, b.description, b.status,
+                 b.visibility, b.current_version, b.created_at, b.updated_at,
+                 v.configuration_json, c.role AS collaborator_role
+          FROM bot_collaborators AS c
+          JOIN tenant_memberships AS cm
+            ON cm.tenant_id = c.tenant_id AND cm.user_id = c.user_id AND cm.status = 'active'
+          JOIN bots AS b ON b.id = c.bot_id AND b.tenant_id = c.tenant_id
+          JOIN tenant_memberships AS om
+            ON om.tenant_id = b.tenant_id AND om.user_id = b.owner_id AND om.status = 'active'
+          JOIN bot_versions AS v
+            ON v.bot_id = b.id AND v.tenant_id = b.tenant_id AND v.version = b.current_version
+          WHERE c.tenant_id = ? AND c.bot_id = ? AND c.user_id = ? AND b.owner_id <> c.user_id
+        `)
+        .get(input.tenantId, input.botId, input.userId);
+      if (!row) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+      if (row.collaborator_role !== "editor") {
+        throw new AppError("FORBIDDEN", "Editor access is required to change bot identity settings.", 403);
+      }
+      if (row.current_version !== input.expectedVersion) {
+        throw new AppError("CONFLICT", "Bot changed; reload it before applying edits.", 409);
+      }
+      const current = mapBot(row);
+      const updated: BotDefinition = {
+        ...current,
+        ...patch,
+        version: current.version + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      this.#db
+        .query(`
+          INSERT INTO bot_versions (bot_id, tenant_id, version, configuration_json, created_by, created_at)
+          SELECT ?, ?, ?, ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM bot_collaborators AS c
+            JOIN tenant_memberships AS m ON m.tenant_id = c.tenant_id AND m.user_id = c.user_id
+            WHERE c.tenant_id = ? AND c.bot_id = ? AND c.user_id = ? AND c.role = 'editor'
+              AND c.user_id <> (SELECT owner_id FROM bots WHERE tenant_id = c.tenant_id AND id = c.bot_id)
+              AND m.status = 'active'
+          )
+        `)
+        .run(
+          updated.id,
+          updated.tenantId,
+          updated.version,
+          JSON.stringify(configurationFromBot(updated)),
+          input.userId,
+          updated.updatedAt,
+          input.tenantId,
+          input.botId,
+          input.userId,
+        );
+      const result = this.#db
+        .query(`
+          UPDATE bots SET name = ?, description = ?, current_version = ?, updated_at = ?
+          WHERE tenant_id = ? AND id = ? AND current_version = ?
+            AND EXISTS (
+              SELECT 1 FROM bot_collaborators AS c
+              JOIN tenant_memberships AS cm ON cm.tenant_id = c.tenant_id AND cm.user_id = c.user_id
+              JOIN tenant_memberships AS om ON om.tenant_id = bots.tenant_id AND om.user_id = bots.owner_id
+              WHERE c.tenant_id = bots.tenant_id AND c.bot_id = bots.id AND c.user_id = ?
+                AND c.role = 'editor' AND c.user_id <> bots.owner_id
+                AND cm.status = 'active' AND om.status = 'active'
+            )
+        `)
+        .run(
+          updated.name,
+          updated.description,
+          updated.version,
+          updated.updatedAt,
+          input.tenantId,
+          input.botId,
+          input.expectedVersion,
+          input.userId,
+        );
+      if (result.changes !== 1) throw new AppError("CONFLICT", "Bot changed; reload it before applying edits.", 409);
+      this.#db
+        .query(`
+          INSERT INTO audit_logs (id, tenant_id, actor_id, action, resource_type, resource_id, metadata_json, created_at)
+          VALUES (?, ?, ?, 'bot.collaborator.settings_updated', 'bot', ?, ?, ?)
+        `)
+        .run(
+          `audit_${crypto.randomUUID().replaceAll("-", "")}`,
+          input.tenantId,
+          input.userId,
+          input.botId,
+          JSON.stringify({ fields: keys.sort() }),
+          updated.updatedAt,
+        );
+      return updated;
+    });
+    return update.immediate();
+  }
+
   async listVersions(input: {
     readonly tenantId: TenantId;
     readonly ownerId: UserId;
@@ -958,6 +1221,30 @@ export class BunSqliteRepositories
       .get(tenantId, botId);
     if (!bot || bot.owner_id !== ownerId) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
     return { visibility: bot.visibility };
+  }
+
+  private requireActiveBotOwner(tenantId: TenantId, ownerId: UserId, botId: BotId): void {
+    const row = this.#db
+      .query<{ owner_id: string }, [string, string, string]>(`
+        SELECT b.owner_id FROM bots AS b
+        JOIN tenant_memberships AS m ON m.tenant_id = b.tenant_id AND m.user_id = b.owner_id AND m.status = 'active'
+        WHERE b.tenant_id = ? AND b.id = ? AND b.owner_id = ?
+      `)
+      .get(tenantId, botId, ownerId);
+    if (!row) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+  }
+
+  private getBotCollaborator(tenantId: TenantId, botId: BotId, userId: UserId): BotCollaborator {
+    const row = this.#db
+      .query<BotCollaboratorRow, [string, string, string]>(`
+        SELECT c.user_id, c.role, m.status AS member_status, c.created_at, c.updated_at
+        FROM bot_collaborators AS c
+        JOIN tenant_memberships AS m ON m.tenant_id = c.tenant_id AND m.user_id = c.user_id
+        WHERE c.tenant_id = ? AND c.bot_id = ? AND c.user_id = ?
+      `)
+      .get(tenantId, botId, userId);
+    if (!row) throw new AppError("INTERNAL_ERROR", "Bot collaborator could not be loaded after it was saved.", 500);
+    return mapBotCollaborator(row);
   }
 
   async updateOwned(input: {
@@ -4809,6 +5096,16 @@ function mapBot(row: BotRow): BotDefinition {
     visibility: row.visibility,
     status: row.status,
     version: row.current_version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapBotCollaborator(row: BotCollaboratorRow): BotCollaborator {
+  return {
+    userId: row.user_id as UserId,
+    role: row.role,
+    memberStatus: row.member_status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

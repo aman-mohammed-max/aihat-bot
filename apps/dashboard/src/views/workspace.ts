@@ -52,10 +52,11 @@ export function botsView(state: UiState): string {
 }
 
 export function skillMarketplaceView(state: UiState): string {
-  const selectedBotId = state.botId ?? state.bots[0]?.id ?? "";
+  const bots = state.bots.filter((bot) => !bot.collaboratorRole);
+  const selectedBotId = bots.find((bot) => bot.id === state.botId)?.id ?? bots[0]?.id ?? "";
   const canPublish = state.principal?.scopes.includes("skills:publish") === true;
-  const targetSelector = state.bots.length
-    ? `<label class="inline-select"><span>Install to</span><select id="skill-target-bot">${state.bots.map((bot) => `<option value="${escapeHtml(bot.id)}" ${bot.id === selectedBotId ? "selected" : ""}>${escapeHtml(bot.name)}</option>`).join("")}</select></label>`
+  const targetSelector = bots.length
+    ? `<label class="inline-select"><span>Install to</span><select id="skill-target-bot">${bots.map((bot) => `<option value="${escapeHtml(bot.id)}" ${bot.id === selectedBotId ? "selected" : ""}>${escapeHtml(bot.name)}</option>`).join("")}</select></label>`
     : "";
   return `<section class="panel marketplace-banner"><div class="marketplace-symbol">${icon("spark", 23)}</div><div><div class="eyebrow">WORKSPACE CAPABILITIES</div><h2>Small skills. Bigger bots.</h2><p>Publish reusable tools for this workspace, then review each permission before installing.</p></div>${targetSelector}</section>
     ${state.catalog.length ? `<div class="skill-grid">${state.catalog.map((skill) => skillCard(skill, selectedBotId)).join("")}</div>` : `<section class="panel empty-panel">${emptyState("spark", "Your catalog is ready", "Publish a prompt, HTTPS, or workflow skill for this workspace. Published skill IDs are immutable; use a new ID for each revision.", "Go to my bots", "navigate-bots")}</section>`}
@@ -63,14 +64,15 @@ export function skillMarketplaceView(state: UiState): string {
 }
 
 export function mcpWorkspaceView(state: UiState): string {
-  const selectedBotId = state.botId ?? state.bots[0]?.id ?? "";
-  const selector = state.bots.length
-    ? `<label class="inline-select"><span>Bot</span><select id="mcp-target-bot">${state.bots.map((bot) => `<option value="${escapeHtml(bot.id)}" ${bot.id === selectedBotId ? "selected" : ""}>${escapeHtml(bot.name)}</option>`).join("")}</select></label>`
+  const bots = state.bots.filter((bot) => !bot.collaboratorRole);
+  const selectedBotId = bots.find((bot) => bot.id === state.botId)?.id ?? bots[0]?.id ?? "";
+  const selector = bots.length
+    ? `<label class="inline-select"><span>Bot</span><select id="mcp-target-bot">${bots.map((bot) => `<option value="${escapeHtml(bot.id)}" ${bot.id === selectedBotId ? "selected" : ""}>${escapeHtml(bot.name)}</option>`).join("")}</select></label>`
     : "";
   const servers = state.botId ? state.servers : [];
   return `<section class="panel intro-panel"><div class="intro-icon intro-teal">${icon("plug", 21)}</div><div class="intro-copy"><div class="eyebrow">MODEL CONTEXT PROTOCOL</div><h2>Give your bot a safe set of tools.</h2><p>Servers start disconnected. Discovered tools stay disabled until you grant <code>mcp:invoke</code> individually.</p></div>${selector}</section>
     ${
-      state.bots.length
+      bots.length
         ? `<section class="panel form-panel"><div class="panel-heading"><div><div class="eyebrow">NEW CONNECTION</div><h2>Add an MCP server</h2></div><span class="quiet-badge">HTTPS only</span></div><form id="mcp-add-form" class="form-grid"><label class="field"><span>Connection name</span><input name="name" placeholder="Company knowledge" required maxlength="80" /></label><label class="field field-wide"><span>Streamable HTTP endpoint</span><input name="endpoint" type="url" placeholder="https://tools.example.com/mcp" required /></label>${mcpAuthenticationFields()}<div class="form-actions field-wide"><p class="field-hint">The MCP endpoint and OAuth issuer must use HTTPS origins in the runtime’s <code>MCP_ALLOWED_ORIGINS</code> list. Credentials are encrypted and sent only after origin checks.</p><button class="button button-primary" type="submit" data-action="add-mcp">${icon("plus", 16)}<span>Add connection</span></button></div></form></section>
     ${servers.length ? `<section class="server-list">${servers.map((server) => mcpServerCard(server, state.toolsByServer[server.id] ?? [])).join("")}</section>` : `<section class="panel empty-panel">${emptyState("plug", "No MCP connections for this bot", "Add a reviewed HTTPS server above, then discover and approve its tools.", "Browse my bots", "navigate-bots")}</section>`}`
         : `<section class="panel empty-panel">${emptyState("bots", "Choose a bot first", "MCP servers are attached to individual bots, so each tool grant stays scoped.", "Create a bot", "navigate-create")}</section>`
@@ -78,15 +80,16 @@ export function mcpWorkspaceView(state: UiState): string {
 }
 
 export function automationWorkspaceView(state: UiState): string {
-  const selectedBotId = state.botId ?? state.bots[0]?.id ?? "";
-  const selector = state.bots.length
-    ? `<label class="inline-select"><span>Bot</span><select id="automation-target-bot">${state.bots.map((bot) => `<option value="${escapeHtml(bot.id)}" ${bot.id === selectedBotId ? "selected" : ""}>${escapeHtml(bot.name)} · ${escapeHtml(bot.status)}</option>`).join("")}</select></label>`
+  const bots = state.bots.filter((bot) => !bot.collaboratorRole);
+  const selectedBotId = bots.find((bot) => bot.id === state.botId)?.id ?? bots[0]?.id ?? "";
+  const selector = bots.length
+    ? `<label class="inline-select"><span>Bot</span><select id="automation-target-bot">${bots.map((bot) => `<option value="${escapeHtml(bot.id)}" ${bot.id === selectedBotId ? "selected" : ""}>${escapeHtml(bot.name)} · ${escapeHtml(bot.status)}</option>`).join("")}</select></label>`
     : "";
   const tasks = state.botId ? state.tasks : [];
-  const bot = state.bots.find((item) => item.id === selectedBotId);
+  const bot = bots.find((item) => item.id === selectedBotId);
   return `<section class="panel intro-panel"><div class="intro-icon intro-blue">${icon("clock", 21)}</div><div class="intro-copy"><div class="eyebrow">PERSISTENT SCHEDULES</div><h2>Let the right bot show up on time.</h2><p>One-time reminders and daily runs use your timezone and deliver to an approved Telegram sender.</p></div>${selector}</section>
     ${
-      state.bots.length
+      bots.length
         ? `<section class="panel form-panel"><div class="panel-heading"><div><div class="eyebrow">CREATE A SCHEDULE</div><h2>Plan an automated run</h2></div>${bot?.status === "published" ? statusChip("Ready to schedule", "connected") : statusChip("Publish bot first", "paused")}</div><form id="schedule-form" class="form-grid"><label class="field"><span>Repeat</span><select name="repeat"><option value="once">One time</option><option value="daily">Every day</option></select></label><label class="field" data-schedule-once><span>Date and time</span><input name="runAt" type="datetime-local" /></label><label class="field" data-schedule-daily hidden><span>Time of day</span><input name="dailyAt" type="time" value="09:00" /></label><label class="field"><span>Timezone</span><input name="timezone" value="${escapeHtml(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC")}" required /></label><label class="field"><span>Notify Telegram user ID</span><input name="notifyTelegramUserId" inputmode="numeric" placeholder="Your approved numeric ID" required /></label><label class="field field-wide"><span>What should the bot do?</span><textarea name="prompt" rows="3" placeholder="Summarize today's updates and send me the key points." required maxlength="10000"></textarea></label><div class="form-actions field-wide"><p class="field-hint">The bot must be published and Telegram connected. The recipient must already be on the bot's owner-approved sender list.</p><button class="button button-primary" type="submit">${icon("plus", 16)}<span>Create schedule</span></button></div></form></section>
     ${tasks.length ? `<section class="panel task-panel"><div class="panel-heading"><div><div class="eyebrow">SAVED JOBS</div><h2>Scheduled tasks</h2></div><span class="quiet-badge">${tasks.length} total</span></div><div class="table-wrap"><table><thead><tr><th>Task</th><th>Next run</th><th>Recipient</th><th>Status</th><th></th></tr></thead><tbody>${tasks.map((task) => taskRow(task)).join("")}</tbody></table></div></section>` : `<section class="panel empty-panel">${emptyState("clock", "No scheduled tasks yet", "Use a one-time reminder or repeat a useful report each day.", "View my bots", "navigate-bots")}</section>`}`
         : `<section class="panel empty-panel">${emptyState("bots", "Choose a bot first", "Schedules belong to one published bot and one approved Telegram recipient.", "Create a bot", "navigate-create")}</section>`
@@ -324,7 +327,7 @@ function compactBot(bot: Bot): string {
 }
 
 function botCard(bot: Bot): string {
-  return `<article class="bot-card" data-bot-card="${escapeHtml(`${bot.name} ${bot.description}`.toLowerCase())}"><div class="bot-card-top"><span class="bot-avatar bot-avatar-large avatar-${colorIndex(bot.name)}">${escapeHtml(monogram(bot.name))}</span>${statusPill(bot.status)}<button class="icon-button card-menu" aria-label="Open ${escapeHtml(bot.name)}" data-route="bot/${escapeHtml(bot.id)}/overview">${icon("dots", 18)}</button></div><button class="bot-card-title" data-route="bot/${escapeHtml(bot.id)}/overview">${escapeHtml(bot.name)}</button><p>${escapeHtml(bot.description || "No description yet.")}</p><div class="bot-card-model"><span class="model-chip">${icon("spark", 13)}${escapeHtml(bot.model.providerId)}</span><span>${escapeHtml(bot.model.model)}</span></div><div class="bot-card-footer"><span>v${bot.version} · ${escapeHtml(bot.visibility)}</span><button class="text-button" data-route="bot/${escapeHtml(bot.id)}/overview">Manage ${icon("arrow", 14)}</button></div></article>`;
+  return `<article class="bot-card" data-bot-card="${escapeHtml(`${bot.name} ${bot.description}`.toLowerCase())}"><div class="bot-card-top"><span class="bot-avatar bot-avatar-large avatar-${colorIndex(bot.name)}">${escapeHtml(monogram(bot.name))}</span>${statusPill(bot.status)}<button class="icon-button card-menu" aria-label="Open ${escapeHtml(bot.name)}" data-route="bot/${escapeHtml(bot.id)}/overview">${icon("dots", 18)}</button></div><button class="bot-card-title" data-route="bot/${escapeHtml(bot.id)}/overview">${escapeHtml(bot.name)}</button><p>${escapeHtml(bot.description || "No description yet.")}</p><div class="bot-card-model"><span class="model-chip">${icon("spark", 13)}${escapeHtml(bot.model.providerId)}</span><span>${escapeHtml(bot.model.model)}</span></div><div class="bot-card-footer"><span>${bot.collaboratorRole ? `${bot.collaboratorRole} access` : `v${bot.version} · ${bot.visibility}`}</span><button class="text-button" data-route="bot/${escapeHtml(bot.id)}/overview">${bot.collaboratorRole ? "Open" : "Manage"} ${icon("arrow", 14)}</button></div></article>`;
 }
 
 function taskRow(task: ScheduledTask): string {
