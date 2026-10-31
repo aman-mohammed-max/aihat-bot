@@ -253,6 +253,12 @@ export interface ConversationHistoryRepository {
     readonly limit: number;
     readonly beforeSequence?: number;
   }): Promise<{ readonly items: readonly StoredConversationMessage[]; readonly hasMore: boolean } | undefined>;
+  deleteOwnedConversation(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly conversationId: ConversationId;
+  }): Promise<boolean>;
 }
 
 export interface UsageRepository {

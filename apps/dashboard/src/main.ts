@@ -528,6 +528,31 @@ async function loadOlderConversationMessages(): Promise<void> {
   render();
 }
 
+async function deleteConversation(): Promise<void> {
+  const bot = requireActiveBot();
+  const conversationId = state.selectedConversationId;
+  const selected = state.conversations.find((conversation) => conversation.id === conversationId);
+  if (!conversationId || !selected) throw new Error("Choose a conversation first.");
+  if (
+    !(await askConfirmation(
+      "Delete this conversation?",
+      "This permanently deletes the conversation and its stored messages. This cannot be undone.",
+      "Delete conversation",
+      true,
+    ))
+  ) {
+    return;
+  }
+  await api(`${botBase(bot.id)}/conversations/${encodeURIComponent(conversationId)}`, { method: "DELETE" });
+  state.conversations = state.conversations.filter((conversation) => conversation.id !== conversationId);
+  state.selectedConversationId = undefined;
+  state.conversationMessages = [];
+  state.conversationHasMore = false;
+  activeConversationBotId = "";
+  navigate(`bot/${encodeURIComponent(bot.id)}/conversations`);
+  showToast("Conversation deleted");
+}
+
 function render(): void {
   if (getPublicChatSlug()) {
     if (!state.publicChatBot && state.publicChatError) {
@@ -710,6 +735,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
     else if (action === "install-skill-no-permission") await installSkill(target.dataset.skillId ?? "", []);
     else if (action === "load-telegram-grants") await loadTelegramGrants(Number(target.dataset.userId));
     else if (action === "load-older-conversation-messages") await loadOlderConversationMessages();
+    else if (action === "delete-conversation") await deleteConversation();
     else if (action === "revoke-bot-grant") await revokeBotGrant(target.dataset.grantId ?? "");
     else if (action === "remove-bot-collaborator") await removeBotCollaborator(target.dataset.userId ?? "");
     else if (action === "delete-memory-record") await deleteBotMemory(target.dataset.memoryKey ?? "");

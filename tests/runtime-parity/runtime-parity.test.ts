@@ -35,6 +35,90 @@ const weatherEndpoint = "https://weather.example.test/lookup";
 const mcpEndpoint = "https://mcp.example.test/mcp";
 
 describe("Bun and Cloudflare runtime repository parity", () => {
+  test("conversation deletion is owner-scoped and cascades messages identically", async () => {
+    const bunDatabase = openSqliteDatabase(":memory:");
+    const cloudflareDatabase = openSqliteDatabase(":memory:");
+    const bunRepositories = new BunSqliteRepositories(bunDatabase);
+    const cloudflareRepositories = new CloudflareD1Repositories(
+      new SqliteD1(cloudflareDatabase) as unknown as D1Database,
+    );
+    try {
+      seedTenant(bunDatabase);
+      seedTenant(cloudflareDatabase);
+      const repositories = [bunRepositories, cloudflareRepositories];
+      const botIds = await Promise.all(
+        repositories.map((repository) =>
+          repository.createDraft({
+            tenantId,
+            ownerId,
+            idempotencyKey: "conversation-deletion-parity",
+            answers: creationAnswers(),
+          }),
+        ),
+      );
+      const conversationIds = await Promise.all(
+        repositories.map((repository, index) => {
+          const botId = botIds[index];
+          if (!botId) throw new Error("Conversation deletion parity bot was not created.");
+          return repository.getOrCreateApiConversation({
+            tenantId,
+            botId,
+            actorId: ownerId,
+            conversationKey: "conversation-deletion-parity-key",
+          });
+        }),
+      );
+      await Promise.all(
+        repositories.map((repository, index) => {
+          const conversationId = conversationIds[index];
+          if (!conversationId) throw new Error("Conversation deletion parity conversation was not created.");
+          return repository.append(tenantId, conversationId, [{ role: "user", content: "Persisted conversation." }]);
+        }),
+      );
+      const unauthorizedResults = await Promise.all(
+        repositories.map((repository, index) => {
+          const botId = botIds[index];
+          const conversationId = conversationIds[index];
+          if (!botId || !conversationId) throw new Error("Conversation deletion parity data is incomplete.");
+          return repository.deleteOwnedConversation({
+            tenantId,
+            ownerId: "user-parity-intruder" as UserId,
+            botId,
+            conversationId,
+          });
+        }),
+      );
+      expect(unauthorizedResults).toEqual([false, false]);
+      const protectedCounts = [bunDatabase, cloudflareDatabase].map(
+        (database, index) =>
+          database
+            .query<{ count: number }, [string]>("SELECT count(*) AS count FROM messages WHERE conversation_id = ?")
+            .get(conversationIds[index] ?? "")?.count,
+      );
+      expect(protectedCounts).toEqual([1, 1]);
+
+      const deletedResults = await Promise.all(
+        repositories.map((repository, index) => {
+          const botId = botIds[index];
+          const conversationId = conversationIds[index];
+          if (!botId || !conversationId) throw new Error("Conversation deletion parity data is incomplete.");
+          return repository.deleteOwnedConversation({ tenantId, ownerId, botId, conversationId });
+        }),
+      );
+      expect(deletedResults).toEqual([true, true]);
+      const remainingCounts = [bunDatabase, cloudflareDatabase].map(
+        (database, index) =>
+          database
+            .query<{ count: number }, [string]>("SELECT count(*) AS count FROM messages WHERE conversation_id = ?")
+            .get(conversationIds[index] ?? "")?.count,
+      );
+      expect(remainingCounts).toEqual([0, 0]);
+    } finally {
+      bunDatabase.close();
+      cloudflareDatabase.close();
+    }
+  });
+
   test("customer Telegram request limits are per deployment and sender and windowed identically", async () => {
     const bunDatabase = openSqliteDatabase(":memory:");
     const cloudflareDatabase = openSqliteDatabase(":memory:");

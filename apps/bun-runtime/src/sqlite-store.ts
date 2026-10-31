@@ -1892,6 +1892,27 @@ export class BunSqliteRepositories
     return { items: pageRows.map(mapStoredMessage), hasMore };
   }
 
+  async deleteOwnedConversation(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    conversationId: ConversationId;
+  }): Promise<boolean> {
+    const result = this.#db
+      .query(`
+        DELETE FROM conversations
+        WHERE tenant_id = ? AND bot_id = ? AND id = ?
+          AND EXISTS (
+            SELECT 1 FROM bots
+            WHERE bots.tenant_id = conversations.tenant_id
+              AND bots.id = conversations.bot_id
+              AND bots.owner_id = ?
+          )
+      `)
+      .run(input.tenantId, input.botId, input.conversationId, input.ownerId);
+    return result.changes === 1;
+  }
+
   async recordUsage(record: UsageRecord): Promise<void> {
     this.#db
       .query(

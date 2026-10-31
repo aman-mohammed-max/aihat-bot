@@ -5,6 +5,7 @@ import type { ConversationHistoryRepository } from "./ports.js";
 import type { BotId, ConversationId } from "./types.js";
 
 const LIST_ROUTE = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/conversations$/;
+const CONVERSATION_ROUTE = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/conversations\/(conversation_[a-f0-9-]{36})$/;
 const MESSAGES_ROUTE = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/conversations\/(conversation_[a-f0-9-]{36})\/messages$/;
 
 /** Owner-only browsing of persisted bot conversations. Platform identifiers are never returned. */
@@ -15,13 +16,26 @@ export function createConversationHistoryApiHandler(
   return async (request) => {
     const url = new URL(request.url);
     const listMatch = LIST_ROUTE.exec(url.pathname);
+    const conversationMatch = CONVERSATION_ROUTE.exec(url.pathname);
     const messagesMatch = MESSAGES_ROUTE.exec(url.pathname);
-    if (!listMatch && !messagesMatch) return undefined;
+    if (!listMatch && !conversationMatch && !messagesMatch) return undefined;
 
     try {
       const principal = await authenticator.authenticate(request);
+      if (conversationMatch) {
+        if (request.method !== "DELETE") return methodNotAllowed("DELETE");
+        await requireApiScope(principal, "bots:write");
+        const deleted = await conversations.deleteOwnedConversation({
+          tenantId: principal.tenantId,
+          ownerId: principal.ownerId,
+          botId: conversationMatch[1] as BotId,
+          conversationId: conversationMatch[2] as ConversationId,
+        });
+        if (!deleted) throw new AppError("NOT_FOUND", "Conversation was not found.", 404);
+        return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+      }
+      if (request.method !== "GET") return methodNotAllowed("GET");
       await requireApiScope(principal, "bots:read");
-      if (request.method !== "GET") return methodNotAllowed();
       const limit = parseInteger(url.searchParams.get("limit"), 50, 1, 100, "limit");
 
       if (listMatch) {
@@ -91,9 +105,9 @@ function invalidParameter(name: string, minimum: number, maximum: number): AppEr
   return new AppError("VALIDATION_ERROR", `${name} must be an integer from ${minimum} to ${maximum}.`, 400);
 }
 
-function methodNotAllowed(): Response {
+function methodNotAllowed(allow: "GET" | "DELETE"): Response {
   return Response.json(
-    { error: "METHOD_NOT_ALLOWED", message: "Use GET for this endpoint." },
-    { status: 405, headers: { allow: "GET", "cache-control": "no-store" } },
+    { error: "METHOD_NOT_ALLOWED", message: `Use ${allow} for this endpoint.` },
+    { status: 405, headers: { allow, "cache-control": "no-store" } },
   );
 }

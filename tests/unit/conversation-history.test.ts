@@ -36,6 +36,7 @@ describe("owner-scoped conversation history API", () => {
         { role: "user", content: "Second question" },
       ]);
       const token = await issueToken(repositories, ownerId, ["bots:read"]);
+      const writeToken = await issueToken(repositories, ownerId, ["bots:read", "bots:write"]);
       const handler = createConversationHistoryApiHandler(
         new ApiTokenAuthenticator(repositories.apiTokens),
         repositories,
@@ -94,6 +95,29 @@ describe("owner-scoped conversation history API", () => {
       expect(
         afterWebChatBody.items.some((item) => item.id === webChatConversationId && item.platform === "web_chat"),
       ).toBe(true);
+
+      const readDenied = await handler(
+        new Request(`${base}/${conversationId}`, {
+          method: "DELETE",
+          headers: { authorization: `Bearer ${token}` },
+        }),
+      );
+      expect(readDenied?.status).toBe(403);
+      const deleted = await handler(
+        new Request(`${base}/${conversationId}`, {
+          method: "DELETE",
+          headers: { authorization: `Bearer ${writeToken}` },
+        }),
+      );
+      expect(deleted?.status).toBe(204);
+      const messageCount = db
+        .query<{ count: number }, [string]>("SELECT count(*) AS count FROM messages WHERE conversation_id = ?")
+        .get(conversationId)?.count;
+      expect(messageCount).toBe(0);
+      const deletedHistory = await handler(
+        new Request(`${base}/${conversationId}/messages`, { headers: { authorization: `Bearer ${token}` } }),
+      );
+      expect(deletedHistory?.status).toBe(404);
     } finally {
       db.close();
     }
@@ -110,6 +134,13 @@ describe("owner-scoped conversation history API", () => {
         idempotencyKey: "conversation-history-other-bot",
         answers: creationAnswers(),
       });
+      const conversationId = await repositories.getOrCreateApiConversation({
+        tenantId,
+        botId,
+        actorId: otherOwnerId,
+        conversationKey: "private-other-owner-key",
+      });
+      await repositories.append(tenantId, conversationId, [{ role: "user", content: "Private owner message" }]);
       const ownerToken = await issueToken(repositories, ownerId, ["bots:read"]);
       const writeOnlyToken = await issueToken(repositories, ownerId, ["bots:write"]);
       const handler = createConversationHistoryApiHandler(
@@ -124,6 +155,17 @@ describe("owner-scoped conversation history API", () => {
         new Request(endpoint, { headers: { authorization: `Bearer ${writeOnlyToken}` } }),
       );
       expect(forbidden?.status).toBe(403);
+      const hiddenDelete = await handler(
+        new Request(`${endpoint}/${conversationId}`, {
+          method: "DELETE",
+          headers: { authorization: `Bearer ${writeOnlyToken}` },
+        }),
+      );
+      expect(hiddenDelete?.status).toBe(404);
+      const privateMessageCount = db
+        .query<{ count: number }, [string]>("SELECT count(*) AS count FROM messages WHERE conversation_id = ?")
+        .get(conversationId)?.count;
+      expect(privateMessageCount).toBe(1);
     } finally {
       db.close();
     }

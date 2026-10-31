@@ -2203,6 +2203,28 @@ export class CloudflareD1Repositories
     return { items: rows.map(mapStoredConversationMessage), hasMore };
   }
 
+  async deleteOwnedConversation(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    botId: BotId;
+    conversationId: ConversationId;
+  }): Promise<boolean> {
+    const result = await this.db
+      .prepare(`
+        DELETE FROM conversations
+        WHERE tenant_id = ? AND bot_id = ? AND id = ?
+          AND EXISTS (
+            SELECT 1 FROM bots
+            WHERE bots.tenant_id = conversations.tenant_id
+              AND bots.id = conversations.bot_id
+              AND bots.owner_id = ?
+          )
+      `)
+      .bind(input.tenantId, input.botId, input.conversationId, input.ownerId)
+      .run();
+    return result.meta.changes === 1;
+  }
+
   async recordUsage(record: UsageRecord): Promise<void> {
     await this.db
       .prepare(`
