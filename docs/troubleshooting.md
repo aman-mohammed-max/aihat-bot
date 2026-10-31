@@ -29,6 +29,7 @@ Browser sign-in uses Telegram's OIDC ID token flow and is separate from Mini App
 - Keep Telegram's signing algorithm set to **RS256**; the current ID-token verifier rejects other algorithms.
 - Rebuild and deploy the development Worker, then verify `GET /v1/auth/telegram/browser-config` returns `enabled: true` and the configured Client ID. The sign-in button appears on the dashboard and public Web Chat login pages.
 - Do not set `Cross-Origin-Opener-Policy: same-origin`; Telegram's popup login library requires popups to communicate with the opener. If a COOP policy is added, use `same-origin-allow-popups` as described in Telegram's [login library guidance](https://core.telegram.org/bots/telegram-login#callback-data).
+- Dashboard and Web Chat HTML responses include a restrictive Content Security Policy. It permits the local dashboard bundle, Telegram login scripts, Google Fonts, and HTTPS/data images. If you change the dashboard's external resources, update the policy in `packages/core/src/dashboard-security.ts` and keep the Telegram-compatible opener policy.
 
 ## Master bot commands
 

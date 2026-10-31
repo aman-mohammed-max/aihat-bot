@@ -18,6 +18,7 @@ import {
   createOpenAICompatibleAgentEngine,
   hasVerifiedStructuredOutputOrigin,
   hasVerifiedStreamingOrigin,
+  withDashboardSecurityHeaders,
   createManagementApiHandler,
   createBotManagementApiHandler,
   createBotOwnershipTransfersApiHandler,
@@ -438,7 +439,7 @@ async function serveMiniApp(request: Request, url: URL): Promise<Response | unde
     const index = Bun.file(`${dashboardDir}/index.html`);
     if (!(await index.exists()))
       return new Response("Dashboard assets are missing. Run `bun run build:dashboard` first.", { status: 503 });
-    return new Response(request.method === "HEAD" ? null : index, {
+    const response = new Response(request.method === "HEAD" ? null : index, {
       headers: {
         "content-type": "text/html; charset=utf-8",
         "cache-control": "no-store",
@@ -446,6 +447,7 @@ async function serveMiniApp(request: Request, url: URL): Promise<Response | unde
         "x-content-type-options": "nosniff",
       },
     });
+    return withDashboardSecurityHeaders(response);
   }
   const asset = /^\/miniapp\/assets\/([A-Za-z0-9_-]+\.(?:js|css))$/.exec(url.pathname);
   if (asset && (request.method === "GET" || request.method === "HEAD")) {

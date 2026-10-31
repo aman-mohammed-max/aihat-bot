@@ -22,6 +22,7 @@ import {
   createOpenAICompatibleAgentEngine,
   hasVerifiedStructuredOutputOrigin,
   hasVerifiedStreamingOrigin,
+  withDashboardSecurityHeaders,
   createManagementApiHandler,
   createBotManagementApiHandler,
   createBotOwnershipTransfersApiHandler,
@@ -637,11 +638,7 @@ async function serveMiniApp(request: Request, assets: Fetcher): Promise<Response
   const publicChatPage = publicChatPath !== null;
   if ((url.pathname === "/miniapp/" || publicChatPage) && (request.method === "GET" || request.method === "HEAD")) {
     const response = await assets.fetch(new Request(new URL("/", url), request));
-    const headers = new Headers(response.headers);
-    headers.set("cache-control", "no-store");
-    headers.set("referrer-policy", "no-referrer");
-    headers.set("x-content-type-options", "nosniff");
-    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+    return withDashboardSecurityHeaders(response);
   }
   const asset = /^\/miniapp\/assets\/([A-Za-z0-9_-]+\.(?:js|css))$/.exec(url.pathname);
   if (asset && (request.method === "GET" || request.method === "HEAD")) {

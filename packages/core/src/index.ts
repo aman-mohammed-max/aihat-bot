@@ -3,6 +3,7 @@ export * from "./ports.js";
 export * from "./errors.js";
 export * from "./log-redaction.js";
 export * from "./capabilities.js";
+export * from "./dashboard-security.js";
 export * from "./config.js";
 export * from "./model.js";
 export * from "./model-catalog.js";
