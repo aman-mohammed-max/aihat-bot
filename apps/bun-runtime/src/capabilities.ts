@@ -6,6 +6,8 @@ export const runtimeCapabilities: RuntimeCapabilities = {
     sharedAgentEngine: true,
     databasePersistence: true,
     objectStorage: true,
+    uploadedFileManagement: true,
+    fileMalwareScanning: false,
     encryptedSecrets: true,
     persistentBackgroundJobs: true,
     durableObjectSqlite: false,

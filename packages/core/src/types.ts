@@ -139,6 +139,22 @@ export interface UsageSummary {
   readonly byBot: readonly (UsageTotal & { readonly botId: BotId; readonly botName: string })[];
 }
 
+export type UploadedFileScanStatus = "pending_scan" | "clean" | "rejected" | "scan_failed";
+
+export interface UploadedFile {
+  readonly id: string;
+  readonly botId: BotId;
+  readonly fileName: string;
+  readonly contentType: string;
+  readonly size: number;
+  readonly etag: string;
+  readonly scanStatus: UploadedFileScanStatus;
+  readonly scanner?: string;
+  readonly scannedAt?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export interface AuditLogEvent {
   readonly id: string;
   readonly action: string;

@@ -217,6 +217,7 @@ describe("Telegram webhook integration", () => {
         secrets: secretStore,
         engine,
         objects,
+        malwareScanner: { scan: async () => ({ verdict: "clean", scanner: "test-av" }) },
         webhookBaseUrl: "https://public.example.test",
         fetch: fetchMock,
       });

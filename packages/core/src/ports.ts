@@ -24,6 +24,7 @@ import type {
   JobId,
   UsageRecord,
   UsageSummary,
+  UploadedFile,
   BotMemoryRecord,
   BotAccessGrant,
   BotAccessDecision,
@@ -642,6 +643,56 @@ export interface ObjectStore {
   }): Promise<StoredObjectMetadata>;
   getStream(tenantId: TenantId, objectId: string): Promise<StoredObjectStream | undefined>;
   delete(tenantId: TenantId, objectId: string): Promise<void>;
+}
+
+/** Tenant- and bot-scoped metadata for durable uploads; file bytes remain in ObjectStore. */
+export interface UploadedFileRepository {
+  getOwnedUploadedFileUsage(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+  }): Promise<{ readonly files: number; readonly bytes: number }>;
+  createUploadedFile(input: {
+    readonly file: UploadedFile;
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+  }): Promise<void>;
+  getOwnedUploadedFile(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly fileId: string;
+  }): Promise<UploadedFile | undefined>;
+  listOwnedUploadedFiles(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly limit: number;
+  }): Promise<readonly UploadedFile[]>;
+  setUploadedFileScanStatus(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly fileId: string;
+    readonly status: UploadedFile["scanStatus"];
+    readonly scanner?: string;
+    readonly scannedAt: string;
+  }): Promise<UploadedFile | undefined>;
+  deleteOwnedUploadedFile(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly botId: BotId;
+    readonly fileId: string;
+  }): Promise<boolean>;
+}
+
+export interface MalwareScanner {
+  scan(input: {
+    readonly fileName: string;
+    readonly contentType: string;
+    readonly bytes: Uint8Array;
+    readonly signal?: AbortSignal;
+  }): Promise<{ readonly verdict: "clean" | "infected"; readonly scanner: string }>;
 }
 
 export interface ApiTokenPrincipal {

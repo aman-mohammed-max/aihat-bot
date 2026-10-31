@@ -37,6 +37,9 @@ import {
   createMemoryApiHandler,
   createMemoryAwareAgentEngine,
   createEncryptedMemoryService,
+  UploadedFilesService,
+  createUploadedFilesApiHandler,
+  createOptionalHttpMalwareScanner,
   ScheduledTaskService,
   ScheduledTaskRunner,
   createScheduledTasksApiHandler,
@@ -47,12 +50,32 @@ import {
 } from "@aihat/core";
 import { BunSqliteRepositories } from "./sqlite-store.js";
 import { BunFileObjectStore } from "./file-object-store.js";
+import { BunSqliteUploadedFileRepository } from "./uploaded-file-repository.js";
 
 const config = parseBunRuntimeConfig(process.env);
 const logger = new JsonLogger(config.logLevel);
 const db = openSqliteDatabase(config.databasePath);
 const repositories = new BunSqliteRepositories(db);
 const objects = new BunFileObjectStore(process.env.OBJECTS_PATH ?? "./data/objects");
+const uploadedFileRepository = new BunSqliteUploadedFileRepository(db);
+const fileScannerOrigins = new Set(
+  (process.env.FILE_SCANNER_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
+const malwareScanner = createOptionalHttpMalwareScanner({
+  ...(process.env.FILE_SCANNER_ENDPOINT ? { endpoint: process.env.FILE_SCANNER_ENDPOINT } : {}),
+  ...(process.env.FILE_SCANNER_TOKEN ? { token: process.env.FILE_SCANNER_TOKEN } : {}),
+  allowedOrigins: fileScannerOrigins,
+});
+const uploadedFilesService = new UploadedFilesService({
+  bots: repositories,
+  files: uploadedFileRepository,
+  objects,
+  ...(malwareScanner ? { scanner: malwareScanner } : {}),
+  runtime: "bun",
+});
 const authenticator = new ApiTokenAuthenticator(repositories.apiTokens, { authorizationAudit: repositories });
 const telegramMasterBotToken = process.env.TELEGRAM_MASTER_BOT_TOKEN ?? process.env.TELEGRAME_BOT_TOKEN ?? "";
 const telegramWebAppAuth = createTelegramWebAppAuthHandler({
@@ -161,6 +184,7 @@ const telegram = new TelegramManager({
   secrets: secretStore,
   engine: agentEngine,
   objects,
+  ...(malwareScanner ? { malwareScanner } : {}),
   webhookBaseUrl: process.env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
 });
 const scheduledTaskService = new ScheduledTaskService(repositories, repositories, telegram);
@@ -206,6 +230,7 @@ const auditLogApi = createAuditLogApiHandler(authenticator, repositories);
 const tenantMembersApi = createTenantMembersApiHandler(authenticator, repositories.tenantMembers);
 const workspacesApi = createWorkspacesApiHandler(authenticator, repositories.apiTokens, repositories.tenantMembers);
 const memoryApi = createMemoryApiHandler(authenticator, memoryService);
+const uploadedFilesApi = createUploadedFilesApiHandler(authenticator, uploadedFilesService);
 const skillsApi = createSkillsApiHandler(authenticator, repositories, repositories.skills, secretStore);
 const globalSkillCatalogAdminApi = createGlobalSkillCatalogAdminHandler({
   skills: repositories.skills,
@@ -245,6 +270,8 @@ const server = Bun.serve({
     if (workspacesResponse) return workspacesResponse;
     const memoryResponse = await memoryApi(request);
     if (memoryResponse) return memoryResponse;
+    const uploadedFilesResponse = await uploadedFilesApi(request);
+    if (uploadedFilesResponse) return uploadedFilesResponse;
     const botManagementResponse = await botManagementApi(request);
     if (botManagementResponse) return botManagementResponse;
     const botAccessResponse = await botAccessApi(request);
@@ -272,6 +299,7 @@ const server = Bun.serve({
           telegram: Boolean(process.env.TELEGRAM_WEBHOOK_BASE_URL),
           telegramMiniAppAuth: Boolean(telegramMasterBotToken),
           telegramMasterBot: Boolean(telegramMasterBot),
+          fileMalwareScanning: Boolean(malwareScanner),
           modelStreaming: hasVerifiedStreamingOrigin(
             new Set(
               (process.env.MODEL_ALLOWED_ORIGINS ?? "")

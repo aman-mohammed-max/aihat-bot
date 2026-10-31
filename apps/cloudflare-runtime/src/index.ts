@@ -2,6 +2,7 @@ import { CloudflareD1Repositories } from "./d1-repositories.js";
 import { BotCoordinator } from "./coordinator.js";
 import { CloudflareAlarmScheduler } from "./scheduler.js";
 import { CloudflareR2ObjectStore } from "./r2-object-store.js";
+import { CloudflareD1UploadedFileRepository } from "./uploaded-file-repository.js";
 import {
   ApiTokenAuthenticator,
   BotFactory,
@@ -36,6 +37,9 @@ import {
   createMemoryApiHandler,
   createMemoryAwareAgentEngine,
   createEncryptedMemoryService,
+  UploadedFilesService,
+  createUploadedFilesApiHandler,
+  createOptionalHttpMalwareScanner,
   ScheduledTaskService,
   ScheduledTaskRunner,
   createScheduledTasksApiHandler,
@@ -62,6 +66,8 @@ export const runtimeCapabilities = {
     queueEnqueue: true,
     queueProcessing: true,
     objectStorage: true,
+    uploadedFileManagement: true,
+    fileMalwareScanning: false,
     encryptedSecrets: true,
     authentication: true,
     longTermMemory: true,
@@ -113,6 +119,23 @@ export default {
     })(request);
     if (secretRotationResponse) return secretRotationResponse;
     const authenticator = new ApiTokenAuthenticator(d1.apiTokens, { authorizationAudit: d1 });
+    const malwareScanner = createOptionalHttpMalwareScanner({
+      ...(env.FILE_SCANNER_ENDPOINT ? { endpoint: env.FILE_SCANNER_ENDPOINT } : {}),
+      ...(env.FILE_SCANNER_TOKEN ? { token: env.FILE_SCANNER_TOKEN } : {}),
+      allowedOrigins: new Set(
+        env.FILE_SCANNER_ALLOWED_ORIGINS.split(",")
+          .map((origin) => origin.trim())
+          .filter(Boolean),
+      ),
+    });
+    const uploadedFilesService = new UploadedFilesService({
+      bots: d1,
+      files: new CloudflareD1UploadedFileRepository(env.DB),
+      objects: objectStore(env),
+      ...(malwareScanner ? { scanner: malwareScanner } : {}),
+      runtime: "cloudflare",
+    });
+    const uploadedFilesApi = createUploadedFilesApiHandler(authenticator, uploadedFilesService);
     const telegramMasterBotToken = env.TELEGRAM_MASTER_BOT_TOKEN ?? env.TELEGRAME_BOT_TOKEN ?? "";
     const telegramWebAppAuth = createTelegramWebAppAuthHandler({
       botToken: telegramMasterBotToken,
@@ -166,6 +189,8 @@ export default {
     const memoryService = createEncryptedMemoryService(d1, secretStore);
     const memoryResponse = await createMemoryApiHandler(authenticator, memoryService)(request);
     if (memoryResponse) return memoryResponse;
+    const uploadedFilesResponse = await uploadedFilesApi(request);
+    if (uploadedFilesResponse) return uploadedFilesResponse;
     const skillsResponse = await createSkillsApiHandler(authenticator, d1, d1.skills, secretStore)(request);
     if (skillsResponse) return skillsResponse;
     const mcpManager = new McpManager({
@@ -253,6 +278,7 @@ export default {
       secrets: secretStore,
       engine: agentEngine,
       objects: objectStore(env),
+      ...(malwareScanner ? { malwareScanner } : {}),
       webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
     });
     const scheduledTaskService = new ScheduledTaskService(d1, d1, telegram, scheduler(env));
@@ -297,6 +323,7 @@ export default {
           telegram: Boolean(env.TELEGRAM_WEBHOOK_BASE_URL),
           telegramMiniAppAuth: Boolean(telegramMasterBotToken),
           telegramMasterBot: Boolean(masterBot),
+          fileMalwareScanning: Boolean(malwareScanner),
           modelStreaming: hasVerifiedStreamingOrigin(
             new Set(
               env.MODEL_ALLOWED_ORIGINS.split(",")

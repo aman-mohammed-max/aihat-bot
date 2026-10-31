@@ -2,6 +2,7 @@ import { AppError } from "./errors.js";
 import type {
   AgentEngine,
   BotRepository,
+  MalwareScanner,
   ObjectStore,
   SecretStore,
   SecretWriter,
@@ -25,6 +26,7 @@ export class TelegramManager {
   readonly #engine: AgentEngine;
   readonly #webhookBaseUrl: string;
   readonly #objects: ObjectStore | undefined;
+  readonly #malwareScanner: MalwareScanner | undefined;
   readonly #fetch: FetchLike;
 
   constructor(input: {
@@ -34,6 +36,7 @@ export class TelegramManager {
     readonly engine: AgentEngine;
     readonly webhookBaseUrl: string;
     readonly objects?: ObjectStore;
+    readonly malwareScanner?: MalwareScanner;
     readonly fetch?: FetchLike;
   }) {
     this.#repository = input.repository;
@@ -42,6 +45,7 @@ export class TelegramManager {
     this.#engine = input.engine;
     this.#webhookBaseUrl = input.webhookBaseUrl;
     this.#objects = input.objects;
+    this.#malwareScanner = input.malwareScanner;
     this.#fetch = input.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
@@ -462,6 +466,9 @@ export class TelegramManager {
     const imageType = detectImageType(bytes);
     if (imageRequested) {
       if (!imageType) return { unsupported: "That image format isn't supported. Send a JPEG, PNG, or WebP image." };
+      if (!(await this.#scanAttachment(name, imageType, bytes))) {
+        return { unsupported: "That image could not pass security scanning. Ask the bot owner to check the file scanner." };
+      }
       const objectId = `tg_${crypto.randomUUID().replaceAll("-", "")}`;
       try {
         await this.#objects.put({ tenantId: deployment.tenantId, objectId, contentType: imageType, bytes });
@@ -484,6 +491,9 @@ export class TelegramManager {
       return { unsupported: "That file isn't valid UTF-8 text. Send a .txt, .md, or .csv file." };
     }
     if (text.includes("\0")) return { unsupported: "That file doesn't look like a text document." };
+    if (!(await this.#scanAttachment(name, "text/plain", bytes))) {
+      return { unsupported: "That document could not pass security scanning. Ask the bot owner to check the file scanner." };
+    }
     const objectId = `tg_${crypto.randomUUID().replaceAll("-", "")}`;
     try {
       await this.#objects.put({
@@ -499,6 +509,16 @@ export class TelegramManager {
       return { text: `[Attached text file: ${name}]\n${text.slice(0, MAX_TELEGRAM_TEXT_CHARS)}` };
     } finally {
       await this.#objects.delete(deployment.tenantId, objectId).catch(() => undefined);
+    }
+  }
+
+  async #scanAttachment(fileName: string, contentType: string, bytes: Uint8Array): Promise<boolean> {
+    if (!this.#malwareScanner) return false;
+    try {
+      const result = await this.#malwareScanner.scan({ fileName, contentType, bytes });
+      return result.verdict === "clean";
+    } catch {
+      return false;
     }
   }
 

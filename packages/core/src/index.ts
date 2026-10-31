@@ -46,3 +46,6 @@ export * from "./usage.js";
 export * from "./usage-http-api.js";
 export * from "./memory.js";
 export * from "./memory-http-api.js";
+export * from "./file-scanner.js";
+export * from "./uploaded-files.js";
+export * from "./uploaded-files-http-api.js";
