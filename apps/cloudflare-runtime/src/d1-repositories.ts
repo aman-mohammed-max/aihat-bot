@@ -3967,7 +3967,7 @@ export class CloudflareD1Repositories
       `)
       .bind(input.tokenHash)
       .first<TenantInvitationRow>();
-    if (!invitation || invitation.status !== "pending" || invitation.expires_at <= input.now) {
+    if (invitation?.status !== "pending" || invitation.expires_at <= input.now) {
       throw new AppError("NOT_FOUND", "Invitation is invalid, expired, or already used.", 404);
     }
     if (await this.getActiveTenantRole({ tenantId: invitation.tenant_id as TenantId, userId: input.userId })) {

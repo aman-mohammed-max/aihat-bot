@@ -1099,8 +1099,7 @@ function memoryRepository() {
       );
       const lease = reconnectLeases.get(input.serverId);
       if (
-        !server ||
-        server.status !== "unhealthy" ||
+        server?.status !== "unhealthy" ||
         (server.reconnectAttempts ?? 0) >= input.maxAttempts ||
         (server.reconnectAfter !== undefined && server.reconnectAfter > input.now) ||
         (lease !== undefined && lease.leaseUntil > input.now)
@@ -1118,8 +1117,7 @@ function memoryRepository() {
       );
       const lease = reconnectLeases.get(input.serverId);
       if (
-        !server ||
-        server.status !== "unhealthy" ||
+        server?.status !== "unhealthy" ||
         server.reconnectAttempts !== input.attempt ||
         lease?.leaseToken !== input.leaseToken
       ) {

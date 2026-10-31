@@ -3472,7 +3472,7 @@ export class BunSqliteRepositories
           FROM tenant_invitations WHERE token_hash = ?
         `)
         .get(input.tokenHash);
-      if (!invitation || invitation.status !== "pending" || invitation.expires_at <= input.now) {
+      if (invitation?.status !== "pending" || invitation.expires_at <= input.now) {
         throw new AppError("NOT_FOUND", "Invitation is invalid, expired, or already used.", 404);
       }
       const membership = this.#db
