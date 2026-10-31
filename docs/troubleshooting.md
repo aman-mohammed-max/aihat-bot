@@ -37,7 +37,7 @@ The Mini App sign-in does not require the master bot webhook. To use `/create`, 
 - Model endpoint errors with `403` mean the HTTPS origin is missing from `MODEL_ALLOWED_ORIGINS`. Add only reviewed exact origins; credentials are resolved only after the egress check.
 - Streaming is enabled only when the endpoint origin appears in both `MODEL_ALLOWED_ORIGINS` and `MODEL_STREAMING_ORIGINS`.
 - Strict structured output additionally requires the origin in `MODEL_STRUCTURED_OUTPUT_ORIGINS`. It is disabled by default; streaming and structured output cannot be combined.
-- HTTP skills require their endpoint origin in `HTTP_SKILL_ALLOWED_ORIGINS`. MCP servers require `MCP_ALLOWED_ORIGINS`; MCP currently supports static bearer tokens, not OAuth.
+- HTTP skills require their endpoint origin in `HTTP_SKILL_ALLOWED_ORIGINS`. MCP endpoints and OAuth issuer/token origins must be listed in `MCP_ALLOWED_ORIGINS`. MCP supports encrypted bearer credentials and server-to-server OAuth client credentials; interactive user-consent OAuth is not implemented.
 - If an HTTP skill is not discoverable, check its installation, enabled state, declared permissions, actor grants, and origin allowlist. MCP tools start disabled and need explicit grants.
 - Model HTTP errors 408, 429, 500, 502, 503, and 504 may retry for non-streaming requests. Set `MODEL_RETRY_MAX_ATTEMPTS` to 1–3 and `MODEL_RETRY_BACKOFF_MS` to 0–3000; network failures and streaming requests fail without replay to avoid duplicate cost or repeated text deltas.
 

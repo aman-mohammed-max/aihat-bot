@@ -82,7 +82,7 @@ export const runtimeCapabilities = {
     telegram: true,
     telegramMasterBot: false,
     mcp: true,
-    mcpOAuth: false,
+    mcpOAuth: true,
     arbitraryCodeExecution: false,
   },
 } as const;
@@ -198,6 +198,7 @@ export default {
     const mcpManager = new McpManager({
       repository: d1.mcp,
       secrets: secretStore,
+      secretWriter: secretStore,
       telegramGrants: d1,
       authorizationAudit: d1,
       allowedOrigins: new Set(
@@ -399,6 +400,7 @@ export default {
     const mcpManager = new McpManager({
       repository: d1.mcp,
       secrets: secretStore,
+      secretWriter: secretStore,
       telegramGrants: d1,
       authorizationAudit: d1,
       allowedOrigins: new Set(

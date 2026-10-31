@@ -2602,6 +2602,9 @@ kbd {
   justify-content: flex-end;
   gap: 7px;
 }
+[data-mcp-auth-fields][hidden] {
+  display: none;
+}
 .mcp-tools {
   display: grid;
   gap: 4px;

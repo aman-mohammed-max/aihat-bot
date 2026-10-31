@@ -194,6 +194,231 @@ describe("MCP manager", () => {
     expect(state.servers[0]?.status).toBe("unhealthy");
   });
 
+  test("stores MCP OAuth client credentials behind the secret writer and allowlists the issuer", async () => {
+    const state = memoryRepository();
+    const stored: string[] = [];
+    const manager = new McpManager({
+      repository: state.repository,
+      secrets: { resolve: async () => "unused" },
+      secretWriter: {
+        put: async (_tenant, value) => {
+          stored.push(value);
+          return "secret_00000000000000000000000000000001";
+        },
+        delete: async () => {},
+      },
+      allowedOrigins: new Set(["https://mcp.example.com", "https://auth.example.com"]),
+    });
+    await manager.addServer({
+      id: "mcp_oauth",
+      tenantId,
+      botId,
+      name: "OAuth server",
+      endpoint,
+      authentication: {
+        mode: "oauth_client_credentials",
+        clientId: "bot-factory",
+        clientSecret: "oauth-client-secret",
+        issuer: "https://auth.example.com",
+        scope: "tools:read tools:run",
+      },
+      installedBy: ownerId,
+    });
+    expect(state.servers[0]).toMatchObject({
+      id: "mcp_oauth",
+      credentialRef: "secret_00000000000000000000000000000001",
+    });
+    expect(stored[0]).toContain("aihat:mcp:oauth-client-credentials:v1:");
+
+    const rejected = new McpManager({
+      repository: state.repository,
+      secrets: { resolve: async () => "unused" },
+      secretWriter: {
+        put: async () => {
+          throw new Error("must not store rejected credentials");
+        },
+        delete: async () => {},
+      },
+      allowedOrigins: new Set(["https://mcp.example.com"]),
+    });
+    await expect(
+      rejected.addServer({
+        id: "mcp_bad_oauth",
+        tenantId,
+        botId,
+        name: "Unapproved issuer",
+        endpoint,
+        authentication: {
+          mode: "oauth_client_credentials",
+          clientId: "bot-factory",
+          clientSecret: "oauth-client-secret",
+          issuer: "https://auth.example.com",
+        },
+        installedBy: ownerId,
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(state.servers).toHaveLength(1);
+  });
+
+  test("uses OAuth client credentials for an allowlisted MCP authorization server", async () => {
+    const state = memoryRepository();
+    let storedSecret = "";
+    let tokenRequests = 0;
+    let authenticatedMcpRequests = 0;
+    const fetchMock: TestFetch = async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.origin === "https://auth.example.com" && url.pathname.includes("oauth-authorization-server")) {
+        return Response.json({
+          issuer: "https://auth.example.com",
+          authorization_endpoint: "https://auth.example.com/authorize",
+          token_endpoint: "https://auth.example.com/token",
+          response_types_supported: ["code"],
+          grant_types_supported: ["client_credentials"],
+          token_endpoint_auth_methods_supported: ["client_secret_basic"],
+        });
+      }
+      if (url.origin === "https://auth.example.com" && url.pathname === "/token") {
+        tokenRequests += 1;
+        const form = new URLSearchParams(await request.text());
+        expect(form.get("grant_type")).toBe("client_credentials");
+        expect(request.headers.get("authorization")).toBeTruthy();
+        return Response.json({ access_token: "mcp-access-token", token_type: "Bearer", expires_in: 300 });
+      }
+      if (url.origin === "https://mcp.example.com" && url.pathname.includes("oauth-protected-resource")) {
+        return Response.json({
+          resource: endpoint,
+          authorization_servers: ["https://auth.example.com"],
+          bearer_methods_supported: ["header"],
+        });
+      }
+      if (url.origin === "https://mcp.example.com" && url.pathname === "/mcp") {
+        if (request.headers.get("authorization") !== "Bearer mcp-access-token") {
+          return new Response(null, {
+            status: 401,
+            headers: {
+              "www-authenticate":
+                'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"',
+            },
+          });
+        }
+        authenticatedMcpRequests += 1;
+        const message = (await request.json()) as {
+          id?: string | number;
+          method: string;
+          params?: Record<string, unknown>;
+        };
+        if (message.id === undefined) return new Response(null, { status: 202 });
+        const result =
+          message.method === "initialize"
+            ? {
+                protocolVersion: message.params?.protocolVersion ?? "2025-11-25",
+                capabilities: { tools: {} },
+                serverInfo: { name: "OAuth MCP", version: "1" },
+              }
+            : { tools: [tool] };
+        return Response.json({ jsonrpc: "2.0", id: message.id, result });
+      }
+      throw new Error(`Unexpected request origin or route: ${url.origin}${url.pathname}`);
+    };
+    const manager = new McpManager({
+      repository: state.repository,
+      secrets: { resolve: async () => storedSecret },
+      secretWriter: {
+        put: async (_tenant, value) => {
+          storedSecret = value;
+          return "secret_00000000000000000000000000000003";
+        },
+        delete: async () => {},
+      },
+      allowedOrigins: new Set(["https://mcp.example.com", "https://auth.example.com"]),
+      fetch: fetchMock,
+    });
+    await manager.addServer({
+      id: "mcp_oauth_discovery",
+      tenantId,
+      botId,
+      name: "OAuth discovery test",
+      endpoint,
+      authentication: {
+        mode: "oauth_client_credentials",
+        clientId: "bot-factory",
+        clientSecret: "oauth-client-secret",
+        issuer: "https://auth.example.com",
+      },
+      installedBy: ownerId,
+    });
+
+    const tools = await manager.connect(tenantId, botId, "mcp_oauth_discovery");
+    expect(tools).toHaveLength(1);
+    expect(tokenRequests).toBe(1);
+    expect(authenticatedMcpRequests).toBeGreaterThan(0);
+  });
+
+  test("blocks OAuth metadata that points a token request at an unapproved origin", async () => {
+    const state = memoryRepository();
+    let storedSecret = "";
+    let unapprovedRequests = 0;
+    const fetchMock: TestFetch = async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.origin === "https://mcp.example.com" && url.pathname.includes("oauth-protected-resource")) {
+        return Response.json({ resource: endpoint, authorization_servers: ["https://auth.example.com"] });
+      }
+      if (url.origin === "https://auth.example.com" && url.pathname.includes("oauth-authorization-server")) {
+        return Response.json({
+          issuer: "https://auth.example.com",
+          authorization_endpoint: "https://auth.example.com/authorize",
+          token_endpoint: "https://outside.example/token",
+          response_types_supported: ["code"],
+          grant_types_supported: ["client_credentials"],
+        });
+      }
+      if (url.origin === "https://mcp.example.com" && url.pathname === "/mcp") {
+        return new Response(null, {
+          status: 401,
+          headers: {
+            "www-authenticate":
+              'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"',
+          },
+        });
+      }
+      if (url.origin === "https://outside.example") unapprovedRequests += 1;
+      throw new Error("Unexpected network request");
+    };
+    const manager = new McpManager({
+      repository: state.repository,
+      secrets: { resolve: async () => storedSecret },
+      secretWriter: {
+        put: async (_tenant, value) => {
+          storedSecret = value;
+          return "secret_00000000000000000000000000000004";
+        },
+        delete: async () => {},
+      },
+      allowedOrigins: new Set(["https://mcp.example.com", "https://auth.example.com"]),
+      fetch: fetchMock,
+    });
+    await manager.addServer({
+      id: "mcp_oauth_egress",
+      tenantId,
+      botId,
+      name: "OAuth egress test",
+      endpoint,
+      authentication: {
+        mode: "oauth_client_credentials",
+        clientId: "bot-factory",
+        clientSecret: "oauth-client-secret",
+        issuer: "https://auth.example.com",
+      },
+      installedBy: ownerId,
+    });
+
+    await manager.connect(tenantId, botId, "mcp_oauth_egress").catch(() => undefined);
+    expect(unapprovedRequests).toBe(0);
+    expect(state.servers[0]?.status).toBe("unhealthy");
+  });
+
   test("bounds MCP connection time and records the server as unhealthy", async () => {
     const state = memoryRepository();
     const manager = new McpManager({
@@ -248,6 +473,10 @@ describe("MCP manager", () => {
     const manager = new McpManager({
       repository: state.repository,
       secrets: { resolve: async () => "secret-token" },
+      secretWriter: {
+        put: async () => "secret_00000000000000000000000000000002",
+        delete: async () => {},
+      },
       allowedOrigins: new Set(["https://mcp.example.com"]),
       fetch: fetchMock,
     });
@@ -282,6 +511,28 @@ describe("MCP manager", () => {
     expect(created.server).toMatchObject({ status: "disconnected" });
     expect(created.server).not.toHaveProperty("credentialRef");
 
+    const oauthSecret = "oauth-secret-do-not-return";
+    const oauthResponse = await handler(
+      new Request(collection, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          name: "OAuth service",
+          endpoint,
+          authentication: {
+            mode: "oauth_client_credentials",
+            clientId: "factory-client",
+            clientSecret: oauthSecret,
+            issuer: "https://mcp.example.com",
+          },
+        }),
+      }),
+    );
+    expect(oauthResponse?.status).toBe(201);
+    const oauthBody = await oauthResponse?.text();
+    expect(oauthBody).not.toContain(oauthSecret);
+    expect(oauthBody).not.toContain("credentialRef");
+
     const connect = await handler(
       new Request(`${collection}/${created.server.id}/connect`, { method: "POST", headers }),
     );
@@ -296,7 +547,15 @@ describe("MCP manager", () => {
     );
     expect(patch?.status).toBe(200);
     const list = await handler(new Request(collection, { headers: { authorization: `Bearer ${token.token}` } }));
-    expect(await list?.json()).toMatchObject([{ id: created.server.id, status: "connected", hasCredential: false }]);
+    const servers = (await list?.json()) as { id: string; status: string; hasCredential: boolean }[];
+    expect(servers.find((server) => server.id === created.server.id)).toMatchObject({
+      status: "connected",
+      hasCredential: false,
+    });
+    expect(servers.find((server) => server.id !== created.server.id)).toMatchObject({
+      status: "disconnected",
+      hasCredential: true,
+    });
   });
 });
 

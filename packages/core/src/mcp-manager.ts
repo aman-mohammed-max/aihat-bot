@@ -1,20 +1,42 @@
-import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { Client, ClientCredentialsProvider, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { FetchLike, JsonSchemaType } from "@modelcontextprotocol/client";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
 import { AppError } from "./errors.js";
-import type { AuditLogRepository, McpRepository, SecretStore, TelegramRepository } from "./ports.js";
+import type { AuditLogRepository, McpRepository, SecretStore, SecretWriter, TelegramRepository } from "./ports.js";
 import type { McpDiscoveredTool, McpRemoteTool, McpServerConnection, TenantId } from "./types.js";
 import type { AgentToolRegistry, ToolContext } from "./tools.js";
 
 export const MCP_INVOKE_PERMISSION = "mcp:invoke";
 const MAX_TOOL_SCHEMA_BYTES = 32_768;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const OAUTH_SECRET_PREFIX = "aihat:mcp:oauth-client-credentials:v1:";
+const MAX_CACHED_OAUTH_PROVIDERS = 128;
 const mcpSchemaValidator = new CfWorkerJsonSchemaValidator({ draft: "2020-12" });
+const oauthProviderCache = new Map<string, ClientCredentialsProvider>();
+
+export type McpAuthenticationInput =
+  | { readonly mode: "bearer"; readonly token: string }
+  | {
+      readonly mode: "oauth_client_credentials";
+      readonly clientId: string;
+      readonly clientSecret: string;
+      readonly issuer: string;
+      readonly scope?: string;
+    };
+
+interface OAuthClientCredentials {
+  readonly mode: "oauth_client_credentials";
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly issuer: string;
+  readonly scope?: string;
+}
 
 /** Shared MCP Streamable HTTP client, tool registry and execution boundary. */
 export class McpManager implements AgentToolRegistry {
   readonly #repository: McpRepository;
   readonly #secrets: SecretStore;
+  readonly #secretWriter: SecretWriter | undefined;
   readonly #allowedOrigins: ReadonlySet<string>;
   readonly #fetch: FetchLike;
   readonly #timeoutMs: number;
@@ -24,6 +46,7 @@ export class McpManager implements AgentToolRegistry {
   constructor(input: {
     readonly repository: McpRepository;
     readonly secrets: SecretStore;
+    readonly secretWriter?: SecretWriter;
     readonly allowedOrigins: ReadonlySet<string>;
     readonly fetch?: FetchLike;
     readonly timeoutMs?: number;
@@ -32,6 +55,7 @@ export class McpManager implements AgentToolRegistry {
   }) {
     this.#repository = input.repository;
     this.#secrets = input.secrets;
+    this.#secretWriter = input.secretWriter;
     this.#allowedOrigins = normalizeAllowedOrigins(input.allowedOrigins);
     this.#fetch = input.fetch ?? fetch;
     this.#timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -49,11 +73,15 @@ export class McpManager implements AgentToolRegistry {
     readonly name: string;
     readonly endpoint: string;
     readonly credentialRef?: string;
+    readonly authentication?: McpAuthenticationInput;
     readonly installedBy: ToolContext["actorId"];
   }): Promise<void> {
     const endpoint = this.#validateEndpoint(input.endpoint);
     if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$/.test(input.name.trim())) {
       throw new AppError("VALIDATION_ERROR", "MCP server name must be 1–80 safe characters.", 400);
+    }
+    if (input.credentialRef !== undefined && input.authentication !== undefined) {
+      throw new AppError("VALIDATION_ERROR", "Choose either a stored credential or a new authentication method.", 400);
     }
     if (input.credentialRef !== undefined) {
       if (!/^secret_[a-f0-9]{32}$/.test(input.credentialRef)) {
@@ -62,7 +90,29 @@ export class McpManager implements AgentToolRegistry {
       // Origin policy is checked before any tenant secret is resolved.
       validateCredential(await this.#secrets.resolve(input.tenantId, input.credentialRef));
     }
-    await this.#repository.createServer({ ...input, name: input.name.trim(), endpoint: endpoint.href });
+    let credentialRef = input.credentialRef;
+    if (input.authentication !== undefined) {
+      const secret = serializeAuthentication(input.authentication, this.#allowedOrigins);
+      if (!this.#secretWriter)
+        throw new AppError("INTERNAL_ERROR", "Encrypted MCP credential storage is unavailable.", 500);
+      credentialRef = await this.#secretWriter.put(input.tenantId, secret);
+    }
+    try {
+      await this.#repository.createServer({
+        id: input.id,
+        tenantId: input.tenantId,
+        botId: input.botId,
+        name: input.name.trim(),
+        endpoint: endpoint.href,
+        ...(credentialRef ? { credentialRef } : {}),
+        installedBy: input.installedBy,
+      });
+    } catch (cause) {
+      if (input.authentication !== undefined && credentialRef) {
+        await this.#secretWriter?.delete(input.tenantId, credentialRef).catch(() => undefined);
+      }
+      throw cause;
+    }
   }
 
   async listServers(tenantId: TenantId, botId: ToolContext["botId"]): Promise<readonly McpServerConnection[]> {
@@ -113,8 +163,9 @@ export class McpManager implements AgentToolRegistry {
   }
 
   async removeServer(tenantId: TenantId, botId: ToolContext["botId"], serverId: string): Promise<void> {
-    await this.#requiredServer(tenantId, botId, serverId);
+    const server = await this.#requiredServer(tenantId, botId, serverId);
     await this.#repository.deleteServer({ tenantId, botId, serverId });
+    oauthProviderCache.delete(oauthCacheKey(server));
   }
 
   async setToolPermission(input: {
@@ -291,16 +342,48 @@ export class McpManager implements AgentToolRegistry {
     // Revalidate before secret lookup and every network request.
     const endpoint = this.#validateEndpoint(server.endpoint);
     const headers = new Headers();
+    let authProvider: ClientCredentialsProvider | undefined;
     if (server.credentialRef) {
       const credential = await this.#secrets.resolve(server.tenantId, server.credentialRef, signal);
-      validateCredential(credential);
-      headers.set("authorization", `Bearer ${credential}`);
+      const oauth = parseOAuthCredentials(credential);
+      if (oauth) {
+        const issuer = validateIssuer(oauth.issuer, this.#allowedOrigins);
+        const key = oauthCacheKey(server);
+        authProvider = oauthProviderCache.get(key);
+        if (!authProvider) {
+          authProvider = new ClientCredentialsProvider({
+            clientId: oauth.clientId,
+            clientSecret: oauth.clientSecret,
+            expectedIssuer: issuer,
+            ...(oauth.scope ? { scope: oauth.scope } : {}),
+          });
+          oauthProviderCache.set(key, authProvider);
+          if (oauthProviderCache.size > MAX_CACHED_OAUTH_PROVIDERS) {
+            const oldest = oauthProviderCache.keys().next().value;
+            if (oldest) oauthProviderCache.delete(oldest);
+          }
+        } else {
+          oauthProviderCache.delete(key);
+          oauthProviderCache.set(key, authProvider);
+        }
+      } else {
+        validateCredential(credential);
+        headers.set("authorization", `Bearer ${credential}`);
+      }
     }
     if (signal?.aborted) {
       throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP request was cancelled.", 504);
     }
+    const guardedFetch: FetchLike = async (input, init) => {
+      const requestedUrl = requestUrl(input);
+      if (requestedUrl.protocol !== "https:" || !this.#allowedOrigins.has(requestedUrl.origin)) {
+        throw new AppError("FORBIDDEN", "MCP and OAuth requests must use approved HTTPS origins.", 403);
+      }
+      return this.#fetch(input, { ...init, redirect: "error" });
+    };
     const transport = new StreamableHTTPClientTransport(endpoint, {
-      fetch: this.#fetch,
+      fetch: guardedFetch,
+      ...(authProvider ? { authProvider } : {}),
       redirectPolicy: "same-origin",
       requestInit: { headers, redirect: "error" },
     });
@@ -396,6 +479,94 @@ function validateCredential(value: string): void {
   if (!value || value.length > 8192 || /[\r\n]/.test(value)) {
     throw new AppError("VALIDATION_ERROR", "MCP bearer credential is invalid.", 400);
   }
+}
+
+function serializeAuthentication(input: McpAuthenticationInput, allowedOrigins: ReadonlySet<string>): string {
+  if (input.mode === "bearer") {
+    validateCredential(input.token);
+    return input.token;
+  }
+  if (input.mode !== "oauth_client_credentials") {
+    throw new AppError("VALIDATION_ERROR", "MCP authentication mode is unsupported.", 400);
+  }
+  const issuer = validateIssuer(input.issuer, allowedOrigins);
+  if (
+    !input.clientId.trim() ||
+    input.clientId.length > 256 ||
+    /[\r\n\0]/.test(input.clientId) ||
+    !input.clientSecret ||
+    input.clientSecret.length > 8192 ||
+    /[\r\n\0]/.test(input.clientSecret)
+  ) {
+    throw new AppError("VALIDATION_ERROR", "MCP OAuth client credentials are invalid.", 400);
+  }
+  const scope = input.scope?.trim();
+  if (scope !== undefined && (scope.length > 1000 || /[\r\n\0]/.test(scope))) {
+    throw new AppError("VALIDATION_ERROR", "MCP OAuth scope is invalid.", 400);
+  }
+  const value: OAuthClientCredentials = {
+    mode: "oauth_client_credentials",
+    clientId: input.clientId.trim(),
+    clientSecret: input.clientSecret,
+    issuer,
+    ...(scope ? { scope } : {}),
+  };
+  return `${OAUTH_SECRET_PREFIX}${JSON.stringify(value)}`;
+}
+
+function parseOAuthCredentials(value: string): OAuthClientCredentials | undefined {
+  if (!value.startsWith(OAUTH_SECRET_PREFIX)) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value.slice(OAUTH_SECRET_PREFIX.length));
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      (parsed as Record<string, unknown>).mode !== "oauth_client_credentials" ||
+      typeof (parsed as Record<string, unknown>).clientId !== "string" ||
+      typeof (parsed as Record<string, unknown>).clientSecret !== "string" ||
+      typeof (parsed as Record<string, unknown>).issuer !== "string" ||
+      ((parsed as Record<string, unknown>).scope !== undefined &&
+        typeof (parsed as Record<string, unknown>).scope !== "string")
+    ) {
+      throw new Error("Invalid stored configuration");
+    }
+    return parsed as OAuthClientCredentials;
+  } catch (cause) {
+    throw new AppError("INTERNAL_ERROR", "Stored MCP OAuth configuration is invalid.", 500, { cause });
+  }
+}
+
+function validateIssuer(value: string, allowedOrigins: ReadonlySet<string>): string {
+  let issuer: URL;
+  try {
+    issuer = new URL(value);
+  } catch (cause) {
+    throw new AppError("VALIDATION_ERROR", "MCP OAuth issuer must be an absolute HTTPS URL.", 400, { cause });
+  }
+  if (
+    issuer.protocol !== "https:" ||
+    issuer.username ||
+    issuer.password ||
+    issuer.search ||
+    issuer.hash ||
+    !allowedOrigins.has(issuer.origin)
+  ) {
+    throw new AppError("FORBIDDEN", "MCP OAuth issuer must use an approved HTTPS origin.", 403);
+  }
+  return issuer.href;
+}
+
+function requestUrl(input: string | URL): URL {
+  try {
+    return input instanceof URL ? input : new URL(input);
+  } catch (cause) {
+    throw new AppError("VALIDATION_ERROR", "MCP request URL is invalid.", 400, { cause });
+  }
+}
+
+function oauthCacheKey(server: McpServerConnection): string {
+  return `${server.tenantId}:${server.botId}:${server.id}`;
 }
 
 function validateMcpSchemaValue(value: unknown, schema: Readonly<Record<string, unknown>>, path: string): unknown {

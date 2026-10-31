@@ -651,6 +651,19 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
 async function handleChange(event: Event): Promise<void> {
   const target = event.target;
   if (!(target instanceof HTMLSelectElement)) return;
+  if (target.id === "mcp-auth-mode") {
+    const form = target.form;
+    if (!form) return;
+    for (const fields of form.querySelectorAll<HTMLElement>("[data-mcp-auth-fields]")) {
+      const active = fields.dataset.mcpAuthFields === target.value;
+      fields.hidden = !active;
+      for (const input of fields.querySelectorAll<HTMLInputElement>("input")) {
+        input.required =
+          active && ["mcpBearerToken", "mcpClientId", "mcpClientSecret", "mcpIssuer"].includes(input.name);
+      }
+    }
+    return;
+  }
   const selectorMap: Record<string, string> = {
     "skill-target-bot": "skills",
     "mcp-target-bot": "mcp",
@@ -1474,10 +1487,29 @@ async function addMcpServer(data: FormData): Promise<void> {
   const botId = state.page === "bot" ? requireActiveBot().id : selectedBotId("mcp-target-bot");
   const name = String(data.get("name") ?? "").trim();
   const endpoint = String(data.get("endpoint") ?? "").trim();
+  const authMode = String(data.get("authenticationMode") ?? "none");
+  const authentication =
+    authMode === "bearer"
+      ? { mode: "bearer", token: String(data.get("mcpBearerToken") ?? "") }
+      : authMode === "oauth_client_credentials"
+        ? {
+            mode: "oauth_client_credentials",
+            clientId: String(data.get("mcpClientId") ?? ""),
+            clientSecret: String(data.get("mcpClientSecret") ?? ""),
+            issuer: String(data.get("mcpIssuer") ?? ""),
+            scope: String(data.get("mcpScope") ?? "").trim(),
+          }
+        : undefined;
   const response = await api<{ server: McpServer }>(`${botBase(botId)}/mcp-servers`, {
     method: "POST",
-    body: jsonBody({ name, endpoint }),
+    body: jsonBody({ name, endpoint, ...(authentication ? { authentication } : {}) }),
   });
+  const form = document.querySelector<HTMLFormElement>("#mcp-add-form");
+  form?.reset();
+  for (const fields of form?.querySelectorAll<HTMLElement>("[data-mcp-auth-fields]") ?? []) {
+    fields.hidden = true;
+    for (const input of fields.querySelectorAll<HTMLInputElement>("input")) input.required = false;
+  }
   await refreshBot(botId);
   if (state.page !== "bot") navigate("mcp");
   else render();

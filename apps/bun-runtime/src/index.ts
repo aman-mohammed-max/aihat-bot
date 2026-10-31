@@ -116,6 +116,7 @@ const memoryService = createEncryptedMemoryService(repositories, secretStore);
 const mcpManager = new McpManager({
   repository: repositories.mcp,
   secrets: secretStore,
+  secretWriter: secretStore,
   telegramGrants: repositories,
   authorizationAudit: repositories,
   allowedOrigins: new Set(

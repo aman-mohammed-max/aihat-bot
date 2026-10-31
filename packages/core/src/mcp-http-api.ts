@@ -2,7 +2,7 @@ import { recordApiAuthorizationDenial, requireApiScope } from "./api-auth.js";
 import type { ApiTokenAuthenticator } from "./api-auth.js";
 import { AppError } from "./errors.js";
 import type { BotRepository } from "./ports.js";
-import type { McpManager } from "./mcp-manager.js";
+import type { McpAuthenticationInput, McpManager } from "./mcp-manager.js";
 import type { BotId, McpServerConnection } from "./types.js";
 
 const BOT_ID = "bot_[a-f0-9-]{36}";
@@ -41,7 +41,7 @@ export function createMcpApiHandler(
         if (request.method !== "POST") return methodNotAllowed("GET, POST");
         await requireApiScope(principal, "bots:write");
         const body = await readJsonBody(request);
-        if (!hasOnlyKeys(body, ["name", "endpoint", "credentialRef"])) {
+        if (!hasOnlyKeys(body, ["name", "endpoint", "credentialRef", "authentication"])) {
           throw new AppError(
             "VALIDATION_ERROR",
             "MCP server settings contain unsupported or plaintext credential fields.",
@@ -55,6 +55,7 @@ export function createMcpApiHandler(
         ) {
           throw new AppError("VALIDATION_ERROR", "MCP server settings are invalid.", 400);
         }
+        const authentication = parseAuthentication(body.authentication);
         const id = `mcp_${crypto.randomUUID()}`;
         await mcp.addServer({
           id,
@@ -63,6 +64,7 @@ export function createMcpApiHandler(
           name: body.name,
           endpoint: body.endpoint,
           ...(typeof body.credentialRef === "string" ? { credentialRef: body.credentialRef } : {}),
+          ...(authentication ? { authentication } : {}),
           installedBy: principal.ownerId,
         });
         const servers = await mcp.listServers(principal.tenantId, botId);
@@ -160,6 +162,39 @@ function serverSummary(server: McpServerConnection) {
     createdAt: server.createdAt,
     updatedAt: server.updatedAt,
   };
+}
+
+function parseAuthentication(value: unknown): McpAuthenticationInput | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new AppError("VALIDATION_ERROR", "MCP authentication settings are invalid.", 400);
+  }
+  const authentication = value as Record<string, unknown>;
+  if (authentication.mode === "bearer") {
+    if (!hasOnlyKeys(authentication, ["mode", "token"]) || typeof authentication.token !== "string") {
+      throw new AppError("VALIDATION_ERROR", "MCP bearer authentication settings are invalid.", 400);
+    }
+    return { mode: "bearer", token: authentication.token };
+  }
+  if (authentication.mode === "oauth_client_credentials") {
+    if (
+      !hasOnlyKeys(authentication, ["mode", "clientId", "clientSecret", "issuer", "scope"]) ||
+      typeof authentication.clientId !== "string" ||
+      typeof authentication.clientSecret !== "string" ||
+      typeof authentication.issuer !== "string" ||
+      (authentication.scope !== undefined && typeof authentication.scope !== "string")
+    ) {
+      throw new AppError("VALIDATION_ERROR", "MCP OAuth client credentials are invalid.", 400);
+    }
+    return {
+      mode: "oauth_client_credentials",
+      clientId: authentication.clientId,
+      clientSecret: authentication.clientSecret,
+      issuer: authentication.issuer,
+      ...(typeof authentication.scope === "string" ? { scope: authentication.scope } : {}),
+    };
+  }
+  throw new AppError("VALIDATION_ERROR", "MCP authentication mode is unsupported.", 400);
 }
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown>> {

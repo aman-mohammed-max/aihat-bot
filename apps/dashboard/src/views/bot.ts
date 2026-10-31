@@ -1,7 +1,7 @@
 import type { ChatLine, UiState } from "../state.js";
 import type { Bot } from "../types.js";
 import { button, escapeHtml, formatDate, icon, statusPill } from "../view-utils.js";
-import { mcpServerCard, skillCard } from "./workspace.js";
+import { mcpAuthenticationFields, mcpServerCard, skillCard } from "./workspace.js";
 
 export function botManagementView(state: UiState): string {
   const bot = state.activeBot;
@@ -255,7 +255,7 @@ function skillsTab(state: UiState, bot: Bot): string {
 
 function mcpTab(state: UiState): string {
   return `<section class="panel intro-panel"><div class="intro-icon intro-teal">${icon("plug", 21)}</div><div class="intro-copy"><div class="eyebrow">BOT-SCOPED CONNECTIONS</div><h2>Remote tools, reviewed here.</h2><p>Newly discovered tools are disabled. Grant <code>mcp:invoke</code> only after reviewing the server and tool schema.</p></div></section>
-    <section class="panel form-panel"><div class="panel-heading"><div><div class="eyebrow">NEW CONNECTION</div><h2>Add an MCP server</h2></div><span class="quiet-badge">HTTPS only</span></div><form id="mcp-add-form" class="form-grid"><label class="field"><span>Connection name</span><input name="name" placeholder="Company knowledge" required maxlength="80" /></label><label class="field field-wide"><span>Streamable HTTP endpoint</span><input name="endpoint" type="url" placeholder="https://tools.example.com/mcp" required /></label><div class="form-actions field-wide"><p class="field-hint">The exact origin must be in <code>MCP_ALLOWED_ORIGINS</code>. This endpoint is checked before credentials are resolved.</p><button class="button button-primary" type="submit">${icon("plus", 16)}<span>Add server</span></button></div></form></section>
+    <section class="panel form-panel"><div class="panel-heading"><div><div class="eyebrow">NEW CONNECTION</div><h2>Add an MCP server</h2></div><span class="quiet-badge">HTTPS only</span></div><form id="mcp-add-form" class="form-grid"><label class="field"><span>Connection name</span><input name="name" placeholder="Company knowledge" required maxlength="80" /></label><label class="field field-wide"><span>Streamable HTTP endpoint</span><input name="endpoint" type="url" placeholder="https://tools.example.com/mcp" required /></label>${mcpAuthenticationFields()}<div class="form-actions field-wide"><p class="field-hint">The MCP endpoint and OAuth issuer must use approved origins in <code>MCP_ALLOWED_ORIGINS</code>. Credentials are encrypted and sent only after origin checks.</p><button class="button button-primary" type="submit">${icon("plus", 16)}<span>Add server</span></button></div></form></section>
     <section class="server-list">${state.servers.length ? state.servers.map((server) => mcpServerCard(server, state.toolsByServer[server.id] ?? [])).join("") : `<section class="panel empty-panel"><div class="empty-state"><span class="empty-icon">${icon("plug", 24)}</span><h3>No server attached</h3><p>Add a trusted HTTPS MCP endpoint to give this bot reviewed tools.</p></div></section>`}</section>`;
 }
 
