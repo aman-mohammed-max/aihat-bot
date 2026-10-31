@@ -15,6 +15,7 @@ export const runtimeCapabilities: RuntimeCapabilities = {
     queueEnqueue: false,
     queueProcessing: false,
     authentication: true,
+    networkAbuseProtection: true,
     longTermMemory: true,
     promptSkills: true,
     httpSkills: true,

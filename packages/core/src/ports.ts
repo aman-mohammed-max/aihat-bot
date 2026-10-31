@@ -824,6 +824,15 @@ export interface ApiTokenRepository {
   }): Promise<void>;
 }
 
+/** Persistent network-level abuse counter. Only keyed hashes of client addresses may be stored. */
+export interface NetworkRequestRateLimiter {
+  consume(input: {
+    readonly clientHash: string;
+    readonly now: string;
+    readonly limitPerMinute: number;
+  }): Promise<boolean>;
+}
+
 export interface AuditLogRepository {
   recordPermissionDecision(input: {
     readonly tenantId: TenantId;

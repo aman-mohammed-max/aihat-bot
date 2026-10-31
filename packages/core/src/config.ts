@@ -2,6 +2,7 @@ import { AppError } from "./errors.js";
 import type { ModelRetryPolicy } from "./model.js";
 import type { ScheduledTaskRetryPolicy } from "./scheduled-tasks.js";
 import type { TelegramRetryPolicy } from "./telegram.js";
+import { DEFAULT_NETWORK_REQUESTS_PER_MINUTE } from "./network-abuse.js";
 
 export const DEFAULT_TELEGRAM_MASTER_REQUESTS_PER_MINUTE = 30;
 export const DEFAULT_TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE = 30;
@@ -13,6 +14,7 @@ export interface RuntimeConfig {
   readonly telegramRetryPolicy: TelegramRetryPolicy;
   readonly telegramMasterRequestsPerMinute: number;
   readonly telegramCustomerRequestsPerMinute: number;
+  readonly networkRequestsPerMinute: number;
   readonly telegramLoginClientId: string;
   readonly scheduledTaskRetryPolicy: ScheduledTaskRetryPolicy;
 }
@@ -59,6 +61,13 @@ export function parseRuntimeConfig(env: Readonly<Record<string, string | undefin
     1,
     1000,
   );
+  const networkRequestsPerMinute = parseIntegerSetting(
+    env.NETWORK_REQUESTS_PER_MINUTE,
+    "NETWORK_REQUESTS_PER_MINUTE",
+    DEFAULT_NETWORK_REQUESTS_PER_MINUTE,
+    10,
+    10_000,
+  );
   const telegramLoginClientId = env.TELEGRAM_LOGIN_CLIENT_ID ?? "";
   if (telegramLoginClientId && !/^[0-9]{5,15}$/.test(telegramLoginClientId)) {
     throw new AppError("VALIDATION_ERROR", "TELEGRAM_LOGIN_CLIENT_ID must be a numeric Telegram client ID.", 400);
@@ -100,6 +109,7 @@ export function parseRuntimeConfig(env: Readonly<Record<string, string | undefin
     },
     telegramMasterRequestsPerMinute,
     telegramCustomerRequestsPerMinute,
+    networkRequestsPerMinute,
     telegramLoginClientId,
     scheduledTaskRetryPolicy: {
       maxAttempts: scheduledTaskMaxAttempts,

@@ -38,6 +38,7 @@ export * from "./tenant-members-http-api.js";
 export * from "./workspaces-http-api.js";
 export * from "./telegram-auth.js";
 export * from "./telegram-browser-auth.js";
+export * from "./network-abuse.js";
 export * from "./http-api.js";
 export * from "./factory-http-api.js";
 export * from "./factory-assistant.js";

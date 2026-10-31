@@ -30,6 +30,7 @@ import {
   createTelegramMasterWebhookHandler,
   createTelegramWebAppAuthHandler,
   createTelegramBrowserAuthHandler,
+  createNetworkAbuseGuard,
   createConversationHistoryApiHandler,
   createUsageApiHandler,
   createAuditLogApiHandler,
@@ -93,6 +94,14 @@ const telegramBrowserAuth = createTelegramBrowserAuthHandler({
   clientId: config.telegramLoginClientId,
   accounts: repositories.telegramAuth,
   tokens: repositories.apiTokens,
+});
+const networkAbuseGuard = createNetworkAbuseGuard({
+  limiter: repositories.networkRateLimiter,
+  requestsPerMinute: config.networkRequestsPerMinute,
+  keyring: {
+    activeKey: async () => new EnvironmentSecretKeyring(process.env).activeKey(),
+    getKey: async (keyId) => new EnvironmentSecretKeyring(process.env).getKey(keyId),
+  },
 });
 const approvals = new CreationApprovalService(repositories.creationApprovals);
 const botCredentialApprovals = new BotCredentialApprovalService(repositories.botCredentialApprovals);
@@ -280,16 +289,31 @@ const telegramWebhook = createTelegramWebhookHandler(telegram);
 const server = Bun.serve({
   hostname: config.host,
   port: config.port,
-  async fetch(request) {
+  async fetch(request, server) {
     const url = new URL(request.url);
     const miniAppResponse = await serveMiniApp(request, url);
     if (miniAppResponse) return miniAppResponse;
+    const clientAddress = server.requestIP(request)?.address;
+    const networkLimitResponse = await networkAbuseGuard(request, clientAddress);
+    if (networkLimitResponse) return networkLimitResponse;
     const globalSkillCatalogResponse = await globalSkillCatalogAdminApi(request);
     if (globalSkillCatalogResponse) return globalSkillCatalogResponse;
     const masterWebhookResponse = await telegramMasterWebhook(request);
-    if (masterWebhookResponse) return masterWebhookResponse;
+    if (masterWebhookResponse) {
+      if (masterWebhookResponse.status === 401) {
+        const blocked = await networkAbuseGuard(request, clientAddress, true);
+        if (blocked) return blocked;
+      }
+      return masterWebhookResponse;
+    }
     const webhookResponse = await telegramWebhook(request);
-    if (webhookResponse) return webhookResponse;
+    if (webhookResponse) {
+      if (webhookResponse.status === 401) {
+        const blocked = await networkAbuseGuard(request, clientAddress, true);
+        if (blocked) return blocked;
+      }
+      return webhookResponse;
+    }
     const telegramAuthResponse = await telegramWebAppAuth(request);
     if (telegramAuthResponse) return telegramAuthResponse;
     const telegramBrowserAuthResponse = await telegramBrowserAuth(request);

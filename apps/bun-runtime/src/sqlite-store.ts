@@ -43,6 +43,7 @@ import type {
   MasterBotReply,
   MasterBotSession,
   MasterBotUpdateReservation,
+  NetworkRequestRateLimiter,
   ScheduledTaskRepository,
   TelegramRepository,
   TelegramAuthRepository,
@@ -433,6 +434,7 @@ export class BunSqliteRepositories
   readonly toolExecutions: ToolExecutionRepository;
   readonly tenantMembers: TenantMembershipRepository;
   readonly mcp: McpRepository;
+  readonly networkRateLimiter: NetworkRequestRateLimiter;
 
   constructor(db: Database) {
     this.#db = db;
@@ -462,6 +464,9 @@ export class BunSqliteRepositories
       revoke: (tenantId, ownerId, tokenId, revokedAt) => this.revokeApiToken(tenantId, ownerId, tokenId, revokedAt),
       consumeApiRequest: (input) => this.consumeApiRequest(input),
       recordApiMutation: (input) => this.recordApiMutation(input),
+    };
+    this.networkRateLimiter = {
+      consume: (input) => this.consumeNetworkRequest(input),
     };
     this.telegramAuth = {
       claimInitData: (input) => this.claimTelegramInitData(input),
@@ -3607,6 +3612,35 @@ export class BunSqliteRepositories
       `)
       .run(input.tenantId, input.ownerId, minuteWindow, input.now, input.limitPerMinute);
     return result.changes === 1;
+  }
+
+  async consumeNetworkRequest(input: { clientHash: string; now: string; limitPerMinute: number }): Promise<boolean> {
+    const timestamp = Date.parse(input.now);
+    if (!/^[a-f0-9]{64}$/.test(input.clientHash) || !Number.isFinite(timestamp)) {
+      throw new AppError("VALIDATION_ERROR", "Network rate limit identity or time is invalid.", 400);
+    }
+    if (!Number.isSafeInteger(input.limitPerMinute) || input.limitPerMinute < 10 || input.limitPerMinute > 10_000) {
+      throw new AppError("VALIDATION_ERROR", "Network request limit is invalid.", 400);
+    }
+    const minuteWindow = Math.floor(timestamp / 60_000);
+    const result = this.#db
+      .query<{ request_count: number }, [string, number, string, number]>(`
+        INSERT INTO network_request_usage (client_hash, minute_window, request_count, updated_at)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT(client_hash) DO UPDATE SET
+          minute_window = excluded.minute_window,
+          request_count = CASE WHEN network_request_usage.minute_window = excluded.minute_window
+            THEN network_request_usage.request_count + 1 ELSE 1 END,
+          updated_at = excluded.updated_at
+        WHERE network_request_usage.minute_window != excluded.minute_window
+          OR network_request_usage.request_count < ?
+        RETURNING request_count
+      `)
+      .get(input.clientHash, minuteWindow, input.now, input.limitPerMinute);
+    if (result?.request_count === 1 && minuteWindow % 10 === 0 && input.clientHash.startsWith("00")) {
+      this.#db.query("DELETE FROM network_request_usage WHERE minute_window < ?").run(minuteWindow - 2);
+    }
+    return result !== null;
   }
 
   async recordApiMutation(input: {

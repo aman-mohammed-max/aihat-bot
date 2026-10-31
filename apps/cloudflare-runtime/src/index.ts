@@ -32,6 +32,7 @@ import {
   createTelegramWebhookHandler,
   createTelegramWebAppAuthHandler,
   createTelegramBrowserAuthHandler,
+  createNetworkAbuseGuard,
   createConversationHistoryApiHandler,
   createUsageApiHandler,
   createAuditLogApiHandler,
@@ -81,6 +82,7 @@ export const runtimeCapabilities = {
     fileMalwareScanning: false,
     encryptedSecrets: true,
     authentication: true,
+    networkAbuseProtection: true,
     longTermMemory: true,
     promptSkills: true,
     httpSkills: true,
@@ -117,6 +119,25 @@ export default {
     if (miniAppResponse) return miniAppResponse;
     const d1 = repositories(env);
     const runtimeConfig = runtimeConfigFromEnv(env);
+    const networkAbuseGuard = createNetworkAbuseGuard({
+      limiter: d1.networkRateLimiter,
+      requestsPerMinute: runtimeConfig.networkRequestsPerMinute,
+      keyring: {
+        activeKey: async () =>
+          new EnvironmentSecretKeyring({
+            SECRET_ACTIVE_KEY_ID: env.SECRET_ACTIVE_KEY_ID,
+            SECRET_KEYRING_JSON: env.SECRET_KEYRING_JSON,
+          }).activeKey(),
+        getKey: async (keyId) =>
+          new EnvironmentSecretKeyring({
+            SECRET_ACTIVE_KEY_ID: env.SECRET_ACTIVE_KEY_ID,
+            SECRET_KEYRING_JSON: env.SECRET_KEYRING_JSON,
+          }).getKey(keyId),
+      },
+    });
+    const clientAddress = request.headers.get("cf-connecting-ip");
+    const networkLimitResponse = await networkAbuseGuard(request, clientAddress);
+    if (networkLimitResponse) return networkLimitResponse;
     const globalSkillCatalogResponse = await createGlobalSkillCatalogAdminHandler({
       skills: d1.skills,
       authorizationToken: env.SKILL_CATALOG_ADMIN_TOKEN ?? "",
@@ -335,9 +356,21 @@ export default {
           })
         : undefined;
     const masterWebhookResponse = await createTelegramMasterWebhookHandler(masterBot)(request);
-    if (masterWebhookResponse) return masterWebhookResponse;
+    if (masterWebhookResponse) {
+      if (masterWebhookResponse.status === 401) {
+        const blocked = await networkAbuseGuard(request, clientAddress, true);
+        if (blocked) return blocked;
+      }
+      return masterWebhookResponse;
+    }
     const webhookResponse = await createTelegramWebhookHandler(telegram)(request);
-    if (webhookResponse) return webhookResponse;
+    if (webhookResponse) {
+      if (webhookResponse.status === 401) {
+        const blocked = await networkAbuseGuard(request, clientAddress, true);
+        if (blocked) return blocked;
+      }
+      return webhookResponse;
+    }
     const telegramResponse = await createTelegramManagementApiHandler(authenticator, d1, d1, telegram)(request);
     if (telegramResponse) return telegramResponse;
     const scheduledTasksResponse = await createScheduledTasksApiHandler(authenticator, scheduledTaskService)(request);
@@ -568,6 +601,7 @@ function runtimeConfigFromEnv(env: Env) {
     TELEGRAM_RETRY_MAX_AFTER_SECONDS: env.TELEGRAM_RETRY_MAX_AFTER_SECONDS,
     TELEGRAM_MASTER_REQUESTS_PER_MINUTE: env.TELEGRAM_MASTER_REQUESTS_PER_MINUTE,
     TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE: env.TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE,
+    NETWORK_REQUESTS_PER_MINUTE: env.NETWORK_REQUESTS_PER_MINUTE,
     TELEGRAM_LOGIN_CLIENT_ID: env.TELEGRAM_LOGIN_CLIENT_ID,
     SCHEDULED_TASK_RETRY_MAX_ATTEMPTS: env.SCHEDULED_TASK_RETRY_MAX_ATTEMPTS,
     SCHEDULED_TASK_RETRY_BACKOFF_MS: env.SCHEDULED_TASK_RETRY_BACKOFF_MS,
