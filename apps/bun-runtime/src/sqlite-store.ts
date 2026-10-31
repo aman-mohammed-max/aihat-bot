@@ -1595,6 +1595,12 @@ export class BunSqliteRepositories
       if (ownership.changes !== 1) throw new AppError("CONFLICT", "Ownership transfer changed before acceptance.", 409);
       this.#db
         .query(`
+          UPDATE bot_files SET owner_id = ?
+          WHERE tenant_id = ? AND bot_id = ? AND owner_id = ?
+        `)
+        .run(input.recipientId, input.tenantId, row.bot_id, row.from_owner_id);
+      this.#db
+        .query(`
           DELETE FROM creation_approvals
           WHERE tenant_id = ? AND session_id IN (
             SELECT id FROM factory_sessions WHERE tenant_id = ? AND bot_id = ?

@@ -109,12 +109,11 @@ describe("uploaded file metadata runtime parity", () => {
           botId: botId as never,
           fileId: file.id,
         }),
-        bun.getOwnedUploadedFileUsage({
+        bun.getUploadedFileUsage({
           tenantId: tenantId as never,
-          ownerId: ownerId as never,
           botId: botId as never,
         }),
-        d1.getOwnedUploadedFileUsage({ tenantId: tenantId as never, ownerId: ownerId as never, botId: botId as never }),
+        d1.getUploadedFileUsage({ tenantId: tenantId as never, botId: botId as never }),
         bun.listOwnedUploadedFiles({
           tenantId: tenantId as never,
           ownerId: ownerId as never,
@@ -181,16 +180,14 @@ describe("uploaded file metadata runtime parity", () => {
       expect(d1Deleted).toBe(bunDeleted);
       expect(bunDeleted).toBe(true);
       expect(
-        await bun.getOwnedUploadedFileUsage({
+        await bun.getUploadedFileUsage({
           tenantId: tenantId as never,
-          ownerId: ownerId as never,
           botId: botId as never,
         }),
       ).toEqual({ files: 0, bytes: 0 });
       expect(
-        await d1.getOwnedUploadedFileUsage({
+        await d1.getUploadedFileUsage({
           tenantId: tenantId as never,
-          ownerId: ownerId as never,
           botId: botId as never,
         }),
       ).toEqual({ files: 0, bytes: 0 });
@@ -255,8 +252,8 @@ describe("uploaded file metadata runtime parity", () => {
         expect(rejected[0]).toMatchObject({ status: "rejected", reason: { code: "VALIDATION_ERROR", status: 413 } });
       }
       const [bunUsage, d1Usage] = await Promise.all([
-        bun.getOwnedUploadedFileUsage({ tenantId, ownerId, botId }),
-        d1.getOwnedUploadedFileUsage({ tenantId, ownerId, botId }),
+        bun.getUploadedFileUsage({ tenantId, botId }),
+        d1.getUploadedFileUsage({ tenantId, botId }),
       ]);
       expect(bunUsage).toEqual({ files: 100, bytes: 100 });
       expect(d1Usage).toEqual(bunUsage);
@@ -303,8 +300,8 @@ describe("uploaded file metadata runtime parity", () => {
         expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
       }
       const [bunByteUsage, d1ByteUsage] = await Promise.all([
-        bun.getOwnedUploadedFileUsage({ tenantId, ownerId, botId }),
-        d1.getOwnedUploadedFileUsage({ tenantId, ownerId, botId }),
+        bun.getUploadedFileUsage({ tenantId, botId }),
+        d1.getUploadedFileUsage({ tenantId, botId }),
       ]);
       expect(bunByteUsage).toEqual({ files: 10, bytes: 250 * 1024 * 1024 });
       expect(d1ByteUsage).toEqual(bunByteUsage);

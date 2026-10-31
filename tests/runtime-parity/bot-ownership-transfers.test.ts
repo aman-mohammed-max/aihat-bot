@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { BunSqliteRepositories } from "../../apps/bun-runtime/src/sqlite-store.js";
-import { openSqliteDatabase } from "../../apps/bun-runtime/src/migrations.js";
+import { applyMigrations, openSqliteDatabase } from "../../apps/bun-runtime/src/migrations.js";
+import { BunSqliteUploadedFileRepository } from "../../apps/bun-runtime/src/uploaded-file-repository.js";
 import { CloudflareD1Repositories } from "../../apps/cloudflare-runtime/src/d1-repositories.js";
+import { CloudflareD1UploadedFileRepository } from "../../apps/cloudflare-runtime/src/uploaded-file-repository.js";
 import { AppError } from "../../packages/core/src/errors.js";
 import type { BotId, TenantId, UserId } from "../../packages/core/src/types.js";
 import { SqliteD1 } from "../helpers/sqlite-d1.js";
@@ -13,6 +15,7 @@ const toOwnerId = "user-transfer-to" as UserId;
 const botId = "bot_123e4567-e89b-12d3-a456-426614174000" as BotId;
 const taskRunningId = "task_running_transfer";
 const taskQueuedId = "task_queued_transfer";
+const fileId = `file_${"f".repeat(32)}`;
 const tokenHash = "a".repeat(64);
 const createdAt = "2026-10-31T00:00:00.000Z";
 const expiresAt = "2026-11-01T00:00:00.000Z";
@@ -75,6 +78,7 @@ describe("bot ownership transfer runtime parity", () => {
       expect(readTransferState(bunDb)).toEqual(readTransferState(d1Db));
       expect(readTransferState(bunDb)).toMatchObject({
         ownerId: toOwnerId,
+        files: [{ id: fileId, ownerId: toOwnerId }],
         tasks: [
           { id: taskQueuedId, ownerId: toOwnerId, status: "paused", nextRunAt: null },
           { id: taskRunningId, ownerId: toOwnerId, status: "paused", nextRunAt: null },
@@ -87,6 +91,15 @@ describe("bot ownership transfer runtime parity", () => {
         pendingApprovals: 0,
         auditActions: ["bot.ownership_transfer.created", "bot.ownership_transfer.accepted"],
       });
+      const [bunFileUsage, d1FileUsage] = await Promise.all([
+        new BunSqliteUploadedFileRepository(bunDb).getUploadedFileUsage({ tenantId, botId }),
+        new CloudflareD1UploadedFileRepository(new SqliteD1(d1Db) as unknown as D1Database).getUploadedFileUsage({
+          tenantId,
+          botId,
+        }),
+      ]);
+      expect(bunFileUsage).toEqual({ files: 1, bytes: 13 });
+      expect(d1FileUsage).toEqual(bunFileUsage);
       await expect(bun.accept({ tenantId, tokenHash, recipientId: toOwnerId, now: createdAt })).rejects.toBeInstanceOf(
         AppError,
       );
@@ -129,6 +142,38 @@ describe("bot ownership transfer runtime parity", () => {
       expect(db.query("SELECT status FROM bot_ownership_transfers WHERE id = ?").get(first.id)).toEqual({
         status: "expired",
       });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("migration repairs uploaded-file ownership left behind by earlier transfers", () => {
+    const db = openSqliteDatabase(":memory:");
+    try {
+      seedTransferFixture(db);
+      db.query("UPDATE bots SET owner_id = ? WHERE tenant_id = ? AND id = ?").run(toOwnerId, tenantId, botId);
+      expect(
+        db
+          .query<{ count: number }, [string, string, string]>(`
+            SELECT count(*) AS count FROM bot_files
+            WHERE tenant_id = ? AND bot_id = ? AND owner_id <> ?
+          `)
+          .get(tenantId, botId, toOwnerId),
+      ).toEqual({ count: 1 });
+      db.query("DELETE FROM schema_migrations WHERE version = 33").run();
+
+      applyMigrations(db);
+
+      expect(
+        db
+          .query<{ owner_id: string }, [string, string, string]>(`
+          SELECT f.owner_id FROM bot_files AS f
+          JOIN bots AS b ON b.tenant_id = f.tenant_id AND b.id = f.bot_id
+          WHERE f.tenant_id = ? AND f.bot_id = ? AND f.owner_id = b.owner_id AND f.owner_id = ?
+        `)
+          .get(tenantId, botId, toOwnerId),
+      ).toEqual({ owner_id: toOwnerId });
+      expect(db.query("SELECT version FROM schema_migrations WHERE version = 33").get()).toEqual({ version: 33 });
     } finally {
       db.close();
     }
@@ -216,6 +261,11 @@ function seedTransferFixture(db: Database): void {
     VALUES (?, ?, ?, 'Transfer bot', '', 'published', 'private', 1, ?, ?)
   `).run(botId, tenantId, fromOwnerId, createdAt, createdAt);
   db.query(`
+    INSERT INTO bot_files (
+      id, tenant_id, bot_id, owner_id, file_name, content_type, size, etag, scan_status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'guide.txt', 'text/plain', 13, 'etag-transfer-file', 'clean', ?, ?)
+  `).run(fileId, tenantId, botId, fromOwnerId, createdAt, createdAt);
+  db.query(`
     INSERT INTO factory_sessions (id, tenant_id, owner_id, status, bot_id, revision, created_at, updated_at)
     VALUES ('factory_transfer_session', ?, ?, 'published', ?, 1, ?, ?)
   `).run(tenantId, fromOwnerId, botId, createdAt, createdAt);
@@ -254,6 +304,12 @@ function readTransferState(db: Database): Record<string, unknown> {
     `)
     .all(tenantId, botId)
     .map((task) => ({ id: task.id, ownerId: task.owner_id, status: task.status, nextRunAt: task.next_run_at }));
+  const files = db
+    .query<{ id: string; owner_id: string }, [string, string]>(
+      "SELECT id, owner_id FROM bot_files WHERE tenant_id = ? AND bot_id = ?",
+    )
+    .all(tenantId, botId)
+    .map((file) => ({ id: file.id, ownerId: file.owner_id }));
   const queuedJob = db.query<{ status: string }, []>("SELECT status FROM jobs WHERE id = 'job_queued_transfer'").get();
   const formerOwnerGrant = db
     .query<{ status: string }, []>("SELECT status FROM bot_access_grants WHERE id = 'grant_former_owner'")
@@ -280,6 +336,7 @@ function readTransferState(db: Database): Record<string, unknown> {
     .map((event) => event.action);
   return {
     ownerId: bot?.owner_id,
+    files,
     tasks,
     queuedJobStatus: queuedJob?.status,
     formerOwnerGrantStatus: formerOwnerGrant?.status,

@@ -357,10 +357,8 @@ function createFixture(): Fixture {
   const objects = new Map<string, StoredObject>();
   const key = (tenant: TenantId, bot: BotId, id: string) => `${tenant}:${bot}:${id}`;
   const repository: UploadedFileRepository = {
-    getOwnedUploadedFileUsage: async ({ tenantId: tenant, ownerId: owner, botId: bot }) => {
-      const owned = [...rows.values()].filter(
-        (row) => row.tenantId === tenant && row.ownerId === owner && row.file.botId === bot,
-      );
+    getUploadedFileUsage: async ({ tenantId: tenant, botId: bot }) => {
+      const owned = [...rows.values()].filter((row) => row.tenantId === tenant && row.file.botId === bot);
       return { files: owned.length, bytes: owned.reduce((total, row) => total + row.file.size, 0) };
     },
     createUploadedFile: async ({ file, tenantId: tenant, ownerId: owner }) => {

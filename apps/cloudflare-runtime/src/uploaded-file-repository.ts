@@ -18,13 +18,13 @@ interface UploadedFileRow {
 export class CloudflareD1UploadedFileRepository implements UploadedFileRepository {
   constructor(private readonly db: D1Database) {}
 
-  async getOwnedUploadedFileUsage(input: { tenantId: TenantId; ownerId: UserId; botId: BotId }) {
+  async getUploadedFileUsage(input: { tenantId: TenantId; botId: BotId }) {
     const row = await this.db
       .prepare(`
         SELECT count(*) AS files, coalesce(sum(size), 0) AS bytes FROM bot_files
-        WHERE tenant_id = ? AND owner_id = ? AND bot_id = ?
+        WHERE tenant_id = ? AND bot_id = ?
       `)
-      .bind(input.tenantId, input.ownerId, input.botId)
+      .bind(input.tenantId, input.botId)
       .first<{ files: number; bytes: number }>();
     return { files: row?.files ?? 0, bytes: row?.bytes ?? 0 };
   }
@@ -40,11 +40,11 @@ export class CloudflareD1UploadedFileRepository implements UploadedFileRepositor
           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
           WHERE (
             SELECT count(*) FROM bot_files
-            WHERE tenant_id = ? AND owner_id = ? AND bot_id = ?
+            WHERE tenant_id = ? AND bot_id = ?
           ) < ?
           AND (
             SELECT coalesce(sum(size), 0) FROM bot_files
-            WHERE tenant_id = ? AND owner_id = ? AND bot_id = ?
+            WHERE tenant_id = ? AND bot_id = ?
           ) + ? <= ?
         `)
         .bind(
@@ -62,11 +62,9 @@ export class CloudflareD1UploadedFileRepository implements UploadedFileRepositor
           input.file.createdAt,
           input.file.updatedAt,
           input.tenantId,
-          input.ownerId,
           input.file.botId,
           MAX_UPLOADED_FILES_PER_BOT,
           input.tenantId,
-          input.ownerId,
           input.file.botId,
           input.file.size,
           MAX_UPLOADED_BYTES_PER_BOT,

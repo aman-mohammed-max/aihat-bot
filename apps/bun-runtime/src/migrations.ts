@@ -172,6 +172,11 @@ const migrations: readonly Migration[] = [
     name: "conversation_tool_execution_retention",
     sql: readFileSync(findMigration("0032_conversation_tool_execution_retention.sql"), "utf8"),
   },
+  {
+    version: 33,
+    name: "bot_file_ownership_transfer",
+    sql: readFileSync(findMigration("0033_bot_file_ownership_transfer.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {

@@ -19,13 +19,13 @@ interface UploadedFileRow {
 export class BunSqliteUploadedFileRepository implements UploadedFileRepository {
   constructor(private readonly db: Database) {}
 
-  async getOwnedUploadedFileUsage(input: { tenantId: TenantId; ownerId: UserId; botId: BotId }) {
+  async getUploadedFileUsage(input: { tenantId: TenantId; botId: BotId }) {
     const row = this.db
-      .query<{ files: number; bytes: number }, [string, string, string]>(`
+      .query<{ files: number; bytes: number }, [string, string]>(`
         SELECT count(*) AS files, coalesce(sum(size), 0) AS bytes FROM bot_files
-        WHERE tenant_id = ? AND owner_id = ? AND bot_id = ?
+        WHERE tenant_id = ? AND bot_id = ?
       `)
-      .get(input.tenantId, input.ownerId, input.botId);
+      .get(input.tenantId, input.botId);
     return { files: row?.files ?? 0, bytes: row?.bytes ?? 0 };
   }
 
@@ -40,11 +40,11 @@ export class BunSqliteUploadedFileRepository implements UploadedFileRepository {
           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
           WHERE (
             SELECT count(*) FROM bot_files
-            WHERE tenant_id = ? AND owner_id = ? AND bot_id = ?
+            WHERE tenant_id = ? AND bot_id = ?
           ) < ?
           AND (
             SELECT coalesce(sum(size), 0) FROM bot_files
-            WHERE tenant_id = ? AND owner_id = ? AND bot_id = ?
+            WHERE tenant_id = ? AND bot_id = ?
           ) + ? <= ?
         `)
         .run(
@@ -62,11 +62,9 @@ export class BunSqliteUploadedFileRepository implements UploadedFileRepository {
           input.file.createdAt,
           input.file.updatedAt,
           input.tenantId,
-          input.ownerId,
           input.file.botId,
           MAX_UPLOADED_FILES_PER_BOT,
           input.tenantId,
-          input.ownerId,
           input.file.botId,
           input.file.size,
           MAX_UPLOADED_BYTES_PER_BOT,

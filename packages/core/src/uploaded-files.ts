@@ -91,9 +91,8 @@ export class UploadedFilesService {
     const contentType = normalizeContentType(input.contentType);
     validateExtension(input.fileName, contentType);
     validateFileBytes(contentType, input.bytes);
-    const usage = await this.#files.getOwnedUploadedFileUsage({
+    const usage = await this.#files.getUploadedFileUsage({
       tenantId: input.tenantId,
-      ownerId: input.ownerId,
       botId: input.botId,
     });
     if (

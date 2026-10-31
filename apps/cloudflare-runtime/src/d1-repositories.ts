@@ -1719,6 +1719,24 @@ export class CloudflareD1Repositories
         ),
       this.db
         .prepare(`
+          UPDATE bot_files SET owner_id = ?
+          WHERE tenant_id = ? AND bot_id = ? AND owner_id = ?
+            AND EXISTS (SELECT 1 FROM bots WHERE tenant_id = ? AND id = ? AND owner_id = ?)
+            AND EXISTS (SELECT 1 FROM bot_ownership_transfers WHERE id = ? AND status = 'pending' AND token_hash = ?)
+        `)
+        .bind(
+          input.recipientId,
+          input.tenantId,
+          row.bot_id,
+          row.from_owner_id,
+          input.tenantId,
+          row.bot_id,
+          input.recipientId,
+          row.id,
+          input.tokenHash,
+        ),
+      this.db
+        .prepare(`
           DELETE FROM creation_approvals
           WHERE tenant_id = ? AND session_id IN (
             SELECT id FROM factory_sessions WHERE tenant_id = ? AND bot_id = ?
@@ -1846,7 +1864,7 @@ export class CloudflareD1Repositories
           input.now,
         ),
     ]);
-    if (results[0]?.meta.changes !== 1 || results[6]?.meta.changes !== 1) {
+    if (results[0]?.meta.changes !== 1 || results[7]?.meta.changes !== 1) {
       const activeRun = await this.db
         .prepare(`
           SELECT jobs.id FROM jobs

@@ -747,9 +747,8 @@ export interface ObjectStore {
 
 /** Tenant- and bot-scoped metadata for durable uploads; file bytes remain in ObjectStore. */
 export interface UploadedFileRepository {
-  getOwnedUploadedFileUsage(input: {
+  getUploadedFileUsage(input: {
     readonly tenantId: TenantId;
-    readonly ownerId: UserId;
     readonly botId: BotId;
   }): Promise<{ readonly files: number; readonly bytes: number }>;
   createUploadedFile(input: {
