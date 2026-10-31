@@ -12,6 +12,9 @@ services:
       HOST: 0.0.0.0
       PORT: 3000
       DATABASE_PATH: /data/aihat.sqlite
+      CLAMAV_HOST: ${CLAMAV_HOST:-}
+      CLAMAV_PORT: ${CLAMAV_PORT:-3310}
+      CLAMAV_TIMEOUT_MS: ${CLAMAV_TIMEOUT_MS:-30000}
     ports:
       - "${PORT:-3000}:3000"
     volumes:
@@ -26,5 +29,21 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  clamav:
+    profiles: ["clamav"]
+    image: ${CLAMAV_IMAGE:-clamav/clamav:stable-debian13-slim}
+    expose:
+      - "3310"
+    volumes:
+      - clamav_signatures:/var/lib/clamav
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping=3", "--wait"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 300s
+
 volumes:
   aihat_data:
+  clamav_signatures:

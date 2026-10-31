@@ -5,7 +5,7 @@ An extensible platform for creating and hosting AI bots across self-hosted Bun a
 ## Current implementation
 
 - `packages/core`: shared domain types, errors, provider/agent interfaces, agent orchestration, tool permissions, bot factory, encryption and rotation, scheduling, and buffered/streaming object-storage ports.
-- `apps/bun-runtime`: Bun HTTP API, SQLite repositories and migrations, AES keyring, and private file object storage.
+- `apps/bun-runtime`: Bun HTTP API, SQLite repositories and migrations, AES keyring, private file object storage, and an optional ClamAV daemon adapter.
 - `apps/cloudflare-runtime`: Worker API, D1 repositories, SQLite-backed Durable Object alarms, Queue producer, and tenant-prefixed R2 object storage.
 - `migrations/sqlite`: forward-only tenant-aware schema migrations for bots, sessions, approvals, credentials, Telegram deployments, conversations, skills/MCP, scheduled tasks, jobs, audit records, access grants, uploaded-file metadata, ambiguous tool-call recovery, recipient-approved ownership transfers, and explicit bot collaborators.
 
@@ -13,7 +13,7 @@ Both runtimes expose `GET /health`, `GET /ready`, and `GET /capabilities`, share
 
 Factory setup also offers `POST /v1/factory-assist/generate`, using `FACTORY_LLM_ENDPOINT`, `FACTORY_LLM_MODEL`, and `FACTORY_LLM_TOKEN` to draft the creative bot profile for owner review. When these settings are present, Telegram users can send `/create <idea>` to prefill the same creative fields before selecting providers, credentials, permissions, and publishing choices.
 
-Each bot has private uploaded-file storage managed from its Files tab. List files with `GET /v1/bots/{botId}/files`; upload a raw request body with `POST` to that route, setting `Content-Type` and the percent-encoded `x-file-name-encoded` header. `GET /{fileId}` reads metadata, `POST /{fileId}/scan` retries a failed scan, `GET /{fileId}/content` downloads a clean file, and `DELETE /{fileId}` removes it. The API accepts JPEG, PNG, WebP, PDF, plain text, Markdown, CSV, TSV, JSON, JSONL, XML, YAML, and log files up to 25 MiB each, 100 files and 250 MiB per bot. File bytes use the runtime object store (R2 in Cloudflare); D1/SQLite stores owner-scoped metadata. Only files marked clean can be downloaded. Configure an HTTPS malware-scanning gateway before relying on uploads: without it, new files remain quarantined and Telegram attachments are refused. See the scanner configuration and request contract in [the Cloudflare runtime guide](apps/cloudflare-runtime/README.md#file-scanning).
+Each bot has private uploaded-file storage managed from its Files tab. List files with `GET /v1/bots/{botId}/files`; upload a raw request body with `POST` to that route, setting `Content-Type` and the percent-encoded `x-file-name-encoded` header. `GET /{fileId}` reads metadata, `POST /{fileId}/scan` retries a failed scan, `GET /{fileId}/content` downloads a clean file, and `DELETE /{fileId}` removes it. The API accepts JPEG, PNG, WebP, PDF, plain text, Markdown, CSV, TSV, JSON, JSONL, XML, YAML, and log files up to 25 MiB each, 100 files and 250 MiB per bot. File bytes use the runtime object store (R2 in Cloudflare); D1/SQLite stores owner-scoped metadata. Only files marked clean can be downloaded. Bun can scan through a private ClamAV daemon; Cloudflare requires an operator-managed HTTPS scanner gateway. Without a scanner, new files remain quarantined and Telegram attachments are refused. See the scanner configuration and request contract in [the Cloudflare runtime guide](apps/cloudflare-runtime/README.md#file-scanning).
 
 Remote tool calls with expired leases or failed result storage appear in the bot's Tool recovery tab. Owners can inspect the external service, then approve one retry or close the call. Approval permits replay of the original request with its existing idempotency key; it does not send a new request from the dashboard. A retry can still duplicate an action if the remote service accepted the first attempt.
 
@@ -117,3 +117,12 @@ docker compose logs -f aihat-bot-factory
 ```
 
 The image builds the Bun runtime in a multi-stage build and runs it as an unprivileged user. Compose keeps SQLite data in the `aihat_data` volume, exposes port 3000 by default, and applies a read-only root filesystem with a writable data volume. The container does not require Cloudflare services. API access still requires bootstrapping an owner token with `docker compose exec aihat-bot-factory bun dist/apps/bun-runtime/src/bootstrap.js "My workspace" owner-subject factory:read,factory:write,bots:read,bots:write,agent:run,tokens:manage,members:manage`.
+
+To enable local malware scanning, set `CLAMAV_HOST=clamav` in `.env` and start the optional scanner profile:
+
+```sh
+docker compose --profile clamav up --build -d
+docker compose ps clamav
+```
+
+Wait until the ClamAV service is healthy before uploading files. The daemon port is available only on the private Compose network; do not publish it to the host or Internet. This adapter is for Bun. Cloudflare continues to use the HTTPS scanner gateway contract below.

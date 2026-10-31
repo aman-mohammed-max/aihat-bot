@@ -3,6 +3,7 @@ import { JsonLogger } from "./logger.js";
 import { openSqliteDatabase } from "./migrations.js";
 import { runtimeCapabilities } from "./capabilities.js";
 import {
+  AppError,
   ApiTokenAuthenticator,
   BotFactory,
   CreationApprovalService,
@@ -54,6 +55,7 @@ import {
   SkillEngine,
   createDefaultNativeSkillRegistry,
 } from "@aihat/core";
+import { createOptionalClamDScanner } from "./clamav-scanner.js";
 import { BunSqliteRepositories } from "./sqlite-store.js";
 import { BunFileObjectStore } from "./file-object-store.js";
 import { BunSqliteUploadedFileRepository } from "./uploaded-file-repository.js";
@@ -71,11 +73,20 @@ const fileScannerOrigins = new Set(
     .map((origin) => origin.trim())
     .filter(Boolean),
 );
-const malwareScanner = createOptionalHttpMalwareScanner({
+const httpMalwareScanner = createOptionalHttpMalwareScanner({
   ...(process.env.FILE_SCANNER_ENDPOINT ? { endpoint: process.env.FILE_SCANNER_ENDPOINT } : {}),
   ...(process.env.FILE_SCANNER_TOKEN ? { token: process.env.FILE_SCANNER_TOKEN } : {}),
   allowedOrigins: fileScannerOrigins,
 });
+const clamDScanner = createOptionalClamDScanner({
+  ...(process.env.CLAMAV_HOST ? { host: process.env.CLAMAV_HOST } : {}),
+  ...(process.env.CLAMAV_PORT ? { port: process.env.CLAMAV_PORT } : {}),
+  ...(process.env.CLAMAV_TIMEOUT_MS ? { timeoutMs: process.env.CLAMAV_TIMEOUT_MS } : {}),
+});
+if (httpMalwareScanner && clamDScanner) {
+  throw new AppError("VALIDATION_ERROR", "Configure either the HTTPS file scanner or ClamAV, not both.", 500);
+}
+const malwareScanner = httpMalwareScanner ?? clamDScanner;
 const uploadedFilesService = new UploadedFilesService({
   bots: repositories,
   files: uploadedFileRepository,
