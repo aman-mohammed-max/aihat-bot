@@ -13,6 +13,7 @@ export interface RuntimeConfig {
   readonly telegramRetryPolicy: TelegramRetryPolicy;
   readonly telegramMasterRequestsPerMinute: number;
   readonly telegramCustomerRequestsPerMinute: number;
+  readonly telegramLoginClientId: string;
   readonly scheduledTaskRetryPolicy: ScheduledTaskRetryPolicy;
 }
 
@@ -58,6 +59,10 @@ export function parseRuntimeConfig(env: Readonly<Record<string, string | undefin
     1,
     1000,
   );
+  const telegramLoginClientId = env.TELEGRAM_LOGIN_CLIENT_ID ?? "";
+  if (telegramLoginClientId && !/^[0-9]{5,15}$/.test(telegramLoginClientId)) {
+    throw new AppError("VALIDATION_ERROR", "TELEGRAM_LOGIN_CLIENT_ID must be a numeric Telegram client ID.", 400);
+  }
   const scheduledTaskMaxAttempts = parseIntegerSetting(
     env.SCHEDULED_TASK_RETRY_MAX_ATTEMPTS,
     "SCHEDULED_TASK_RETRY_MAX_ATTEMPTS",
@@ -95,6 +100,7 @@ export function parseRuntimeConfig(env: Readonly<Record<string, string | undefin
     },
     telegramMasterRequestsPerMinute,
     telegramCustomerRequestsPerMinute,
+    telegramLoginClientId,
     scheduledTaskRetryPolicy: {
       maxAttempts: scheduledTaskMaxAttempts,
       backoffMs: scheduledTaskBackoffMs,

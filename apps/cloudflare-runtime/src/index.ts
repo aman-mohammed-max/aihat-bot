@@ -31,6 +31,7 @@ import {
   createTelegramManagementApiHandler,
   createTelegramWebhookHandler,
   createTelegramWebAppAuthHandler,
+  createTelegramBrowserAuthHandler,
   createConversationHistoryApiHandler,
   createUsageApiHandler,
   createAuditLogApiHandler,
@@ -157,6 +158,13 @@ export default {
     });
     const telegramAuthResponse = await telegramWebAppAuth(request);
     if (telegramAuthResponse) return telegramAuthResponse;
+    const telegramBrowserAuth = createTelegramBrowserAuthHandler({
+      clientId: runtimeConfig.telegramLoginClientId,
+      accounts: d1.telegramAuth,
+      tokens: d1.apiTokens,
+    });
+    const telegramBrowserAuthResponse = await telegramBrowserAuth(request);
+    if (telegramBrowserAuthResponse) return telegramBrowserAuthResponse;
     const apiResponse = await createManagementApiHandler(authenticator, d1.apiTokens)(request);
     if (apiResponse) return apiResponse;
     const tenantMembersResponse = await createTenantMembersApiHandler(authenticator, d1.tenantMembers)(request);
@@ -560,6 +568,7 @@ function runtimeConfigFromEnv(env: Env) {
     TELEGRAM_RETRY_MAX_AFTER_SECONDS: env.TELEGRAM_RETRY_MAX_AFTER_SECONDS,
     TELEGRAM_MASTER_REQUESTS_PER_MINUTE: env.TELEGRAM_MASTER_REQUESTS_PER_MINUTE,
     TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE: env.TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE,
+    TELEGRAM_LOGIN_CLIENT_ID: env.TELEGRAM_LOGIN_CLIENT_ID,
     SCHEDULED_TASK_RETRY_MAX_ATTEMPTS: env.SCHEDULED_TASK_RETRY_MAX_ATTEMPTS,
     SCHEDULED_TASK_RETRY_BACKOFF_MS: env.SCHEDULED_TASK_RETRY_BACKOFF_MS,
     SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS: env.SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS,

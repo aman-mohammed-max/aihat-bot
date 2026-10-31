@@ -3546,6 +3546,24 @@ kbd {
   font-size: 10px;
   line-height: 1.6;
 }
+.telegram-login-button {
+  margin: 0 0 12px;
+}
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  color: #6e8799;
+  font-size: 8px;
+}
+.auth-divider::before,
+.auth-divider::after {
+  height: 1px;
+  flex: 1;
+  content: "";
+  background: rgba(132, 173, 198, 0.14);
+}
 .auth-card .stack-form > label {
   color: #a9bdca;
   font-size: 9px;

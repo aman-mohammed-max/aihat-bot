@@ -29,6 +29,7 @@ import {
   createTelegramWebhookHandler,
   createTelegramMasterWebhookHandler,
   createTelegramWebAppAuthHandler,
+  createTelegramBrowserAuthHandler,
   createConversationHistoryApiHandler,
   createUsageApiHandler,
   createAuditLogApiHandler,
@@ -85,6 +86,11 @@ const authenticator = new ApiTokenAuthenticator(repositories.apiTokens, { author
 const telegramMasterBotToken = process.env.TELEGRAM_MASTER_BOT_TOKEN ?? process.env.TELEGRAME_BOT_TOKEN ?? "";
 const telegramWebAppAuth = createTelegramWebAppAuthHandler({
   botToken: telegramMasterBotToken,
+  accounts: repositories.telegramAuth,
+  tokens: repositories.apiTokens,
+});
+const telegramBrowserAuth = createTelegramBrowserAuthHandler({
+  clientId: config.telegramLoginClientId,
   accounts: repositories.telegramAuth,
   tokens: repositories.apiTokens,
 });
@@ -286,6 +292,8 @@ const server = Bun.serve({
     if (webhookResponse) return webhookResponse;
     const telegramAuthResponse = await telegramWebAppAuth(request);
     if (telegramAuthResponse) return telegramAuthResponse;
+    const telegramBrowserAuthResponse = await telegramBrowserAuth(request);
+    if (telegramBrowserAuthResponse) return telegramBrowserAuthResponse;
     const apiResponse = await managementApi(request);
     if (apiResponse) return apiResponse;
     const conversationHistoryResponse = await conversationHistoryApi(request);

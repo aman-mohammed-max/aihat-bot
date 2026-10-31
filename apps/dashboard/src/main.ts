@@ -44,6 +44,12 @@ import {
 declare global {
   interface Window {
     Telegram?: {
+      Login?: {
+        auth: (
+          options: { client_id: string; scope: string[]; nonce: string },
+          callback: (result: { id_token?: string; error?: string } | null) => void,
+        ) => void;
+      };
       WebApp?: {
         initData?: string;
         ready?: () => void;
@@ -95,6 +101,7 @@ let activeBotVersionsId = "";
 let activeConversationBotId = "";
 let activeMemoryBotId = "";
 let searchOpen = false;
+let telegramLoginClientId = "";
 configureTokenReader(() => accessToken);
 
 window.Telegram?.WebApp?.ready?.();
@@ -139,6 +146,12 @@ async function boot(): Promise<void> {
     }
   }
   if (!accessToken) {
+    try {
+      const loginConfig = await api<{ enabled: boolean; clientId?: string }>("/v1/auth/telegram/browser-config");
+      telegramLoginClientId = loginConfig.enabled ? (loginConfig.clientId ?? "") : "";
+    } catch {
+      telegramLoginClientId = "";
+    }
     render();
     return;
   }
@@ -495,7 +508,7 @@ async function loadOlderConversationMessages(): Promise<void> {
 
 function render(): void {
   if (!accessToken || !state.principal) {
-    app.innerHTML = loginView();
+    app.innerHTML = loginView("", telegramLoginClientId);
     return;
   }
   const { title, subtitle } = pageTitle(state.page, state.activeBot?.name);
@@ -563,7 +576,7 @@ function factoryAssistantView(): string {
 }
 
 function renderLogin(error = ""): void {
-  if (app) app.innerHTML = loginView(error);
+  if (app) app.innerHTML = loginView(error, telegramLoginClientId);
 }
 
 async function handleClick(event: MouseEvent): Promise<void> {
@@ -584,6 +597,8 @@ async function handleClick(event: MouseEvent): Promise<void> {
     if (action === "sign-out") {
       await signOut();
       renderLogin();
+    } else if (action === "telegram-login") {
+      await loginWithTelegram();
     } else if (action === "navigate-create") navigate("create");
     else if (action === "navigate-bots") navigate("bots");
     else if (action === "open-search") openSearch();
@@ -657,8 +672,43 @@ async function handleClick(event: MouseEvent): Promise<void> {
       closeSearch();
     }
   } catch (error) {
+    if (action === "telegram-login") {
+      clearSession();
+      renderLogin(asMessage(error));
+      return;
+    }
     setError(error);
   }
+}
+
+async function loginWithTelegram(): Promise<void> {
+  if (!telegramLoginClientId || !window.Telegram?.Login?.auth) {
+    throw new Error("Telegram sign-in is unavailable. Refresh the page and try again.");
+  }
+  const challenge = await api<{ nonce: string }>("/v1/auth/telegram/browser-nonce", {
+    method: "POST",
+    body: jsonBody({}),
+  });
+  const result = await new Promise<{ id_token?: string; error?: string } | null>((resolve, reject) => {
+    try {
+      window.Telegram?.Login?.auth(
+        { client_id: telegramLoginClientId, scope: ["profile"], nonce: challenge.nonce },
+        (response) => {
+          if (response?.error) reject(new Error("Telegram sign-in was cancelled or could not be completed."));
+          else resolve(response ?? null);
+        },
+      );
+    } catch (error) {
+      reject(error);
+    }
+  });
+  if (!result?.id_token) throw new Error("Telegram did not return a valid sign-in. Try again.");
+  const session = await api<{ tokenId: string; token: string }>("/v1/auth/telegram/browser", {
+    method: "POST",
+    body: jsonBody({ idToken: result.id_token }),
+  });
+  await logIn(session.token);
+  sessionStorage.setItem(SESSION_TOKEN_ID_KEY, session.tokenId);
 }
 
 async function handleSubmit(event: SubmitEvent): Promise<void> {

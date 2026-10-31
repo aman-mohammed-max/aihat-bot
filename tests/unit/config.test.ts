@@ -12,6 +12,7 @@ describe("runtime configuration", () => {
     expect(parseRuntimeConfig({}).telegramRetryPolicy).toEqual({ maxAttempts: 2, maxRetryAfterSeconds: 3 });
     expect(parseRuntimeConfig({}).telegramMasterRequestsPerMinute).toBe(30);
     expect(parseRuntimeConfig({}).telegramCustomerRequestsPerMinute).toBe(30);
+    expect(parseRuntimeConfig({}).telegramLoginClientId).toBe("");
     expect(parseRuntimeConfig({}).scheduledTaskRetryPolicy).toEqual({
       maxAttempts: 5,
       backoffMs: 30_000,
@@ -25,6 +26,7 @@ describe("runtime configuration", () => {
         TELEGRAM_RETRY_MAX_AFTER_SECONDS: "0",
         TELEGRAM_MASTER_REQUESTS_PER_MINUTE: "42",
         TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE: "54",
+        TELEGRAM_LOGIN_CLIENT_ID: "123456789",
         SCHEDULED_TASK_RETRY_MAX_ATTEMPTS: "8",
         SCHEDULED_TASK_RETRY_BACKOFF_MS: "1000",
         SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS: "60000",
@@ -34,6 +36,7 @@ describe("runtime configuration", () => {
       telegramRetryPolicy: { maxAttempts: 1, maxRetryAfterSeconds: 0 },
       telegramMasterRequestsPerMinute: 42,
       telegramCustomerRequestsPerMinute: 54,
+      telegramLoginClientId: "123456789",
       scheduledTaskRetryPolicy: { maxAttempts: 8, backoffMs: 1000, maxBackoffMs: 60_000 },
     });
   });
@@ -53,6 +56,7 @@ describe("runtime configuration", () => {
       { TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE: "0" },
       { TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE: "1001" },
       { TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE: "1.5" },
+      { TELEGRAM_LOGIN_CLIENT_ID: "telegram-bot" },
       { SCHEDULED_TASK_RETRY_MAX_ATTEMPTS: "11" },
       { SCHEDULED_TASK_RETRY_BACKOFF_MS: "3600001" },
       { SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS: "-1" },

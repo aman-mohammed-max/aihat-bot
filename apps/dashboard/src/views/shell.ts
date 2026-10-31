@@ -10,7 +10,7 @@ const navigation = [
   { id: "usage", label: "Usage & analytics", glyph: "chart" },
 ];
 
-export function loginView(error = ""): string {
+export function loginView(error = "", telegramClientId = ""): string {
   return `<main class="auth-screen">
     <div class="auth-orbit auth-orbit-one"></div><div class="auth-orbit auth-orbit-two"></div>
     <section class="auth-card">
@@ -19,6 +19,7 @@ export function loginView(error = ""): string {
       <h1>Your bots,<br /><span>all in one place.</span></h1>
       <p class="muted-copy">Sign in through your Telegram launch or connect an owner API token to manage bots, tools, and automations.</p>
       ${error ? `<div class="alert alert-error" role="alert">${escapeHtml(error)}</div>` : ""}
+      ${telegramClientId ? `<button class="button button-secondary button-full telegram-login-button" type="button" data-action="telegram-login"><span>Continue with Telegram</span>${icon("arrow", 17)}</button><div class="auth-divider"><span>or use an API token</span></div>` : ""}
       <form id="login-form" class="stack-form">
         <label for="api-token">Owner API token</label>
         <div class="input-with-icon">${icon("key", 17)}<input id="api-token" name="token" type="password" autocomplete="off" placeholder="ahf_live_…" required minlength="50" /></div>
