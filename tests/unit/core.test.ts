@@ -1577,6 +1577,7 @@ function answerFor(step: CreationStep): unknown {
       return `secret_${"a".repeat(32)}`;
     case "imageModel":
     case "searchModel":
+    case "audioModel":
       return "";
     case "skills":
       return ["meal-planner"];
