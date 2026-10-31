@@ -1,5 +1,7 @@
 import { CloudflareD1Repositories } from "./d1-repositories.js";
 import { BotCoordinator } from "./coordinator.js";
+import { ConversationCoordinator } from "./conversation-coordinator.js";
+import { CloudflareConversationAgentEngine } from "./conversation-agent-engine.js";
 import { CloudflareAlarmScheduler } from "./scheduler.js";
 import { CloudflareR2ObjectStore } from "./r2-object-store.js";
 import { CloudflareD1UploadedFileRepository } from "./uploaded-file-repository.js";
@@ -58,7 +60,7 @@ import {
   type Logger,
 } from "@aihat/core";
 
-export { BotCoordinator };
+export { BotCoordinator, ConversationCoordinator };
 
 export const runtimeCapabilities = {
   runtime: "cloudflare",
@@ -66,6 +68,7 @@ export const runtimeCapabilities = {
     sharedAgentEngine: true,
     databasePersistence: true,
     durableObjectSqlite: true,
+    durableConversationCoordination: true,
     durableObjectAlarms: true,
     queueEnqueue: true,
     queueProcessing: true,
@@ -280,9 +283,14 @@ export default {
       ),
       allowedOrigins: modelAllowedOrigins,
     });
-    const agentEngine = createUsageTrackingAgentEngine(
+    const trackedAgentEngine = createUsageTrackingAgentEngine(
       createMemoryAwareAgentEngine(baseAgentEngine, memoryService, runtimeLogger),
       d1,
+      runtimeLogger,
+    );
+    const agentEngine = new CloudflareConversationAgentEngine(
+      trackedAgentEngine,
+      env.CONVERSATION_COORDINATOR,
       runtimeLogger,
     );
     const telegram = new TelegramManager({
@@ -381,6 +389,11 @@ export default {
         const coordinator = env.BOT_COORDINATOR.get(env.BOT_COORDINATOR.idFromName("readiness-check"));
         const coordinatorResponse = await coordinator.fetch("https://coordinator/health");
         if (!coordinatorResponse.ok) throw new Error("Durable Object readiness failed.");
+        const conversationCoordinator = env.CONVERSATION_COORDINATOR.get(
+          env.CONVERSATION_COORDINATOR.idFromName("readiness-check"),
+        );
+        const conversationResponse = await conversationCoordinator.fetch("https://conversation-coordinator/health");
+        if (!conversationResponse.ok) throw new Error("Conversation Durable Object readiness failed.");
         return Response.json({ status: "ready", runtime: "cloudflare" });
       } catch {
         return Response.json({ status: "not_ready", reason: "database_unavailable_or_unmigrated" }, { status: 503 });
@@ -472,11 +485,12 @@ export default {
       ),
       allowedOrigins: modelAllowedOrigins,
     });
-    const engine = createUsageTrackingAgentEngine(
+    const trackedEngine = createUsageTrackingAgentEngine(
       createMemoryAwareAgentEngine(baseEngine, memoryService, runtimeLogger),
       d1,
       runtimeLogger,
     );
+    const engine = new CloudflareConversationAgentEngine(trackedEngine, env.CONVERSATION_COORDINATOR, runtimeLogger);
     const telegram = new TelegramManager({
       repository: d1,
       bots: d1,

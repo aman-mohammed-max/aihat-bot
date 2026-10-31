@@ -33,9 +33,15 @@
     "TELEGRAM_WEBHOOK_BASE_URL": "https://aihat-bot-factory.work-fdc.workers.dev"
   },
   "durable_objects": {
-    "bindings": [{ "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" }]
+    "bindings": [
+      { "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" },
+      { "name": "CONVERSATION_COORDINATOR", "class_name": "ConversationCoordinator" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BotCoordinator"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["BotCoordinator"] },
+    { "tag": "v2", "new_sqlite_classes": ["ConversationCoordinator"] }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -74,7 +80,10 @@
         "TELEGRAM_WEBHOOK_BASE_URL": ""
       },
       "durable_objects": {
-        "bindings": [{ "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" }]
+        "bindings": [
+          { "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" },
+          { "name": "CONVERSATION_COORDINATOR", "class_name": "ConversationCoordinator" }
+        ]
       },
       "d1_databases": [
         {
@@ -114,7 +123,10 @@
         "TELEGRAM_WEBHOOK_BASE_URL": ""
       },
       "durable_objects": {
-        "bindings": [{ "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" }]
+        "bindings": [
+          { "name": "BOT_COORDINATOR", "class_name": "BotCoordinator" },
+          { "name": "CONVERSATION_COORDINATOR", "class_name": "ConversationCoordinator" }
+        ]
       },
       "d1_databases": [
         {
