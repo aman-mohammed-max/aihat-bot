@@ -142,6 +142,11 @@ const migrations: readonly Migration[] = [
     name: "bot_collaborators",
     sql: readFileSync(findMigration("0026_bot_collaborators.sql"), "utf8"),
   },
+  {
+    version: 27,
+    name: "native_text_statistics",
+    sql: readFileSync(findMigration("0027_native_text_statistics.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {

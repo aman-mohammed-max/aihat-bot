@@ -23,6 +23,7 @@ export * from "./global-skill-catalog-http-api.js";
 export * from "./environment-keyring.js";
 export * from "./skill-data.js";
 export * from "./skill-engine.js";
+export * from "./native-skills.js";
 export * from "./mcp-manager.js";
 export * from "./mcp-http-api.js";
 export * from "./telegram.js";

@@ -4,6 +4,7 @@ import {
   createApiTokenMaterial,
   createGlobalSkillCatalogAdminHandler,
   createSkillsApiHandler,
+  createDefaultNativeSkillRegistry,
 } from "../../packages/core/src/index.js";
 import { SkillEngine } from "../../packages/core/src/skill-engine.js";
 import type {
@@ -93,6 +94,38 @@ function rateLimiter(consume: SkillRateLimiter["consume"] = async () => true): S
 const secrets: SecretStore = { resolve: async () => "test-secret" };
 
 describe("skill engine", () => {
+  test("runs only registered native TypeScript skills with matching grants and output schemas", async () => {
+    const registry = createDefaultNativeSkillRegistry();
+    const [publication] = registry.listDefinitions();
+    if (!publication) throw new Error("Expected a built-in native skill.");
+    const nativeDefinition: SkillDefinition = { ...publication, tenantId: null, enabled: true };
+    const installed = installation({ definition: nativeDefinition, grantedPermissions: ["text:analyze"] });
+    const engine = new SkillEngine({
+      skills: skillRepository([installed]),
+      rateLimiter: rateLimiter(),
+      secrets,
+      allowedHttpOrigins: new Set(),
+      nativeHandlers: registry.handlers,
+    });
+
+    const [tool] = await engine.available(context);
+    if (!tool) throw new Error("Expected an available registered native skill.");
+    await expect(engine.execute(context, tool.name, { text: "hello\nworld from AI" })).resolves.toEqual({
+      characterCount: 19,
+      lineCount: 2,
+      wordCount: 4,
+    });
+
+    const unauthorized = new SkillEngine({
+      skills: skillRepository([installation({ definition: nativeDefinition, grantedPermissions: [] })]),
+      rateLimiter: rateLimiter(),
+      secrets,
+      allowedHttpOrigins: new Set(),
+      nativeHandlers: registry.handlers,
+    });
+    await expect(unauthorized.available(context)).resolves.toEqual([]);
+  });
+
   test("runs forward-only workflows with opaque checkpoints, child retries, and completed-call replay", async () => {
     const workflowDefinition: SkillDefinition = {
       ...definition,
@@ -842,5 +875,42 @@ describe("skill management API", () => {
 
     const catalog = await handler(new Request(endpoint, { headers: { authorization: `Bearer ${token}` } }));
     expect(await catalog?.json()).toMatchObject([{ id: definition.id, enabled: false }]);
+  });
+
+  test("global operators can publish only exact metadata for a code-registered native skill", async () => {
+    const token = "native-skill-admin-token-".padEnd(48, "n");
+    const nativeSkills = createDefaultNativeSkillRegistry();
+    const [definition] = nativeSkills.listDefinitions();
+    if (!definition) throw new Error("Expected a built-in native skill definition.");
+    const baseSkills = skillRepository([]);
+    let published: SkillDefinition | undefined;
+    const handler = createGlobalSkillCatalogAdminHandler({
+      authorizationToken: token,
+      nativeSkills,
+      skills: {
+        ...baseSkills,
+        listGlobalCatalog: async () => (published ? [published] : []),
+        publishGlobalCatalogSkill: async (input) => {
+          published = { ...input.definition, tenantId: null, enabled: true };
+        },
+      },
+    });
+    const endpoint = "https://factory.example.test/_operator/skills";
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const accepted = await handler(
+      new Request(endpoint, { method: "POST", headers, body: JSON.stringify(definition) }),
+    );
+    expect(accepted?.status).toBe(201);
+    expect(published).toMatchObject({ id: definition.id, executionType: "native", enabled: true });
+
+    const altered = await handler(
+      new Request(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...definition, description: "An unreviewed replacement." }),
+      }),
+    );
+    expect(altered?.status).toBe(400);
+    expect(published?.description).toBe(definition.description);
   });
 });

@@ -53,6 +53,7 @@ import {
   DurableToolRegistry,
   McpManager,
   SkillEngine,
+  createDefaultNativeSkillRegistry,
   TelegramMasterBot,
   createTelegramMasterWebhookHandler,
   sanitizeLogFields,
@@ -61,6 +62,8 @@ import {
 } from "@aihat/core";
 
 export { BotCoordinator, ConversationCoordinator };
+
+const nativeSkills = createDefaultNativeSkillRegistry();
 
 export const runtimeCapabilities = {
   runtime: "cloudflare",
@@ -81,7 +84,7 @@ export const runtimeCapabilities = {
     promptSkills: true,
     httpSkills: true,
     workflowSkills: true,
-    nativeSkills: false,
+    nativeSkills: true,
     modelStreaming: false,
     modelStructuredOutput: false,
     telegram: true,
@@ -116,6 +119,7 @@ export default {
     const globalSkillCatalogResponse = await createGlobalSkillCatalogAdminHandler({
       skills: d1.skills,
       authorizationToken: env.SKILL_CATALOG_ADMIN_TOKEN ?? "",
+      nativeSkills,
     })(request);
     if (globalSkillCatalogResponse) return globalSkillCatalogResponse;
     const secretRotationResponse = await createSecretRotationApiHandler({
@@ -250,6 +254,7 @@ export default {
             skills: d1.skills,
             rateLimiter: d1.skillRateLimiter,
             workflowExecutions: d1.workflowExecutions,
+            nativeHandlers: nativeSkills.handlers,
             secrets: secretStore,
             secretWriter: secretStore,
             telegramGrants: d1,
@@ -458,6 +463,7 @@ export default {
             skills: d1.skills,
             rateLimiter: d1.skillRateLimiter,
             workflowExecutions: d1.workflowExecutions,
+            nativeHandlers: nativeSkills.handlers,
             secrets: secretStore,
             secretWriter: secretStore,
             telegramGrants: d1,

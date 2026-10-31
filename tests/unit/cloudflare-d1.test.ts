@@ -1074,6 +1074,7 @@ function createDatabase(): Database {
     "0024_model_retry_analytics.sql",
     "0025_bot_ownership_transfers.sql",
     "0026_bot_collaborators.sql",
+    "0027_native_text_statistics.sql",
   ]) {
     const migration = readFileSync(new URL(`../../migrations/sqlite/${migrationName}`, import.meta.url), "utf8");
     db.exec(migration);

@@ -8,6 +8,7 @@ import { AppError } from "../../packages/core/src/errors.js";
 import { McpManager, MCP_INVOKE_PERMISSION } from "../../packages/core/src/mcp-manager.js";
 import { ModelProviderRegistry, OpenAICompatibleProvider } from "../../packages/core/src/model.js";
 import { SkillEngine } from "../../packages/core/src/skill-engine.js";
+import { createDefaultNativeSkillRegistry } from "../../packages/core/src/native-skills.js";
 import { EncryptedSecretStore } from "../../packages/core/src/encrypted-secrets.js";
 import { BotCredentialApprovalService } from "../../packages/core/src/bot-credential-approvals.js";
 import { createEncryptedMemoryService, createMemoryAwareAgentEngine } from "../../packages/core/src/memory.js";
@@ -214,24 +215,33 @@ describe("Bun and Cloudflare runtime repository parity", () => {
       expect(bunCatalog).toMatchObject([
         { id: globalDefinition.id, tenantId: null, enabled: true },
         { id: definition.id, tenantId, enabled: true, configuration: definition.configuration },
+        { id: "aihat.text.statistics.v1", tenantId: null, enabled: true, executionType: "native" },
       ]);
       expect(await bunRepositories.skills.listCatalog("tenant-other" as TenantId)).toMatchObject([
         { id: globalDefinition.id, tenantId: null, enabled: true },
+        { id: "aihat.text.statistics.v1", tenantId: null, enabled: true },
       ]);
       expect(await cloudflareRepositories.skills.listCatalog("tenant-other" as TenantId)).toMatchObject([
         { id: globalDefinition.id, tenantId: null, enabled: true },
+        { id: "aihat.text.statistics.v1", tenantId: null, enabled: true },
       ]);
       await Promise.all([
         bunRepositories.skills.setGlobalCatalogSkillEnabled(globalDefinition.id, false),
         cloudflareRepositories.skills.setGlobalCatalogSkillEnabled(globalDefinition.id, false),
       ]);
-      expect(await bunRepositories.skills.listCatalog("tenant-other" as TenantId)).toEqual([]);
-      expect(await cloudflareRepositories.skills.listCatalog("tenant-other" as TenantId)).toEqual([]);
+      expect(await bunRepositories.skills.listCatalog("tenant-other" as TenantId)).toMatchObject([
+        { id: "aihat.text.statistics.v1", tenantId: null, enabled: true },
+      ]);
+      expect(await cloudflareRepositories.skills.listCatalog("tenant-other" as TenantId)).toMatchObject([
+        { id: "aihat.text.statistics.v1", tenantId: null, enabled: true },
+      ]);
       expect(await bunRepositories.skills.listGlobalCatalog()).toMatchObject([
         { id: globalDefinition.id, enabled: false },
+        { id: "aihat.text.statistics.v1", enabled: true },
       ]);
       expect(await cloudflareRepositories.skills.listGlobalCatalog()).toMatchObject([
         { id: globalDefinition.id, enabled: false },
+        { id: "aihat.text.statistics.v1", enabled: true },
       ]);
       await expect(bunRepositories.skills.publishCatalogSkill({ tenantId, definition })).rejects.toMatchObject({
         code: "CONFLICT",
@@ -239,6 +249,81 @@ describe("Bun and Cloudflare runtime repository parity", () => {
       await expect(cloudflareRepositories.skills.publishCatalogSkill({ tenantId, definition })).rejects.toMatchObject({
         code: "CONFLICT",
       });
+    } finally {
+      bunDatabase.close();
+      cloudflareDatabase.close();
+    }
+  });
+
+  test("executes a reviewed native TypeScript skill identically through Bun and D1 repositories", async () => {
+    const bunDatabase = openSqliteDatabase(":memory:");
+    const cloudflareDatabase = openSqliteDatabase(":memory:");
+    const bunRepositories = new BunSqliteRepositories(bunDatabase);
+    const cloudflareRepositories = new CloudflareD1Repositories(
+      new SqliteD1(cloudflareDatabase) as unknown as D1Database,
+    );
+    const registry = createDefaultNativeSkillRegistry();
+    const [nativeDefinition] = registry.listDefinitions();
+    if (!nativeDefinition) throw new Error("Expected a registered native skill.");
+    try {
+      seedTenant(bunDatabase);
+      seedTenant(cloudflareDatabase);
+      const [bunBotId, cloudflareBotId] = await Promise.all([
+        bunRepositories.createDraft({
+          tenantId,
+          ownerId,
+          idempotencyKey: "native-skill-parity",
+          answers: creationAnswers(),
+        }),
+        cloudflareRepositories.createDraft({
+          tenantId,
+          ownerId,
+          idempotencyKey: "native-skill-parity",
+          answers: creationAnswers(),
+        }),
+      ]);
+      await Promise.all([
+        bunRepositories.skills.install({
+          tenantId,
+          botId: bunBotId,
+          skillId: nativeDefinition.id,
+          installedBy: ownerId,
+          configuration: {},
+          grantedPermissions: ["text:analyze"],
+        }),
+        cloudflareRepositories.skills.install({
+          tenantId,
+          botId: cloudflareBotId,
+          skillId: nativeDefinition.id,
+          installedBy: ownerId,
+          configuration: {},
+          grantedPermissions: ["text:analyze"],
+        }),
+      ]);
+      const createEngine = (repositories: BunSqliteRepositories | CloudflareD1Repositories) =>
+        new SkillEngine({
+          skills: repositories.skills,
+          rateLimiter: repositories.skillRateLimiter,
+          secrets: { resolve: async () => "unused" },
+          allowedHttpOrigins: new Set(),
+          nativeHandlers: registry.handlers,
+        });
+      const run = async (engine: SkillEngine, botId: Awaited<ReturnType<BunSqliteRepositories["createDraft"]>>) => {
+        const context = { tenantId, botId, actorId: ownerId };
+        const [tool] = await engine.available(context);
+        if (!tool) throw new Error("Expected the granted native skill to be available.");
+        return {
+          tools: await engine.available(context),
+          result: await engine.execute(context, tool.name, { text: "AI Hat\nworks" }),
+        };
+      };
+      const [bunResult, cloudflareResult] = await Promise.all([
+        run(createEngine(bunRepositories), bunBotId),
+        run(createEngine(cloudflareRepositories), cloudflareBotId),
+      ]);
+
+      expect(bunResult).toEqual(cloudflareResult);
+      expect(bunResult.result).toEqual({ characterCount: 12, lineCount: 2, wordCount: 3 });
     } finally {
       bunDatabase.close();
       cloudflareDatabase.close();

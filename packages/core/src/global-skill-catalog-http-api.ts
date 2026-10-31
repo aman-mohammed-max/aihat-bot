@@ -2,6 +2,7 @@ import { AppError } from "./errors.js";
 import { isOperatorRequestAuthorized, isOperatorTokenConfigured } from "./operator-auth.js";
 import { validateSkillCatalogPublication } from "./skill-data.js";
 import { validateSkillDefinitionForPublication } from "./skill-engine.js";
+import type { NativeSkillRegistry } from "./native-skills.js";
 import type { SkillRepository } from "./ports.js";
 import type { SkillDefinition } from "./types.js";
 
@@ -12,6 +13,7 @@ const GLOBAL_SKILL_ROUTE = /^\/_operator\/skills\/([A-Za-z0-9][A-Za-z0-9._-]{0,1
 export function createGlobalSkillCatalogAdminHandler(input: {
   readonly skills: SkillRepository;
   readonly authorizationToken: string;
+  readonly nativeSkills?: NativeSkillRegistry;
 }): (request: Request) => Promise<Response | undefined> {
   return async (request) => {
     const url = new URL(request.url);
@@ -33,7 +35,16 @@ export function createGlobalSkillCatalogAdminHandler(input: {
         return Response.json(catalog.map(skillSummary), { headers: noStoreHeaders() });
       }
       if (collectionRoute && request.method === "POST") {
-        const definition = validateSkillCatalogPublication(await readJsonBody(request));
+        const definition = validateSkillCatalogPublication(await readJsonBody(request), {
+          allowNative: input.nativeSkills !== undefined,
+        });
+        if (definition.executionType === "native" && !input.nativeSkills?.matchesDefinition(definition)) {
+          throw new AppError(
+            "VALIDATION_ERROR",
+            "Native skill metadata must exactly match a code-registered reviewed handler.",
+            400,
+          );
+        }
         const catalog = await input.skills.listGlobalCatalog();
         const published: SkillDefinition = { ...definition, tenantId: null, enabled: true };
         validateSkillDefinitionForPublication(published, catalog);

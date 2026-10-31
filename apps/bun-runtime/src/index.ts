@@ -50,6 +50,7 @@ import {
   DurableToolRegistry,
   McpManager,
   SkillEngine,
+  createDefaultNativeSkillRegistry,
 } from "@aihat/core";
 import { BunSqliteRepositories } from "./sqlite-store.js";
 import { BunFileObjectStore } from "./file-object-store.js";
@@ -57,6 +58,7 @@ import { BunSqliteUploadedFileRepository } from "./uploaded-file-repository.js";
 
 const config = parseBunRuntimeConfig(process.env);
 const logger = new JsonLogger(config.logLevel);
+const nativeSkills = createDefaultNativeSkillRegistry();
 const db = openSqliteDatabase(config.databasePath);
 const repositories = new BunSqliteRepositories(db);
 const objects = new BunFileObjectStore(process.env.OBJECTS_PATH ?? "./data/objects");
@@ -149,6 +151,7 @@ const baseAgentEngine = createOpenAICompatibleAgentEngine({
         skills: repositories.skills,
         rateLimiter: repositories.skillRateLimiter,
         workflowExecutions: repositories.workflowExecutions,
+        nativeHandlers: nativeSkills.handlers,
         secrets: secretStore,
         secretWriter: secretStore,
         telegramGrants: repositories,
@@ -258,6 +261,7 @@ const skillsApi = createSkillsApiHandler(authenticator, repositories, repositori
 const globalSkillCatalogAdminApi = createGlobalSkillCatalogAdminHandler({
   skills: repositories.skills,
   authorizationToken: process.env.SKILL_CATALOG_ADMIN_TOKEN ?? "",
+  nativeSkills,
 });
 const mcpApi = createMcpApiHandler(authenticator, repositories, mcpManager);
 const telegramApi = createTelegramManagementApiHandler(authenticator, repositories, repositories, telegram);

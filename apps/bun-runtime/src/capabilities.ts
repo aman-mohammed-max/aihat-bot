@@ -19,7 +19,7 @@ export const runtimeCapabilities: RuntimeCapabilities = {
     promptSkills: true,
     httpSkills: true,
     workflowSkills: true,
-    nativeSkills: false,
+    nativeSkills: true,
     modelStreaming: false,
     modelStructuredOutput: false,
     telegram: true,

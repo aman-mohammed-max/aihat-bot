@@ -35,7 +35,10 @@ const SKILL_SCHEMA_KEYS = new Set([
 const UNSAFE_OBJECT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 /** Parse the intentionally limited definition format accepted by owner catalog publishing. */
-export function validateSkillCatalogPublication(value: unknown): SkillCatalogPublication {
+export function validateSkillCatalogPublication(
+  value: unknown,
+  options: { readonly allowNative?: boolean } = {},
+): SkillCatalogPublication {
   const raw = asRecord(value);
   const allowedKeys = new Set([
     "id",
@@ -63,7 +66,10 @@ export function validateSkillCatalogPublication(value: unknown): SkillCatalogPub
   const author = requiredText(raw.author, "author", 120);
   const category = requiredText(raw.category, "category", 80);
   const description = requiredText(raw.description, "description", 2000);
-  if (typeof raw.executionType !== "string" || !PUBLISHABLE_EXECUTION_TYPES.has(raw.executionType)) {
+  if (
+    typeof raw.executionType !== "string" ||
+    (!PUBLISHABLE_EXECUTION_TYPES.has(raw.executionType) && !(options.allowNative && raw.executionType === "native"))
+  ) {
     throw new AppError("VALIDATION_ERROR", "Only prompt, HTTPS, and workflow skills can be published.", 400);
   }
   const inputSchema = asRecord(raw.inputSchema);
@@ -127,6 +133,10 @@ function validatePublicationConfiguration(executionType: string, configuration: 
   } else if (executionType === "http") {
     if (Object.keys(configuration).some((key) => key !== "http") || !asRecord(configuration.http)) {
       throw new AppError("VALIDATION_ERROR", "HTTP skills need an http configuration object.", 400);
+    }
+  } else if (executionType === "native") {
+    if (Object.keys(configuration).length > 0) {
+      throw new AppError("VALIDATION_ERROR", "Native skills do not accept runtime configuration.", 400);
     }
   } else if (Object.keys(configuration).some((key) => key !== "workflow") || !asRecord(configuration.workflow)) {
     throw new AppError("VALIDATION_ERROR", "Workflow skills need a workflow configuration object.", 400);
