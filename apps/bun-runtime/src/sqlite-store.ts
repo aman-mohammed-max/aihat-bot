@@ -1696,6 +1696,7 @@ export class BunSqliteRepositories
           model: input.answers.model,
           ...(input.answers.imageModel ? { imageModel: input.answers.imageModel } : {}),
           ...(input.answers.searchModel ? { searchModel: input.answers.searchModel } : {}),
+          ...(input.answers.audioModel ? { audioModel: input.answers.audioModel } : {}),
           endpoint: input.answers.endpoint,
           credentialRef: input.answers.credentialRef,
         },

@@ -747,7 +747,9 @@ async function handleClick(event: MouseEvent): Promise<void> {
           ? "imageModel"
           : target.dataset.modelRole === "search"
             ? "searchModel"
-            : "model";
+            : target.dataset.modelRole === "audio"
+              ? "audioModel"
+              : "model";
       await loadFactoryModels(roleStep);
     } else if (action === "pause-factory") await updateFactory("pause");
     else if (action === "resume-factory") await updateFactory("resume");
@@ -1127,7 +1129,15 @@ async function loadFactoryModels(roleStep?: CreationStep): Promise<void> {
   const session = requireFactorySession();
   const step = roleStep ?? session.currentStep;
   const role =
-    step === "model" ? "chat" : step === "imageModel" ? "image" : step === "searchModel" ? "search" : undefined;
+    step === "model"
+      ? "chat"
+      : step === "imageModel"
+        ? "image"
+        : step === "searchModel"
+          ? "search"
+          : step === "audioModel"
+            ? "audio"
+            : undefined;
   if (!role || step !== session.currentStep) {
     throw new Error("Model discovery is only available at the current model selection step.");
   }
@@ -1155,7 +1165,9 @@ async function loadFactoryModels(roleStep?: CreationStep): Promise<void> {
       state.factoryError =
         role === "image"
           ? "No image models were listed. Type an unlisted model ID or leave this optional step blank."
-          : "This endpoint did not list models. You can still type a model ID manually.";
+          : role === "audio"
+            ? "No audio models were listed. Type a transcription model ID or leave this optional step blank."
+            : "This endpoint did not list models. You can still type a model ID manually.";
     }
   } catch (error) {
     state.factoryError = asMessage(error);
@@ -1202,7 +1214,7 @@ async function submitFactoryAnswer(form: HTMLFormElement, data: FormData): Promi
 
   let value: unknown = data.get("value");
   const customModel = String(data.get("customModel") ?? "").trim();
-  if (["model", "imageModel", "searchModel"].includes(step) && customModel) value = customModel;
+  if (["model", "imageModel", "searchModel", "audioModel"].includes(step) && customModel) value = customModel;
   if (step === "model") {
     const temporaryCredential = String(data.get("discoveryCredential") ?? "").trim();
     if (temporaryCredential) state.pendingFactoryCredential = temporaryCredential;
@@ -1354,6 +1366,7 @@ async function configureBotModel(data: FormData): Promise<void> {
         model: String(data.get("model") ?? "").trim(),
         imageModel: String(data.get("imageModel") ?? "").trim(),
         searchModel: String(data.get("searchModel") ?? "").trim(),
+        audioModel: String(data.get("audioModel") ?? "").trim(),
         ...(endpoint ? { endpoint } : {}),
         parameters: { temperature },
         ...(bot.model.retryPolicy ? { retryPolicy: bot.model.retryPolicy } : {}),

@@ -496,6 +496,7 @@ function stepPrompt(step: CreationStep): string {
     credentialRef: "Add model credentials in the Mini App. Do not send secrets in chat.",
     imageModel: "Which image model should it use? Reply skip if image generation is not needed.",
     searchModel: "Which search model should it use? Reply skip if search is not needed.",
+    audioModel: "Which transcription model should it use? Reply skip if voice and audio messages are not needed.",
     skills: "Which skills should it have? Enter IDs separated by commas, or leave blank.",
     mcpConnections: "Which MCP connections should it use? Enter names separated by commas, or leave blank.",
     integrations: "Which integrations should it use? Enter names separated by commas, or leave blank.",
@@ -510,7 +511,10 @@ function stepPrompt(step: CreationStep): string {
 
 function parseAnswer(step: CreationStep, text: string): unknown {
   if (step === "credentialRef") throw new AppError("FORBIDDEN", "Credentials must be added in the Mini App.", 403);
-  if ((step === "imageModel" || step === "searchModel") && ["skip", "none"].includes(text.trim().toLowerCase())) {
+  if (
+    (step === "imageModel" || step === "searchModel" || step === "audioModel") &&
+    ["skip", "none"].includes(text.trim().toLowerCase())
+  ) {
     return "";
   }
   if (step === "memoryEnabled") {

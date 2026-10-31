@@ -1442,6 +1442,7 @@ describe("Bun and Cloudflare runtime repository parity", () => {
       expect(bunResult.factoryModelSelection).toEqual({
         imageModel: "gpt-image-1",
         searchModel: "provider-search-v2",
+        audioModel: "whisper-1",
       });
     } finally {
       bunDatabase.close();
@@ -1937,6 +1938,7 @@ async function runParityScenario(repositories: BunSqliteRepositories | Cloudflar
   const factoryModelSelection = {
     imageModel: draftBot.model.imageModel,
     searchModel: draftBot.model.searchModel,
+    audioModel: draftBot.model.audioModel,
   };
   await repositories.publish({ tenantId, ownerId, botId, idempotencyKey: "runtime-parity-publish" });
   await repositories.updateOwned({
@@ -2325,6 +2327,7 @@ function creationAnswers(): CreationAnswers {
     model: "gpt-4o-mini",
     imageModel: "gpt-image-1",
     searchModel: "provider-search-v2",
+    audioModel: "whisper-1",
     credentialRef: modelSecret,
     skills: ["weather.lookup"],
     mcpConnections: [],

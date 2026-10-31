@@ -63,6 +63,14 @@ Approved senders are limited to 30 messages per minute by default. Set `TELEGRAM
 - In the Cloudflare development environment, set `FILE_SCANNER_ENDPOINT` to the full HTTPS gateway route and `FILE_SCANNER_ALLOWED_ORIGINS` to its exact origin. Store the matching gateway token as `FILE_SCANNER_TOKEN` with `wrangler secret put`; never add either secret to Wrangler variables or Git. Verify `/capabilities` reports `fileMalwareScanning: true` after deployment.
 - The gateway accepts bounded raw file bodies, requires the bearer token and encoded filename/content type headers, and returns only a `clean` or `infected` verdict. It permits four concurrent scans and returns `503` while at capacity. Auth, size, scanner, and network failures do not mark a file clean.
 
+## Telegram audio transcription
+
+- Audio support is optional per bot. Select an audio transcription model in the factory or bot settings; the configured provider must expose an OpenAI-compatible `/audio/transcriptions` route.
+- Add the provider's exact HTTPS origin to `MODEL_ALLOWED_ORIGINS`. The provider uses the bot's encrypted model credential. The origin check runs before that credential is resolved.
+- Audio is limited to 10 MiB and 10 minutes and must pass malware scanning. If scanning is missing or unavailable, transcription fails closed; see [File scanning](#file-scanning).
+- Supported formats include OGG, MP3, M4A, WAV, FLAC, AAC, and WebM. Verify the selected model supports transcription and appears in the provider's `/models` listing; some providers require entering a model ID manually.
+- Provider errors are returned as a temporary transcription failure without exposing response bodies or credentials. Check Worker logs for sanitized errors and confirm the provider origin, model ID, credential reference, and scanner configuration.
+
 ## Encryption and database setup
 
 - `encryptedSecrets` must be `true` in `/capabilities` before connecting model, Telegram, or skill credentials. Configure `SECRET_ACTIVE_KEY_ID` and `SECRET_KEYRING_JSON` as Worker secrets or Bun environment values.

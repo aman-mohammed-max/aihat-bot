@@ -20,6 +20,7 @@ export const CREATION_STEPS = [
   "credentialRef",
   "imageModel",
   "searchModel",
+  "audioModel",
   "skills",
   "mcpConnections",
   "integrations",
@@ -238,6 +239,7 @@ function validateAnswer<K extends CreationStep>(step: K, value: unknown): Creati
       return modelIdentifier(value, step) as CreationAnswers[K];
     case "imageModel":
     case "searchModel":
+    case "audioModel":
       return typeof value === "string" && ["", "skip", "none"].includes(value.trim().toLowerCase())
         ? ("" as CreationAnswers[K])
         : (modelIdentifier(value, step) as CreationAnswers[K]);
@@ -329,13 +331,18 @@ function modelIdentifier(value: unknown, field: string): string {
 }
 
 function requireCompleteAnswers(answers: Partial<CreationAnswers>): CreationAnswers {
-  if (CREATION_STEPS.some((step) => step !== "imageModel" && step !== "searchModel" && answers[step] === undefined)) {
+  if (
+    CREATION_STEPS.some(
+      (step) => step !== "imageModel" && step !== "searchModel" && step !== "audioModel" && answers[step] === undefined,
+    )
+  ) {
     throw new AppError("VALIDATION_ERROR", "Creation session is missing required answers.", 400);
   }
   return {
     ...answers,
     imageModel: answers.imageModel ?? "",
     searchModel: answers.searchModel ?? "",
+    audioModel: answers.audioModel ?? "",
   } as CreationAnswers;
 }
 

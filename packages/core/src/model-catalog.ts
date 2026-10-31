@@ -1,11 +1,11 @@
 import { AppError } from "./errors.js";
 
-export type ModelCatalogRole = "chat" | "image" | "search";
+export type ModelCatalogRole = "chat" | "image" | "search" | "audio";
 
 export interface ModelCatalogEntry {
   readonly id: string;
   readonly name: string;
-  readonly kind: "chat" | "image" | "other";
+  readonly kind: "chat" | "image" | "audio" | "other";
 }
 
 const MAX_CATALOG_BYTES = 1_048_576;
@@ -60,7 +60,8 @@ export function filterModelCatalog(
   role: ModelCatalogRole,
 ): readonly ModelCatalogEntry[] {
   if (role === "image") return models.filter((model) => model.kind === "image");
-  if (role === "chat") return models.filter((model) => model.kind !== "image");
+  if (role === "audio") return models.filter((model) => model.kind === "audio");
+  if (role === "chat") return models.filter((model) => model.kind !== "image" && model.kind !== "audio");
   return models;
 }
 
@@ -177,6 +178,12 @@ function classifyModel(raw: Record<string, unknown>, id: string): ModelCatalogEn
     )
   ) {
     return "image";
+  }
+  if (
+    /audio|transcri|speech|\basr\b|\bstt\b/.test(metadata) ||
+    /whisper|transcri|speech-to-text|audio[-_/]?(in|transcri|speech)/.test(id.toLowerCase())
+  ) {
+    return "audio";
   }
   if (/chat|text|language|llm|completion/.test(metadata) || !metadata) return "chat";
   return "other";

@@ -10,6 +10,7 @@ describe("provider model catalog", () => {
         data: [
           { id: "chat-model", name: "Chat model", type: "chat" },
           { id: "gpt-image-1", name: "Image model", type: "image" },
+          { id: "whisper-1", name: "Transcription model", type: "audio" },
           { id: "embedding-model", name: "Embedding model", type: "embedding" },
         ],
       });
@@ -24,10 +25,12 @@ describe("provider model catalog", () => {
     const chat = await fetchModelCatalog({ ...input, role: "chat" });
     const image = await fetchModelCatalog({ ...input, role: "image" });
     const search = await fetchModelCatalog({ ...input, role: "search" });
+    const audio = await fetchModelCatalog({ ...input, role: "audio" });
 
     expect(chat.map((model) => model.id)).toEqual(["chat-model", "embedding-model"]);
     expect(image.map((model) => model.id)).toEqual(["gpt-image-1"]);
-    expect(search).toHaveLength(3);
+    expect(search).toHaveLength(4);
+    expect(audio.map((model) => model.id)).toEqual(["whisper-1"]);
     expect(calls[0]?.url).toBe("https://provider.example.test/v1/models");
     expect(calls[0]?.init?.redirect).toBe("error");
     expect(new Headers(calls[0]?.init?.headers).get("authorization")).toBe("Bearer provider-secret");

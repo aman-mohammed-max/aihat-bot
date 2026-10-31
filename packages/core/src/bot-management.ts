@@ -462,6 +462,7 @@ function validateModelConfig(value: unknown): ModelConfig {
     "model",
     "imageModel",
     "searchModel",
+    "audioModel",
     "endpoint",
     "credentialRef",
     "parameters",
@@ -495,6 +496,7 @@ function validateModelConfig(value: unknown): ModelConfig {
   }
   const imageModel = optionalModelIdentifier(value.imageModel, "imageModel");
   const searchModel = optionalModelIdentifier(value.searchModel, "searchModel");
+  const audioModel = optionalModelIdentifier(value.audioModel, "audioModel");
   const retryPolicy = value.retryPolicy === undefined ? undefined : parseModelRetryPolicySettings(value.retryPolicy);
   if (
     value.credentialRef !== undefined &&
@@ -528,6 +530,7 @@ function validateModelConfig(value: unknown): ModelConfig {
     model: value.model.trim(),
     ...(imageModel ? { imageModel } : {}),
     ...(searchModel ? { searchModel } : {}),
+    ...(audioModel ? { audioModel } : {}),
     ...(endpoint === undefined ? {} : { endpoint }),
     ...(value.credentialRef === undefined ? {} : { credentialRef: value.credentialRef as string }),
     ...(parameters === undefined ? {} : { parameters }),

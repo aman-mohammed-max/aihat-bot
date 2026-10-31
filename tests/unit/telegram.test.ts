@@ -135,7 +135,16 @@ describe("Telegram webhook integration", () => {
         const body = (await request.json()) as { file_id: string };
         return Response.json({
           ok: true,
-          result: { file_path: body.file_id === "photo-file" ? "photos/test.png" : "documents/report.csv" },
+          result: {
+            file_path:
+              body.file_id === "photo-file"
+                ? "photos/test.png"
+                : body.file_id === "voice-file"
+                  ? "audio/test.oga"
+                  : body.file_id === "audio-document"
+                    ? "audio/music.mp3"
+                    : "documents/report.csv",
+          },
         });
       }
       if (method === "setWebhook") {
@@ -177,7 +186,7 @@ describe("Telegram webhook integration", () => {
         tenantId,
         ownerId,
         idempotencyKey: "telegram-integration-bot",
-        answers: creationAnswers(),
+        answers: { ...creationAnswers(), audioModel: "whisper-1" },
       });
       await repositories.publish({ tenantId, ownerId, botId, idempotencyKey: "telegram-integration-publish" });
       const tokenMaterial = await createApiTokenMaterial();
@@ -194,6 +203,8 @@ describe("Telegram webhook integration", () => {
       const agentMessages: (readonly ConversationMessage[])[] = [];
       const attachmentSecurityFlags: boolean[] = [];
       const scannedAttachmentTypes: string[] = [];
+      let audioScannerVerdict: "clean" | "infected" = "clean";
+      const transcribedAudio: { model: string | undefined; fileName: string; contentType: string; size: number }[] = [];
       const engine: AgentEngine = {
         respond: async (request) => {
           engineCalls.push(request.conversationId);
@@ -228,7 +239,21 @@ describe("Telegram webhook integration", () => {
         malwareScanner: {
           scan: async (input) => {
             scannedAttachmentTypes.push(input.contentType);
-            return { verdict: "clean", scanner: "test-av" };
+            return {
+              verdict: input.contentType.startsWith("audio/") ? audioScannerVerdict : "clean",
+              scanner: "test-av",
+            };
+          },
+        },
+        audioTranscriber: {
+          transcribe: async (input) => {
+            transcribedAudio.push({
+              model: input.model.audioModel,
+              fileName: input.fileName,
+              contentType: input.contentType,
+              size: input.bytes.byteLength,
+            });
+            return "Turn left at the next street.";
           },
         },
         webhookBaseUrl: "https://public.example.test",
@@ -526,6 +551,100 @@ describe("Telegram webhook integration", () => {
       expect(attachmentSecurityFlags.at(-1)).toBe(true);
       expect(scannedAttachmentTypes.at(-1)).toBe(DOCX_CONTENT_TYPE);
       expect(storedObjects.size).toBe(0);
+
+      attachmentBytes = new TextEncoder().encode("test ogg voice bytes");
+      const voiceResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9150,
+            message: {
+              caption: "Where should I go?",
+              voice: {
+                file_id: "voice-file",
+                mime_type: "audio/ogg",
+                duration: 4,
+                file_size: attachmentBytes.byteLength,
+              },
+              chat: { id: -10012345 },
+              from: { id: 54321, is_bot: false },
+            },
+          }),
+        }),
+      );
+      expect(voiceResponse?.status).toBe(200);
+      expect(agentMessages.at(-1)).toEqual([
+        {
+          role: "user",
+          content: "Where should I go?\n\n[Transcribed Telegram audio]\nTurn left at the next street.",
+        },
+      ]);
+      expect(attachmentSecurityFlags.at(-1)).toBe(true);
+      expect(scannedAttachmentTypes.at(-1)).toBe("audio/ogg");
+      expect(transcribedAudio.at(-1)).toEqual({
+        model: "whisper-1",
+        fileName: "telegram-audio.ogg",
+        contentType: "audio/ogg",
+        size: attachmentBytes.byteLength,
+      });
+      expect(storedObjects.size).toBe(0);
+
+      attachmentBytes = new TextEncoder().encode("test mp3 document bytes");
+      const audioDocumentResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9151,
+            message: {
+              document: {
+                file_id: "audio-document",
+                file_name: "meeting.mp3",
+                mime_type: "audio/mpeg",
+                file_size: attachmentBytes.byteLength,
+              },
+              chat: { id: -10012345 },
+              from: { id: 54321, is_bot: false },
+            },
+          }),
+        }),
+      );
+      expect(audioDocumentResponse?.status).toBe(200);
+      expect(agentMessages.at(-1)?.[0]?.content).toBe("[Transcribed Telegram audio]\nTurn left at the next street.");
+      expect(scannedAttachmentTypes.at(-1)).toBe("audio/mpeg");
+      expect(transcribedAudio.at(-1)).toMatchObject({ fileName: "telegram-audio.mp3", contentType: "audio/mpeg" });
+
+      audioScannerVerdict = "infected";
+      attachmentBytes = new TextEncoder().encode("infected audio sample");
+      const transcriptionCallsBeforeInfectedFile = transcribedAudio.length;
+      const infectedAudioResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9152,
+            message: {
+              voice: { file_id: "voice-file", mime_type: "audio/ogg", file_size: attachmentBytes.byteLength },
+              chat: { id: -10012345 },
+              from: { id: 54321, is_bot: false },
+            },
+          }),
+        }),
+      );
+      expect(infectedAudioResponse?.status).toBe(200);
+      expect(sentMessages.at(-1)?.text).toContain("could not pass security scanning");
+      expect(transcribedAudio).toHaveLength(transcriptionCallsBeforeInfectedFile);
+      audioScannerVerdict = "clean";
 
       const imageResponse = await webhooks(
         new Request(endpoint, {

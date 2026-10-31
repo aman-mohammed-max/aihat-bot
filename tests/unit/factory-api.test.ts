@@ -68,6 +68,7 @@ describe("authenticated bot factory API", () => {
               data: [
                 { id: "model-one", name: "Chat model", type: "chat" },
                 { id: "gpt-image-1", name: "Image model", type: "image" },
+                { id: "whisper-1", name: "Audio transcription model", type: "audio" },
               ],
             });
           },
@@ -139,6 +140,7 @@ describe("authenticated bot factory API", () => {
         ["credentialRef", `secret_${"a".repeat(32)}`],
         ["imageModel", "gpt-image-1"],
         ["searchModel", "provider-search-v2"],
+        ["audioModel", "whisper-1"],
         ["skills", []],
         ["mcpConnections", []],
         ["integrations", []],
@@ -148,7 +150,7 @@ describe("authenticated bot factory API", () => {
         ["visibility", "private"],
         ["interfaces", ["api"]],
       ];
-      const discoverModels = async (role: "chat" | "image" | "search", credential?: string) => {
+      const discoverModels = async (role: "chat" | "image" | "search" | "audio", credential?: string) => {
         const response = await handler(
           new Request(`https://local.test/v1/factory-sessions/${session.id}/models`, {
             method: "POST",
@@ -170,11 +172,12 @@ describe("authenticated bot factory API", () => {
           expect(modelCalls.at(-1)?.redirect).toBe("error");
           expect(JSON.stringify(result.body)).not.toContain("temporary-model-secret");
         }
-        if (step === "imageModel" || step === "searchModel") {
-          const result = await discoverModels(step === "imageModel" ? "image" : "search");
+        if (step === "imageModel" || step === "searchModel" || step === "audioModel") {
+          const role = step === "imageModel" ? "image" : step === "audioModel" ? "audio" : "search";
+          const result = await discoverModels(role);
           expect(result.response.status).toBe(200);
           expect(modelCalls.at(-1)?.authorization).toBe("Bearer test-model-api-key");
-          expect(result.body.models.length).toBe(step === "imageModel" ? 1 : 2);
+          expect(result.body.models.length).toBe(step === "imageModel" || step === "audioModel" ? 1 : 3);
         }
         if (step === "credentialRef") {
           const issue = await handler(
@@ -249,6 +252,7 @@ describe("authenticated bot factory API", () => {
       expect(bot?.model.credentialRef).toBe(connectedCredentialRef);
       expect(bot?.model.imageModel).toBe("gpt-image-1");
       expect(bot?.model.searchModel).toBe("provider-search-v2");
+      expect(bot?.model.audioModel).toBe("whisper-1");
       const encryptedRecord = connectedCredentialRef
         ? await repositories.secretRecords.get(tenantId, connectedCredentialRef)
         : undefined;

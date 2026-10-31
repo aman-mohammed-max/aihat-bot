@@ -1,5 +1,6 @@
 import { AppError } from "./errors.js";
 import { DEFAULT_TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE } from "./config.js";
+import { TELEGRAM_AUDIO_MAX_BYTES, type AudioTranscriber } from "./audio-transcription.js";
 import {
   DOCX_CONTENT_TYPE,
   EXTRACTED_DOCUMENT_MAX_CHARS,
@@ -49,6 +50,7 @@ export class TelegramManager {
   readonly #webhookBaseUrl: string;
   readonly #objects: ObjectStore | undefined;
   readonly #malwareScanner: MalwareScanner | undefined;
+  readonly #audioTranscriber: AudioTranscriber | undefined;
   readonly #fetch: FetchLike;
   readonly #retryPolicy: TelegramRetryPolicy;
   readonly #logger: Pick<Logger, "warn"> | undefined;
@@ -63,6 +65,7 @@ export class TelegramManager {
     readonly webhookBaseUrl: string;
     readonly objects?: ObjectStore;
     readonly malwareScanner?: MalwareScanner;
+    readonly audioTranscriber?: AudioTranscriber;
     readonly fetch?: FetchLike;
     readonly retryPolicy?: TelegramRetryPolicy;
     readonly requestsPerMinute?: number;
@@ -76,6 +79,7 @@ export class TelegramManager {
     this.#webhookBaseUrl = input.webhookBaseUrl;
     this.#objects = input.objects;
     this.#malwareScanner = input.malwareScanner;
+    this.#audioTranscriber = input.audioTranscriber;
     this.#fetch = input.fetch ?? globalThis.fetch.bind(globalThis);
     this.#retryPolicy = normalizeTelegramRetryPolicy(input.retryPolicy ?? DEFAULT_TELEGRAM_RETRY_POLICY);
     this.#requestsPerMinute = input.requestsPerMinute ?? DEFAULT_TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE;
@@ -368,6 +372,8 @@ export class TelegramManager {
       !message.caption?.trim() &&
       !message.photo?.length &&
       !message.document &&
+      !message.audio &&
+      !message.voice &&
       !message.unsupportedAttachment
     ) {
       return { text: "" };
@@ -394,9 +400,15 @@ export class TelegramManager {
     if (!withinLimit) return { text: "" };
     const bot = await this.#bots.get(deployment.tenantId, deployment.botId);
     if (bot?.status !== "published") return { text: "" };
-    if (message.unsupportedAttachment && !message.photo?.length && !message.document) {
+    if (
+      message.unsupportedAttachment &&
+      !message.photo?.length &&
+      !message.document &&
+      !message.audio &&
+      !message.voice
+    ) {
       return {
-        text: "I can read photos, small text files, and text-based PDF or DOCX documents.",
+        text: "I can read photos, small text files, PDF or DOCX documents, and audio when a transcription model is configured.",
       };
     }
     const thread = Number.isSafeInteger(message.message_thread_id) ? String(message.message_thread_id) : "0";
@@ -414,7 +426,40 @@ export class TelegramManager {
     let userContent = (message.text ?? message.caption ?? "").slice(0, 10_000);
     let images: readonly { readonly dataUrl: string; readonly detail: "auto" }[] | undefined;
     let containsUntrustedAttachments = false;
-    if (message.photo?.length || message.document) {
+    if (isTelegramAudioMessage(message)) {
+      if (!this.#audioTranscriber) {
+        return { text: "Audio transcription is unavailable. Ask the bot owner to configure an audio model." };
+      }
+      const threadId = Number.isSafeInteger(message.message_thread_id) ? message.message_thread_id : undefined;
+      const stopTyping = startTelegramTyping(token, message.chat.id, this.#fetch, threadId, {
+        retryPolicy: this.#retryPolicy,
+        ...(this.#logger ? { logger: this.#logger } : {}),
+      });
+      try {
+        const transcription = await this.#loadAudioTranscript(deployment, token, bot, message);
+        if ("unsupported" in transcription) return { text: transcription.unsupported };
+        userContent = `${userContent}${userContent ? "\n\n" : ""}[Transcribed Telegram audio]\n${transcription.text}`;
+        containsUntrustedAttachments = true;
+      } catch (cause) {
+        if (cause instanceof AppError) {
+          if (cause.code === "VALIDATION_ERROR")
+            return { text: "That audio is too large or uses an unsupported format." };
+          if (cause.code === "FORBIDDEN") {
+            return {
+              text: "Audio transcription is blocked by the runtime's provider network policy. Ask the bot owner.",
+            };
+          }
+          if (cause.code === "UNSUPPORTED_CAPABILITY") {
+            return { text: "This bot has no audio transcription model configured. Ask the bot owner to choose one." };
+          }
+          return { text: "Audio transcription is temporarily unavailable. Please try again later." };
+        }
+        throw cause;
+      } finally {
+        stopTyping();
+      }
+    }
+    if (message.photo?.length || (message.document && !isPotentialAudioDocument(message.document))) {
       let attachment: { readonly image?: string; readonly text?: string; readonly unsupported?: string };
       try {
         attachment = await this.#loadAttachment(deployment, token, message);
@@ -469,6 +514,57 @@ export class TelegramManager {
     } finally {
       stopTyping();
     }
+  }
+
+  async #loadAudioTranscript(
+    deployment: TelegramDeployment,
+    token: string,
+    bot: NonNullable<Awaited<ReturnType<BotRepository["get"]>>>,
+    message: TelegramMessage,
+  ): Promise<{ readonly text: string; readonly unsupported?: never } | { readonly unsupported: string }> {
+    const audio =
+      message.voice ??
+      message.audio ??
+      (message.document && isPotentialAudioDocument(message.document) ? message.document : undefined);
+    if (!audio) return { unsupported: "That audio message could not be read. Please send it again." };
+    if (!this.#objects) return { unsupported: "File attachments are not configured for this bot runtime." };
+    if (!bot.model.audioModel) {
+      throw new AppError("UNSUPPORTED_CAPABILITY", "This bot has no transcription model configured.", 501);
+    }
+    if (
+      "duration" in audio &&
+      typeof audio.duration === "number" &&
+      audio.duration > MAX_TELEGRAM_AUDIO_DURATION_SECONDS
+    ) {
+      return { unsupported: "Audio messages must be 10 minutes or shorter." };
+    }
+    if (audio.file_size !== undefined && audio.file_size > TELEGRAM_AUDIO_MAX_BYTES) {
+      return { unsupported: "Audio messages must be 10 MB or smaller." };
+    }
+    const file = await this.#api<{ readonly file_path?: unknown }>(token, "getFile", { file_id: audio.file_id });
+    if (typeof file.file_path !== "string" || !isSafeTelegramFilePath(file.file_path)) {
+      return { unsupported: "Telegram couldn't provide that audio. Please send it again." };
+    }
+    const details = getTelegramAudioDetails(audio.mime_type, file.file_path);
+    if (!details) return { unsupported: "Send audio as OGG, MP3, M4A, WAV, FLAC, AAC, or WebM." };
+    const bytes = await downloadTelegramFile(token, file.file_path, TELEGRAM_AUDIO_MAX_BYTES, this.#fetch);
+    if (audio.file_size !== undefined && audio.file_size !== bytes.byteLength) {
+      return { unsupported: "Telegram audio metadata did not match the downloaded file." };
+    }
+    if (!(await this.#scanAttachment(details.fileName, details.contentType, bytes))) {
+      return {
+        unsupported: "That audio could not pass security scanning. Ask the bot owner to check the file scanner.",
+      };
+    }
+    const text = await this.#audioTranscriber?.transcribe({
+      tenantId: deployment.tenantId,
+      model: bot.model,
+      fileName: details.fileName,
+      contentType: details.contentType,
+      bytes,
+    });
+    if (!text) throw new AppError("UNSUPPORTED_CAPABILITY", "Audio transcription is not configured.", 501);
+    return { text };
   }
 
   async #loadAttachment(
@@ -672,8 +768,20 @@ interface TelegramMessage {
     readonly mime_type?: string;
     readonly file_size?: number;
   };
+  readonly audio?: TelegramAudioFile;
+  readonly voice?: TelegramAudioFile;
   readonly unsupportedAttachment?: boolean;
 }
+
+interface TelegramAudioFile {
+  readonly file_id: string;
+  readonly file_name?: string;
+  readonly mime_type?: string;
+  readonly file_size?: number;
+  readonly duration?: number;
+}
+
+const MAX_TELEGRAM_AUDIO_DURATION_SECONDS = 600;
 
 export async function readTelegramUpdate(request: Request): Promise<TelegramUpdate> {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
@@ -706,7 +814,9 @@ export async function readTelegramUpdate(request: Request): Promise<TelegramUpda
       : undefined;
   const photo = parseTelegramPhoto(value.message.photo);
   const document = parseTelegramDocument(value.message.document);
-  const unsupportedAttachment = ["animation", "audio", "sticker", "video", "video_note", "voice"].some(
+  const audio = parseTelegramAudio(value.message.audio, "audio");
+  const voice = parseTelegramAudio(value.message.voice, "voice");
+  const unsupportedAttachment = ["animation", "sticker", "video", "video_note"].some(
     (key) => rawMessage[key] !== undefined,
   );
   return {
@@ -718,12 +828,53 @@ export async function readTelegramUpdate(request: Request): Promise<TelegramUpda
       ...(from ? { from } : {}),
       ...(photo ? { photo } : {}),
       ...(document ? { document } : {}),
+      ...(audio ? { audio } : {}),
+      ...(voice ? { voice } : {}),
       ...(unsupportedAttachment ? { unsupportedAttachment: true } : {}),
       ...(Number.isSafeInteger(value.message.message_thread_id)
         ? { message_thread_id: value.message.message_thread_id as number }
         : {}),
     },
   };
+}
+
+function parseTelegramAudio(value: unknown, field: string): TelegramAudioFile | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    typeof value.file_id !== "string" ||
+    value.file_id.length < 1 ||
+    value.file_id.length > 256 ||
+    (value.file_name !== undefined && (typeof value.file_name !== "string" || value.file_name.length > 512)) ||
+    (value.mime_type !== undefined && (typeof value.mime_type !== "string" || value.mime_type.length > 255)) ||
+    (value.file_size !== undefined &&
+      (!Number.isSafeInteger(value.file_size) ||
+        (value.file_size as number) < 0 ||
+        (value.file_size as number) > 20_000_000)) ||
+    (value.duration !== undefined &&
+      (!Number.isSafeInteger(value.duration) || (value.duration as number) < 0 || (value.duration as number) > 86_400))
+  ) {
+    throw new AppError("VALIDATION_ERROR", `Telegram ${field} metadata is invalid.`, 400);
+  }
+  return {
+    file_id: value.file_id,
+    ...(typeof value.file_name === "string" ? { file_name: value.file_name } : {}),
+    ...(typeof value.mime_type === "string" ? { mime_type: value.mime_type } : {}),
+    ...(typeof value.file_size === "number" ? { file_size: value.file_size } : {}),
+    ...(typeof value.duration === "number" ? { duration: value.duration } : {}),
+  };
+}
+
+function isTelegramAudioMessage(message: TelegramMessage): boolean {
+  return Boolean(message.voice || message.audio || (message.document && isPotentialAudioDocument(message.document)));
+}
+
+function isPotentialAudioDocument(document: NonNullable<TelegramMessage["document"]>): boolean {
+  const mimeType = document.mime_type?.toLowerCase().split(";")[0]?.trim();
+  if (mimeType === "application/ogg" || mimeType?.startsWith("audio/")) return true;
+  if (mimeType && mimeType !== "application/octet-stream" && mimeType !== "binary/octet-stream") return false;
+  const fileName = document.file_name?.toLowerCase() ?? "";
+  return /\.(?:aac|flac|m4a|mp3|mpga|oga|ogg|opus|wav|webm)$/.test(fileName);
 }
 
 function parseTelegramPhoto(value: unknown): TelegramMessage["photo"] {
@@ -982,6 +1133,57 @@ function safeFileName(value: string): string {
     .slice(0, 120)
     .trim();
   return cleaned || "attachment";
+}
+
+function getTelegramAudioDetails(
+  mimeType: string | undefined,
+  filePath: string,
+): { readonly contentType: string; readonly fileName: string } | undefined {
+  const pathName = filePath.split("/").at(-1) ?? "";
+  const extension = /\.([a-z0-9]{2,5})$/i.exec(pathName)?.[1]?.toLowerCase();
+  const byExtension: Record<string, string> = {
+    aac: "audio/aac",
+    flac: "audio/flac",
+    m4a: "audio/mp4",
+    mp3: "audio/mpeg",
+    mpga: "audio/mpeg",
+    oga: "audio/ogg",
+    ogg: "audio/ogg",
+    opus: "audio/opus",
+    wav: "audio/wav",
+    webm: "audio/webm",
+  };
+  const byMime: Record<string, string> = {
+    "audio/aac": "audio/aac",
+    "audio/flac": "audio/flac",
+    "audio/mp3": "audio/mpeg",
+    "audio/mp4": "audio/mp4",
+    "audio/mpeg": "audio/mpeg",
+    "audio/mpga": "audio/mpeg",
+    "audio/ogg": "audio/ogg",
+    "audio/opus": "audio/opus",
+    "audio/wav": "audio/wav",
+    "audio/webm": "audio/webm",
+    "audio/x-m4a": "audio/mp4",
+    "audio/x-wav": "audio/wav",
+  };
+  const pathType = extension ? byExtension[extension] : undefined;
+  const suppliedType = mimeType ? byMime[mimeType.toLowerCase().split(";")[0]?.trim() ?? ""] : undefined;
+  if (pathType && suppliedType && pathType !== suppliedType) return undefined;
+  const contentType = suppliedType ?? pathType;
+  if (!contentType) return undefined;
+  const canonicalExtension: Record<string, string> = {
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+    "audio/mp4": "m4a",
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "audio/opus": "opus",
+    "audio/wav": "wav",
+    "audio/webm": "webm",
+  };
+  const suffix = canonicalExtension[contentType];
+  return suffix ? { contentType, fileName: `telegram-audio.${suffix}` } : undefined;
 }
 
 function isSupportedImageNameOrType(name: string, mimeType: string | undefined): boolean {

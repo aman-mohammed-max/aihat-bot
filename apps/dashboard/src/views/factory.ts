@@ -30,6 +30,11 @@ const steps: { id: CreationStep; label: string; helper: string }[] = [
     helper: "Optional. Choose the model this endpoint uses for search, or leave it blank to skip search.",
   },
   {
+    id: "audioModel",
+    label: "Choose a transcription model",
+    helper: "Optional. Choose an OpenAI-compatible audio transcription model for Telegram voice and audio messages.",
+  },
+  {
     id: "skills",
     label: "List desired skills",
     helper: "Enter skill IDs you plan to install, one per line. You can review permissions later.",
@@ -145,15 +150,24 @@ function renderStepInput(
       return input("HTTPS endpoint", "https://api.openai.com/v1", "url", "https://api.openai.com/v1");
     case "model":
     case "imageModel":
-    case "searchModel": {
-      const role = step === "model" ? "chat" : step === "imageModel" ? "image" : "search";
+    case "searchModel":
+    case "audioModel": {
+      const role =
+        step === "model" ? "chat" : step === "imageModel" ? "image" : step === "audioModel" ? "audio" : "search";
       const roleModels = modelsRole === step ? models : [];
       const keyInput =
         step === "model"
           ? `<label class="field"><span>Provider API key <small>temporary for model discovery</small></span><input name="discoveryCredential" type="password" value="${escapeHtml(pendingCredential)}" autocomplete="off" maxlength="65536" placeholder="Optional; used only to fetch models" /><small>The key is not saved here. You will confirm before it is encrypted on the next step.</small></label>`
           : "";
       const loadButton = `<button class="button button-secondary" type="button" data-action="load-factory-models" data-model-role="${role}" ${modelsBusy ? "disabled" : ""}>${icon("refresh", 15)}<span>${modelsBusy ? "Loading models…" : "Fetch models from endpoint"}</span></button>`;
-      const modelLabel = step === "model" ? "Chat model" : step === "imageModel" ? "Image model" : "Search model";
+      const modelLabel =
+        step === "model"
+          ? "Chat model"
+          : step === "imageModel"
+            ? "Image model"
+            : step === "audioModel"
+              ? "Audio transcription model"
+              : "Search model";
       const modelInput = roleModels.length
         ? `<label class="field"><span>${modelLabel} from endpoint</span><select name="value" ${step === "model" ? "required" : ""}>${step === "model" ? `<option value="" disabled ${textValue ? "" : "selected"}>Choose a model</option>` : `<option value="" ${textValue ? "" : "selected"}>Skip this capability</option>`}${roleModels.map((model) => `<option value="${escapeHtml(model.id)}" ${textValue === model.id ? "selected" : ""}>${escapeHtml(model.name)} · ${escapeHtml(model.id)}</option>`).join("")}${textValue && !roleModels.some((model) => model.id === textValue) ? `<option value="${escapeHtml(textValue)}" selected>Current model · ${escapeHtml(textValue)}</option>` : ""}</select></label><label class="field"><span>Or enter a model ID</span><input name="customModel" value="${escapeHtml(textValue && !roleModels.some((model) => model.id === textValue) ? textValue : "")}" placeholder="${step === "model" ? "Enter an unlisted model ID" : "Optional; leave blank to skip"}" maxlength="128" autocomplete="off" /></label><small>${roleModels.length} models loaded from this endpoint. A custom model ID overrides the dropdown.</small>`
         : `<label class="field"><span>${modelLabel} ID</span><input name="value" value="${escapeHtml(textValue)}" placeholder="${step === "model" ? "e.g. gpt-4o-mini" : "Optional; leave blank to skip"}" ${step === "model" ? "required" : ""} maxlength="128" autocomplete="off" /></label>`;

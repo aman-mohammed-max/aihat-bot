@@ -8,6 +8,7 @@ import {
   BotFactory,
   CreationApprovalService,
   FactoryAssistant,
+  OpenAICompatibleAudioTranscriber,
   ProviderCapabilityTools,
   EncryptedSecretStore,
   BotCredentialApprovalService,
@@ -183,6 +184,10 @@ const modelAllowedOrigins = new Set(
     .map((origin) => origin.trim())
     .filter(Boolean),
 );
+const audioTranscriber = new OpenAICompatibleAudioTranscriber({
+  allowedOrigins: modelAllowedOrigins,
+  secrets: secretStore,
+});
 const baseAgentEngine = createOpenAICompatibleAgentEngine({
   conversations: repositories,
   secrets: secretStore,
@@ -242,6 +247,7 @@ const telegram = new TelegramManager({
   secrets: secretStore,
   engine: agentEngine,
   objects,
+  audioTranscriber,
   ...(malwareScanner ? { malwareScanner } : {}),
   webhookBaseUrl: process.env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
   retryPolicy: config.telegramRetryPolicy,

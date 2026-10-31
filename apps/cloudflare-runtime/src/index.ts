@@ -10,6 +10,7 @@ import {
   BotFactory,
   CreationApprovalService,
   FactoryAssistant,
+  OpenAICompatibleAudioTranscriber,
   ProviderCapabilityTools,
   EncryptedSecretStore,
   createSecretRotationApiHandler,
@@ -255,6 +256,10 @@ export default {
         .map((origin) => origin.trim())
         .filter(Boolean),
     );
+    const audioTranscriber = new OpenAICompatibleAudioTranscriber({
+      allowedOrigins: modelAllowedOrigins,
+      secrets: secretStore,
+    });
     const mcpResponse = await createMcpApiHandler(authenticator, d1, mcpManager)(request);
     if (mcpResponse) return mcpResponse;
     const factoryAssistant =
@@ -334,6 +339,7 @@ export default {
       secrets: secretStore,
       engine: agentEngine,
       objects: objectStore(env),
+      audioTranscriber,
       ...(malwareScanner ? { malwareScanner } : {}),
       webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
       retryPolicy: runtimeConfig.telegramRetryPolicy,
@@ -495,6 +501,10 @@ export default {
         .map((origin) => origin.trim())
         .filter(Boolean),
     );
+    const audioTranscriber = new OpenAICompatibleAudioTranscriber({
+      allowedOrigins: modelAllowedOrigins,
+      secrets: secretStore,
+    });
     const baseEngine = createOpenAICompatibleAgentEngine({
       conversations: d1,
       secrets: secretStore,
@@ -548,6 +558,7 @@ export default {
       secrets: secretStore,
       engine,
       objects: objectStore(env),
+      audioTranscriber,
       webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
       retryPolicy: runtimeConfig.telegramRetryPolicy,
       requestsPerMinute: runtimeConfig.telegramCustomerRequestsPerMinute,

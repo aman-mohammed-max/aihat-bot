@@ -12,6 +12,7 @@ export * from "./tools.js";
 export * from "./durable-tools.js";
 export * from "./agent.js";
 export * from "./agent-runtime.js";
+export * from "./audio-transcription.js";
 export * from "./bot-factory.js";
 export * from "./bot-management.js";
 export * from "./bot-ownership-transfers-http-api.js";

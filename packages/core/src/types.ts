@@ -48,6 +48,7 @@ export interface ModelConfig {
   readonly model: string;
   readonly imageModel?: string;
   readonly searchModel?: string;
+  readonly audioModel?: string;
   readonly endpoint?: string;
   readonly credentialRef?: string;
   readonly parameters?: Readonly<Record<string, string | number | boolean>>;
@@ -364,6 +365,7 @@ export interface CreationAnswers {
   readonly model: string;
   readonly imageModel?: string;
   readonly searchModel?: string;
+  readonly audioModel?: string;
   readonly skills: readonly string[];
   readonly mcpConnections: readonly string[];
   readonly integrations: readonly string[];

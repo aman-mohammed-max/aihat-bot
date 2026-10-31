@@ -74,14 +74,21 @@ export function createFactoryApiHandler(
           throw new AppError("UNSUPPORTED_CAPABILITY", "Model discovery is not configured for this runtime.", 501);
         }
         const body = await readJsonObject(request, 70_000);
-        if (body.role !== "chat" && body.role !== "image" && body.role !== "search") {
-          throw new AppError("VALIDATION_ERROR", "Model discovery role must be chat, image, or search.", 400);
+        if (body.role !== "chat" && body.role !== "image" && body.role !== "search" && body.role !== "audio") {
+          throw new AppError("VALIDATION_ERROR", "Model discovery role is invalid.", 400);
         }
         if (body.credential !== undefined && typeof body.credential !== "string") {
           throw new AppError("VALIDATION_ERROR", "Temporary model credential must be a string.", 400);
         }
         const current = await factory.get(principal.tenantId, principal.ownerId, sessionId);
-        const expectedStep = body.role === "chat" ? "model" : body.role === "image" ? "imageModel" : "searchModel";
+        const expectedStep =
+          body.role === "chat"
+            ? "model"
+            : body.role === "image"
+              ? "imageModel"
+              : body.role === "audio"
+                ? "audioModel"
+                : "searchModel";
         if (current.currentStep !== expectedStep || current.status !== "in_progress") {
           throw new AppError("CONFLICT", "Model discovery is available only at its active setup step.", 409);
         }

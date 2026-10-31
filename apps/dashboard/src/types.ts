@@ -52,6 +52,7 @@ export interface Bot {
     model: string;
     imageModel?: string;
     searchModel?: string;
+    audioModel?: string;
     endpoint?: string;
     parameters?: Record<string, string | number | boolean>;
     retryPolicy?: { maxAttempts: number; backoffMs: number };
@@ -93,6 +94,7 @@ export interface BotVersion {
     model: string;
     imageModel?: string;
     searchModel?: string;
+    audioModel?: string;
     retryPolicy?: { maxAttempts: number; backoffMs: number };
     hasCredential: boolean;
   };
@@ -296,6 +298,7 @@ export type CreationStep =
   | "credentialRef"
   | "imageModel"
   | "searchModel"
+  | "audioModel"
   | "skills"
   | "mcpConnections"
   | "integrations"
@@ -317,7 +320,7 @@ export interface CreationSession {
 export interface ModelCatalogEntry {
   id: string;
   name: string;
-  kind: "chat" | "image" | "other";
+  kind: "chat" | "image" | "audio" | "other";
 }
 
 export interface FactoryAssistantDraft {
