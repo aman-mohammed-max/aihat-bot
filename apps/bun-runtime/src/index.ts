@@ -104,6 +104,7 @@ const telegramMasterBot =
         factory: botFactory,
         bots: repositories,
         retryPolicy: config.telegramRetryPolicy,
+        requestsPerMinute: config.telegramMasterRequestsPerMinute,
         logger,
       })
     : undefined;

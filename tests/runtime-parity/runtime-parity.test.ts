@@ -10,6 +10,7 @@ import { ModelProviderRegistry, OpenAICompatibleProvider } from "../../packages/
 import { SkillEngine } from "../../packages/core/src/skill-engine.js";
 import { createDefaultNativeSkillRegistry } from "../../packages/core/src/native-skills.js";
 import { EncryptedSecretStore } from "../../packages/core/src/encrypted-secrets.js";
+import { telegramAccountIds } from "../../packages/core/src/telegram-auth.js";
 import { BotCredentialApprovalService } from "../../packages/core/src/bot-credential-approvals.js";
 import { createEncryptedMemoryService, createMemoryAwareAgentEngine } from "../../packages/core/src/memory.js";
 import { DurableToolRegistry } from "../../packages/core/src/durable-tools.js";
@@ -34,6 +35,41 @@ const weatherEndpoint = "https://weather.example.test/lookup";
 const mcpEndpoint = "https://mcp.example.test/mcp";
 
 describe("Bun and Cloudflare runtime repository parity", () => {
+  test("Telegram master-bot request limits are per-user and windowed identically", async () => {
+    const bunDatabase = openSqliteDatabase(":memory:");
+    const cloudflareDatabase = openSqliteDatabase(":memory:");
+    const bunRepositories = new BunSqliteRepositories(bunDatabase);
+    const cloudflareRepositories = new CloudflareD1Repositories(
+      new SqliteD1(cloudflareDatabase) as unknown as D1Database,
+    );
+    try {
+      const { ownerId: actorId } = await telegramAccountIds(456789123);
+      const repositories = [bunRepositories.masterBot, cloudflareRepositories.masterBot];
+      const results = await Promise.all(
+        repositories.map(async (repository) => {
+          const request = { actorId, now: "2026-10-30T12:00:00.000Z", limitPerMinute: 2 };
+          const first = await repository.consumeUserRequest(request);
+          const second = await repository.consumeUserRequest(request);
+          const third = await repository.consumeUserRequest(request);
+          const anotherUser = await repository.consumeUserRequest({
+            ...request,
+            actorId: (await telegramAccountIds(456789124)).ownerId,
+          });
+          const nextMinute = await repository.consumeUserRequest({
+            ...request,
+            now: "2026-10-30T12:01:00.000Z",
+          });
+          return [first, second, third, anotherUser, nextMinute];
+        }),
+      );
+      expect(results[0]).toEqual(results[1]);
+      expect(results[0]).toEqual([true, true, false, true, true]);
+    } finally {
+      bunDatabase.close();
+      cloudflareDatabase.close();
+    }
+  });
+
   test("MCP reconnect leases, retry times, and attempt counts persist consistently", async () => {
     const bunDatabase = openSqliteDatabase(":memory:");
     const cloudflareDatabase = openSqliteDatabase(":memory:");

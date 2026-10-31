@@ -889,6 +889,11 @@ export interface MasterBotRepository {
   getSession(telegramUserId: number): Promise<MasterBotSession | undefined>;
   saveSession(session: MasterBotSession): Promise<void>;
   deleteSession(telegramUserId: number): Promise<void>;
+  consumeUserRequest(input: {
+    readonly actorId: UserId;
+    readonly now: string;
+    readonly limitPerMinute: number;
+  }): Promise<boolean>;
   reserveUpdate(input: {
     readonly updateId: number;
     readonly leaseUntil: string;

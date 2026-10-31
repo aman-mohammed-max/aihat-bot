@@ -1,5 +1,6 @@
 import { AppError } from "./errors.js";
 import { type BotFactory, CREATION_STEPS } from "./bot-factory.js";
+import { DEFAULT_TELEGRAM_MASTER_REQUESTS_PER_MINUTE } from "./config.js";
 import { telegramAccountIds } from "./telegram-auth.js";
 import type {
   BotManagementRepository,
@@ -34,6 +35,7 @@ export class TelegramMasterBot {
   readonly #now: () => Date;
   readonly #retryPolicy: TelegramRetryPolicy | undefined;
   readonly #logger: Pick<Logger, "warn"> | undefined;
+  readonly #requestsPerMinute: number;
 
   constructor(input: {
     readonly token: string;
@@ -46,6 +48,7 @@ export class TelegramMasterBot {
     readonly fetch?: FetchLike;
     readonly now?: () => Date;
     readonly retryPolicy?: TelegramRetryPolicy;
+    readonly requestsPerMinute?: number;
     readonly logger?: Pick<Logger, "warn">;
   }) {
     if (!input.token || input.token.length > 512 || /\s/.test(input.token)) {
@@ -79,6 +82,14 @@ export class TelegramMasterBot {
     this.#fetch = input.fetch ?? globalThis.fetch.bind(globalThis);
     this.#now = input.now ?? (() => new Date());
     this.#retryPolicy = input.retryPolicy;
+    this.#requestsPerMinute = input.requestsPerMinute ?? DEFAULT_TELEGRAM_MASTER_REQUESTS_PER_MINUTE;
+    if (
+      !Number.isSafeInteger(this.#requestsPerMinute) ||
+      this.#requestsPerMinute < 1 ||
+      this.#requestsPerMinute > 1000
+    ) {
+      throw new AppError("VALIDATION_ERROR", "Master bot request limit must be between 1 and 1000 per minute.", 400);
+    }
     this.#logger = input.logger;
   }
 
@@ -108,7 +119,14 @@ export class TelegramMasterBot {
       if (reservation.state === "busy") return new Response(null, { status: 503 });
       reserved = true;
 
-      const reply = reservation.state === "ready" ? reservation.reply : await this.#respond(update.message);
+      const rateAllowed =
+        reservation.state === "ready" || (await this.#allowUserMessage(update.message, now.toISOString()));
+      const reply =
+        reservation.state === "ready"
+          ? reservation.reply
+          : rateAllowed
+            ? await this.#respond(update.message)
+            : undefined;
       if (reply?.text) {
         if (reservation.state !== "ready") {
           await this.#sessions.saveUpdateReply({
@@ -283,6 +301,26 @@ export class TelegramMasterBot {
       }
       throw cause;
     }
+  }
+
+  async #allowUserMessage(message: TelegramMasterMessage | undefined, now: string): Promise<boolean> {
+    if (
+      !message?.from ||
+      message.from.isBot ||
+      !Number.isSafeInteger(message.from.id) ||
+      message.from.id < 1 ||
+      message.chatType !== "private" ||
+      message.chatId !== message.from.id ||
+      !message.text?.trim()
+    ) {
+      return true;
+    }
+    const { ownerId } = await telegramAccountIds(message.from.id);
+    return this.#sessions.consumeUserRequest({
+      actorId: ownerId,
+      now,
+      limitPerMinute: this.#requestsPerMinute,
+    });
   }
 
   async #ensureAccount(telegramUserId: number, firstName?: string): Promise<{ ownerId: UserId; tenantId: TenantId }> {

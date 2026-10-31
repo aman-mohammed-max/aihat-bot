@@ -118,6 +118,51 @@ describe("Telegram master bot onboarding", () => {
       db.close();
     }
   });
+
+  test("rate limits authenticated private-chat messages per user and resets each minute", async () => {
+    const db = openSqliteDatabase(":memory:");
+    const repositories = new BunSqliteRepositories(db);
+    const sent: Record<string, unknown>[] = [];
+    let currentTime = Date.parse("2026-10-30T12:00:00.000Z");
+    const bot = new TelegramMasterBot({
+      token: "123456789:master-bot-test-token",
+      webhookSecret,
+      webhookBaseUrl: "https://factory.example.test",
+      accounts: repositories.telegramAuth,
+      sessions: repositories.masterBot,
+      factory: new BotFactory({
+        sessions: repositories.sessions,
+        approvals: new CreationApprovalService(repositories.creationApprovals),
+        drafts: repositories,
+      }),
+      bots: repositories,
+      requestsPerMinute: 2,
+      now: () => new Date(currentTime),
+      fetch: async (_input, init) => {
+        sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return Response.json({ ok: true, result: true });
+      },
+    });
+    try {
+      expect((await sendUpdate(bot, 200, "/help")).status).toBe(200);
+      expect((await sendUpdate(bot, 201, "/help")).status).toBe(200);
+      expect(sent).toHaveLength(2);
+
+      expect((await sendUpdate(bot, 202, "/help")).status).toBe(200);
+      expect(sent).toHaveLength(2);
+      expect(db.query("SELECT actor_id, request_count FROM telegram_master_request_usage").get()).toMatchObject({
+        actor_id: expect.stringMatching(/^usr_[a-f0-9]{32}$/),
+        request_count: 2,
+      });
+
+      currentTime += 60_000;
+      expect((await sendUpdate(bot, 203, "/help")).status).toBe(200);
+      expect(sent).toHaveLength(3);
+      expect(db.query("SELECT request_count FROM telegram_master_request_usage").get()).toEqual({ request_count: 1 });
+    } finally {
+      db.close();
+    }
+  });
 });
 
 async function sendUpdate(bot: TelegramMasterBot, updateId: number, text: string): Promise<Response> {

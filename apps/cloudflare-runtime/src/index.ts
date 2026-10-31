@@ -321,6 +321,7 @@ export default {
             factory: botFactory,
             bots: d1,
             retryPolicy: runtimeConfig.telegramRetryPolicy,
+            requestsPerMinute: runtimeConfig.telegramMasterRequestsPerMinute,
             logger: runtimeLogger,
           })
         : undefined;
@@ -555,6 +556,7 @@ function runtimeConfigFromEnv(env: Env) {
     MODEL_RETRY_BACKOFF_MS: env.MODEL_RETRY_BACKOFF_MS,
     TELEGRAM_RETRY_MAX_ATTEMPTS: env.TELEGRAM_RETRY_MAX_ATTEMPTS,
     TELEGRAM_RETRY_MAX_AFTER_SECONDS: env.TELEGRAM_RETRY_MAX_AFTER_SECONDS,
+    TELEGRAM_MASTER_REQUESTS_PER_MINUTE: env.TELEGRAM_MASTER_REQUESTS_PER_MINUTE,
     SCHEDULED_TASK_RETRY_MAX_ATTEMPTS: env.SCHEDULED_TASK_RETRY_MAX_ATTEMPTS,
     SCHEDULED_TASK_RETRY_BACKOFF_MS: env.SCHEDULED_TASK_RETRY_BACKOFF_MS,
     SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS: env.SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS,

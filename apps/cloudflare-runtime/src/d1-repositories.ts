@@ -466,6 +466,7 @@ export class CloudflareD1Repositories
       getSession: (telegramUserId) => this.getMasterBotSession(telegramUserId),
       saveSession: (session) => this.saveMasterBotSession(session),
       deleteSession: (telegramUserId) => this.deleteMasterBotSession(telegramUserId),
+      consumeUserRequest: (input) => this.consumeMasterBotUserRequest(input),
       reserveUpdate: (input) => this.reserveMasterBotUpdate(input),
       saveUpdateReply: (input) => this.saveMasterBotUpdateReply(input),
       completeUpdate: (input) => this.completeMasterBotUpdate(input),
@@ -4277,6 +4278,33 @@ export class CloudflareD1Repositories
   async deleteMasterBotSession(telegramUserId: number): Promise<void> {
     validateMasterTelegramUserId(telegramUserId);
     await this.db.prepare("DELETE FROM master_bot_sessions WHERE telegram_user_id = ?").bind(telegramUserId).run();
+  }
+
+  async consumeMasterBotUserRequest(input: Parameters<MasterBotRepository["consumeUserRequest"]>[0]): Promise<boolean> {
+    if (!/^usr_[a-f0-9]{32}$/.test(input.actorId)) {
+      throw new AppError("VALIDATION_ERROR", "Master bot rate-limit actor must be pseudonymous.", 400);
+    }
+    const timestamp = Date.parse(input.now);
+    if (!Number.isFinite(timestamp)) throw new AppError("VALIDATION_ERROR", "Master bot request time is invalid.", 400);
+    if (!Number.isSafeInteger(input.limitPerMinute) || input.limitPerMinute < 1 || input.limitPerMinute > 1000) {
+      throw new AppError("VALIDATION_ERROR", "Master bot request limit is invalid.", 400);
+    }
+    const minuteWindow = Math.floor(timestamp / 60_000);
+    const result = await this.db
+      .prepare(`
+        INSERT INTO telegram_master_request_usage (actor_id, minute_window, request_count, updated_at)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT(actor_id) DO UPDATE SET
+          minute_window = excluded.minute_window,
+          request_count = CASE WHEN telegram_master_request_usage.minute_window = excluded.minute_window
+            THEN telegram_master_request_usage.request_count + 1 ELSE 1 END,
+          updated_at = excluded.updated_at
+        WHERE telegram_master_request_usage.minute_window != excluded.minute_window
+          OR telegram_master_request_usage.request_count < ?
+      `)
+      .bind(input.actorId, minuteWindow, input.now, input.limitPerMinute)
+      .run();
+    return result.meta.changes === 1;
   }
 
   async reserveMasterBotUpdate(input: {

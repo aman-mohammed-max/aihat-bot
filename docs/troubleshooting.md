@@ -24,6 +24,8 @@ Inspect Cloudflare request errors with `wrangler tail --env=""` from `apps/cloud
 
 The Mini App sign-in does not require the master bot webhook. To use `/create`, `/continue`, and other text commands, configure `TELEGRAM_MASTER_WEBHOOK_SECRET` and `TELEGRAM_WEBHOOK_BASE_URL`, then run `bun run telegram:register-master` with those values and the master bot token in the Bun environment. The registration command calls Telegram `setWebhook`; a Telegram bot can have only one webhook, so inspect its existing integration before registering this app.
 
+Private master-bot messages are limited per Telegram user using a persistent fixed UTC-minute window. The default is 30 requests per minute; set `TELEGRAM_MASTER_REQUESTS_PER_MINUTE` from 1 to 1,000 in the runtime environment to change it. Suppressed updates are acknowledged without a bot reply, so wait for the next minute window before sending another command.
+
 ## Customer Telegram bots
 
 - `GET /capabilities` must report `telegram: true`; the runtime needs a public HTTPS `TELEGRAM_WEBHOOK_BASE_URL`.
@@ -45,7 +47,7 @@ The Mini App sign-in does not require the master bot webhook. To use `/create`, 
 
 - `encryptedSecrets` must be `true` in `/capabilities` before connecting model, Telegram, or skill credentials. Configure `SECRET_ACTIVE_KEY_ID` and `SECRET_KEYRING_JSON` as Worker secrets or Bun environment values.
 - Keep every key ID needed to decrypt existing records. Do not replace the keyring with a new single key unless existing encrypted records have been rotated. Use the secret-rotation workflow documented in the root README and Cloudflare runtime guide.
-- Cloudflare development has D1 migrations `0001` through `0026`. For a new environment, create its D1 database, set the returned ID in `wrangler.jsonc`, then apply migrations from `apps/cloudflare-runtime` with `wrangler d1 migrations apply <database-name> --remote`.
+- Cloudflare development has D1 migrations `0001` through `0029`. For a new environment, create its D1 database, set the returned ID in `wrangler.jsonc`, then apply migrations from `apps/cloudflare-runtime` with `wrangler d1 migrations apply <database-name> --remote`.
 - Staging and production also need distinct R2 buckets and Queues. The committed placeholder D1 IDs are not valid deployment IDs.
 - Local Bun migrations run at startup. For migration errors, inspect the stored migration checksum and database path; do not edit an already-applied migration. Add a forward-only migration instead.
 

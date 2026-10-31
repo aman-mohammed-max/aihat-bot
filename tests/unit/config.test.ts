@@ -10,6 +10,7 @@ describe("runtime configuration", () => {
       retryableStatusCodes: [408, 429, 500, 502, 503, 504],
     });
     expect(parseRuntimeConfig({}).telegramRetryPolicy).toEqual({ maxAttempts: 2, maxRetryAfterSeconds: 3 });
+    expect(parseRuntimeConfig({}).telegramMasterRequestsPerMinute).toBe(30);
     expect(parseRuntimeConfig({}).scheduledTaskRetryPolicy).toEqual({
       maxAttempts: 5,
       backoffMs: 30_000,
@@ -21,6 +22,7 @@ describe("runtime configuration", () => {
         MODEL_RETRY_BACKOFF_MS: "0",
         TELEGRAM_RETRY_MAX_ATTEMPTS: "1",
         TELEGRAM_RETRY_MAX_AFTER_SECONDS: "0",
+        TELEGRAM_MASTER_REQUESTS_PER_MINUTE: "42",
         SCHEDULED_TASK_RETRY_MAX_ATTEMPTS: "8",
         SCHEDULED_TASK_RETRY_BACKOFF_MS: "1000",
         SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS: "60000",
@@ -28,6 +30,7 @@ describe("runtime configuration", () => {
     ).toMatchObject({
       modelRetryPolicy: { maxAttempts: 3, backoffMs: 0 },
       telegramRetryPolicy: { maxAttempts: 1, maxRetryAfterSeconds: 0 },
+      telegramMasterRequestsPerMinute: 42,
       scheduledTaskRetryPolicy: { maxAttempts: 8, backoffMs: 1000, maxBackoffMs: 60_000 },
     });
   });
@@ -41,6 +44,9 @@ describe("runtime configuration", () => {
       { MODEL_RETRY_BACKOFF_MS: "3001" },
       { TELEGRAM_RETRY_MAX_ATTEMPTS: "4" },
       { TELEGRAM_RETRY_MAX_AFTER_SECONDS: "4" },
+      { TELEGRAM_MASTER_REQUESTS_PER_MINUTE: "0" },
+      { TELEGRAM_MASTER_REQUESTS_PER_MINUTE: "1001" },
+      { TELEGRAM_MASTER_REQUESTS_PER_MINUTE: "1.5" },
       { SCHEDULED_TASK_RETRY_MAX_ATTEMPTS: "11" },
       { SCHEDULED_TASK_RETRY_BACKOFF_MS: "3600001" },
       { SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS: "-1" },

@@ -152,6 +152,11 @@ const migrations: readonly Migration[] = [
     name: "mcp_reconnect_state",
     sql: readFileSync(findMigration("0028_mcp_reconnect_state.sql"), "utf8"),
   },
+  {
+    version: 29,
+    name: "telegram_master_rate_limits",
+    sql: readFileSync(findMigration("0029_telegram_master_rate_limits.sql"), "utf8"),
+  },
 ];
 
 export function configureSqlite(db: Database): void {
