@@ -579,6 +579,7 @@ function botSummary(bot: BotDefinition, collaboratorRole?: BotCollaboratorRole) 
       : { ...model, hasCredential: credentialRef !== undefined },
     visibility: bot.visibility,
     status: bot.status,
+    ...(bot.interfaces !== undefined ? { interfaces: bot.interfaces } : {}),
     version: bot.version,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,

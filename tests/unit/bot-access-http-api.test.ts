@@ -35,6 +35,7 @@ const publicBot: BotDefinition = {
   model: { providerId: "test", model: "test-model", credentialRef: `secret_${"b".repeat(32)}` },
   visibility: "public",
   status: "published",
+  interfaces: ["web_chat", "api"],
   version: 1,
   createdAt: "2026-10-30T00:00:00.000Z",
   updatedAt: "2026-10-30T00:00:00.000Z",
@@ -94,6 +95,9 @@ describe("bot access API", () => {
         agentRequest = request;
         return {
           message: { role: "assistant", content: request.responseSchema ? '{"answer":"Welcome."}' : "Welcome." },
+          ...(request.actorContext?.platform === "web_chat"
+            ? { attachments: [{ kind: "image" as const, url: "https://images.example.test/public.png" }] }
+            : {}),
           ...(request.responseSchema ? { structuredOutput: { answer: "Welcome." } } : {}),
         };
       },
@@ -110,6 +114,18 @@ describe("bot access API", () => {
     expect(detailBody).not.toContain("PRIVATE INTERNAL PROMPT");
     expect(detailBody).not.toContain("credentialRef");
 
+    const webChatDetail = await handler(new Request("https://app.example.test/v1/public/bots/public-helper/web-chat"));
+    expect(webChatDetail?.status).toBe(200);
+    expect(await webChatDetail?.json()).toEqual({
+      bot: {
+        id: publicBotId,
+        slug: "public-helper",
+        name: "Public helper",
+        description: "A safe public description.",
+        visibility: "public",
+      },
+    });
+
     const response = await handler(
       new Request("https://app.example.test/v1/public/bots/public-helper/messages", {
         method: "POST",
@@ -124,6 +140,51 @@ describe("bot access API", () => {
       actorContext: { platform: "api", includeOwnerMemory: false },
       bot: { id: publicBotId },
     });
+
+    const webChatResponse = await handler(
+      new Request("https://app.example.test/v1/public/bots/public-helper/web-chat/messages", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ message: "Hello from the web chat", conversationId: `conv_${"c".repeat(32)}` }),
+      }),
+    );
+    expect(webChatResponse?.status).toBe(200);
+    expect(await webChatResponse?.json()).toMatchObject({
+      message: "Welcome.",
+      attachments: [{ kind: "image", url: "https://images.example.test/public.png" }],
+    });
+    expect(agentRequest).toMatchObject({
+      actorId: ownerId,
+      actorContext: { platform: "web_chat", includeOwnerMemory: false },
+      bot: { id: publicBotId },
+    });
+
+    const unavailableHandler = createHandler({
+      getPublicBot: async () => ({ ...publicBot, interfaces: ["api"] }),
+    });
+    const unavailablePage = await unavailableHandler(
+      new Request("https://app.example.test/v1/public/bots/public-helper/web-chat"),
+    );
+    expect(unavailablePage?.status).toBe(404);
+    const unavailableMessage = await unavailableHandler(
+      new Request("https://app.example.test/v1/public/bots/public-helper/web-chat/messages", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ message: "This interface is disabled" }),
+      }),
+    );
+    expect(unavailableMessage?.status).toBe(404);
+
+    const legacyPublicBot = { ...publicBot, interfaces: undefined } as unknown as BotDefinition;
+    const legacyHandler = createHandler({ getPublicBot: async () => legacyPublicBot });
+    const legacyApiMessage = await legacyHandler(
+      new Request("https://app.example.test/v1/public/bots/public-helper/messages", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ message: "Legacy public API bot" }),
+      }),
+    );
+    expect(legacyApiMessage?.status).toBe(200);
 
     const responseSchema = {
       type: "object",
@@ -210,6 +271,7 @@ function createHandler(
   overrides: {
     authenticate?: () => Promise<{ tenantId: TenantId; ownerId: UserId; tokenId: string; scopes: string[] }>;
     getBot?: BotRepository["get"];
+    getPublicBot?: BotAccessRepository["getPublicBotBySlug"];
     respond?: AgentEngine["respond"];
     createGrant?: BotAccessRepository["createOwnedAccessGrant"];
     acceptInvitation?: BotAccessRepository["acceptBotInvitation"];
@@ -225,7 +287,8 @@ function createHandler(
   });
   const access = {
     listPublicBots: async () => [listing],
-    getPublicBotBySlug: async (slug: string) => (slug === listing.slug ? publicBot : undefined),
+    getPublicBotBySlug:
+      overrides.getPublicBot ?? (async (slug: string) => (slug === listing.slug ? publicBot : undefined)),
     getSharedBot: async () => sharedBot,
     listOwnedAccessGrants: async () => [],
     getOwnedPublicBotAccessPolicy: async () => listing,
@@ -246,7 +309,14 @@ function createHandler(
       "conv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as import("../../packages/core/src/types.js").ConversationId,
   } as ApiConversationRepository;
   const engine = {
-    respond: overrides.respond ?? (async () => ({ message: { role: "assistant", content: "Welcome." } })),
+    respond:
+      overrides.respond ??
+      (async (request) => ({
+        message: { role: "assistant", content: "Welcome." },
+        ...(request.actorContext?.platform === "web_chat"
+          ? { attachments: [{ kind: "image" as const, url: "https://images.example.test/public.png" }] }
+          : {}),
+      })),
   } as AgentEngine;
   return createBotAccessApiHandler({
     authenticator,

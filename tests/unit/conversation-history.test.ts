@@ -77,6 +77,23 @@ describe("owner-scoped conversation history API", () => {
         items: [{ sequence: 1, content: "First question" }],
         hasMore: false,
       });
+
+      const webChatConversationId = await repositories.getOrCreateApiConversation({
+        tenantId,
+        botId,
+        actorId: ownerId,
+        conversationKey: "private-platform-key",
+        platform: "web_chat",
+      });
+      expect(webChatConversationId).not.toBe(conversationId);
+      const afterWebChat = await handler(new Request(base, { headers: { authorization: `Bearer ${token}` } }));
+      const afterWebChatBody = (await afterWebChat?.json()) as {
+        items: Array<{ id: string; platform: string }>;
+      };
+      expect(afterWebChatBody.items.some((item) => item.id === conversationId && item.platform === "api")).toBe(true);
+      expect(
+        afterWebChatBody.items.some((item) => item.id === webChatConversationId && item.platform === "web_chat"),
+      ).toBe(true);
     } finally {
       db.close();
     }

@@ -7,7 +7,7 @@ export type ScheduledTaskId = string & { readonly __brand: "ScheduledTaskId" };
 export type JobId = string & { readonly __brand: "JobId" };
 
 export interface AgentActorContext {
-  readonly platform?: "api" | "telegram" | "scheduled";
+  readonly platform?: "api" | "web_chat" | "telegram" | "scheduled";
   readonly telegramDeploymentId?: TelegramDeploymentId;
   readonly telegramUserId?: number;
   /** Explicitly hide owner-authored memory when handling cross-user public or shared requests. */

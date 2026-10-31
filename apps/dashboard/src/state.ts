@@ -25,6 +25,7 @@ import type {
   UploadedFile,
   ToolExecutionRecovery,
   BotOwnershipTransfer,
+  PublicChatBot,
 } from "./types.js";
 
 export interface ChatLine {
@@ -80,6 +81,12 @@ export interface UiState {
   pendingFactoryCredential?: string | undefined;
   chatLines: ChatLine[];
   chatConversationId?: string | undefined;
+  publicChatBot?: PublicChatBot | undefined;
+  publicChatSlug?: string | undefined;
+  publicChatLines: ChatLine[];
+  publicChatConversationId?: string | undefined;
+  publicChatBusy: boolean;
+  publicChatError?: string | undefined;
   selectedGrantUserId?: number | undefined;
   selectedGrantRefs: string[];
   factoryError?: string | undefined;
@@ -120,6 +127,8 @@ export function createInitialState(): UiState {
     botOwnershipTransfer: { item: null },
     invitationToken: undefined,
     chatLines: [],
+    publicChatLines: [],
+    publicChatBusy: false,
     selectedGrantRefs: [],
   };
 }

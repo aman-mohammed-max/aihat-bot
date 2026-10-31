@@ -431,12 +431,20 @@ const server = Bun.serve({
 async function serveMiniApp(request: Request, url: URL): Promise<Response | undefined> {
   const dashboardDir = process.env.DASHBOARD_DIR ?? `${process.cwd()}/apps/dashboard/dist`;
   if (url.pathname === "/miniapp") return Response.redirect(new URL("/miniapp/", url), 308);
-  if (url.pathname === "/miniapp/" && (request.method === "GET" || request.method === "HEAD")) {
+  const publicChatPath = /^\/chat\/([a-z0-9]+(?:-[a-z0-9]+)*)(\/?)$/.exec(url.pathname);
+  if (publicChatPath?.[2]) return Response.redirect(new URL(`/chat/${publicChatPath[1]}`, url), 308);
+  const publicChatPage = publicChatPath !== null;
+  if ((url.pathname === "/miniapp/" || publicChatPage) && (request.method === "GET" || request.method === "HEAD")) {
     const index = Bun.file(`${dashboardDir}/index.html`);
     if (!(await index.exists()))
-      return new Response("Mini App assets are missing. Run `bun run build:dashboard` first.", { status: 503 });
+      return new Response("Dashboard assets are missing. Run `bun run build:dashboard` first.", { status: 503 });
     return new Response(request.method === "HEAD" ? null : index, {
-      headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+        "x-content-type-options": "nosniff",
+      },
     });
   }
   const asset = /^\/miniapp\/assets\/([A-Za-z0-9_-]+\.(?:js|css))$/.exec(url.pathname);

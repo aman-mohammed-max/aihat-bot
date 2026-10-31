@@ -58,11 +58,20 @@ export interface Bot {
     hasCredential: boolean;
   };
   visibility: "private" | "shared" | "public" | "invitation";
+  interfaces?: Array<"telegram" | "web_chat" | "api">;
   status: "draft" | "published" | "disabled";
   version: number;
   createdAt: string;
   updatedAt: string;
   collaboratorRole?: "viewer" | "editor";
+}
+
+export interface PublicChatBot {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  visibility: "public";
 }
 
 export interface BotCollaborator {

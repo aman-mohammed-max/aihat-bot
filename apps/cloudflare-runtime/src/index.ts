@@ -632,8 +632,16 @@ function createRuntimeLogger(): Logger {
 async function serveMiniApp(request: Request, assets: Fetcher): Promise<Response | undefined> {
   const url = new URL(request.url);
   if (url.pathname === "/miniapp") return Response.redirect(new URL("/miniapp/", url), 308);
-  if (url.pathname === "/miniapp/" && (request.method === "GET" || request.method === "HEAD")) {
-    return assets.fetch(new Request(new URL("/", url), request));
+  const publicChatPath = /^\/chat\/([a-z0-9]+(?:-[a-z0-9]+)*)(\/?)$/.exec(url.pathname);
+  if (publicChatPath?.[2]) return Response.redirect(new URL(`/chat/${publicChatPath[1]}`, url), 308);
+  const publicChatPage = publicChatPath !== null;
+  if ((url.pathname === "/miniapp/" || publicChatPage) && (request.method === "GET" || request.method === "HEAD")) {
+    const response = await assets.fetch(new Request(new URL("/", url), request));
+    const headers = new Headers(response.headers);
+    headers.set("cache-control", "no-store");
+    headers.set("referrer-policy", "no-referrer");
+    headers.set("x-content-type-options", "nosniff");
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   }
   const asset = /^\/miniapp\/assets\/([A-Za-z0-9_-]+\.(?:js|css))$/.exec(url.pathname);
   if (asset && (request.method === "GET" || request.method === "HEAD")) {

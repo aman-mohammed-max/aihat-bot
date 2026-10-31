@@ -2577,17 +2577,19 @@ export class CloudflareD1Repositories
     readonly botId: BotId;
     readonly actorId: UserId;
     readonly conversationKey: string;
+    readonly platform?: "api" | "web_chat";
   }): Promise<ConversationId> {
     const key = input.conversationKey.trim();
+    const platform = input.platform ?? "api";
     if (!key || key.length > 512) {
       throw new AppError("VALIDATION_ERROR", "API conversation key is invalid.", 400);
     }
     const existing = await this.db
       .prepare(`
         SELECT id FROM conversations
-        WHERE tenant_id = ? AND bot_id = ? AND platform = 'api' AND platform_conversation_id = ? AND actor_id = ?
+        WHERE tenant_id = ? AND bot_id = ? AND platform = ? AND platform_conversation_id = ? AND actor_id = ?
       `)
-      .bind(input.tenantId, input.botId, key, input.actorId)
+      .bind(input.tenantId, input.botId, platform, key, input.actorId)
       .first<{ id: string }>();
     if (existing) return existing.id as ConversationId;
 
@@ -2597,10 +2599,19 @@ export class CloudflareD1Repositories
         .prepare(`
           INSERT INTO conversations (
             id, tenant_id, bot_id, actor_id, platform, platform_conversation_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, 'api', ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(tenant_id, bot_id, platform, platform_conversation_id) DO NOTHING
         `)
-        .bind(`conversation_${crypto.randomUUID()}`, input.tenantId, input.botId, input.actorId, key, now, now)
+        .bind(
+          `conversation_${crypto.randomUUID()}`,
+          input.tenantId,
+          input.botId,
+          input.actorId,
+          platform,
+          key,
+          now,
+          now,
+        )
         .run();
     } catch (cause) {
       throw new AppError("CONFLICT", "API conversation could not be created.", 409, { cause });
@@ -2608,9 +2619,9 @@ export class CloudflareD1Repositories
     const created = await this.db
       .prepare(`
         SELECT id FROM conversations
-        WHERE tenant_id = ? AND bot_id = ? AND platform = 'api' AND platform_conversation_id = ? AND actor_id = ?
+        WHERE tenant_id = ? AND bot_id = ? AND platform = ? AND platform_conversation_id = ? AND actor_id = ?
       `)
-      .bind(input.tenantId, input.botId, key, input.actorId)
+      .bind(input.tenantId, input.botId, platform, key, input.actorId)
       .first<{ id: string }>();
     if (!created) throw new AppError("CONFLICT", "API conversation could not be loaded after creation.", 409);
     return created.id as ConversationId;

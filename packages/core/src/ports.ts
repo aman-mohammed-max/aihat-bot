@@ -226,13 +226,14 @@ export interface ConversationRepository {
   append(tenantId: TenantId, conversationId: ConversationId, messages: AgentRequest["messages"]): Promise<void>;
 }
 
-/** Creates or reuses an API conversation scoped to a bot and an authenticated actor. */
+/** Creates or reuses an API or Web Chat conversation scoped to a bot and signed-in actor. */
 export interface ApiConversationRepository {
   getOrCreateApiConversation(input: {
     readonly tenantId: TenantId;
     readonly botId: BotId;
     readonly actorId: UserId;
     readonly conversationKey: string;
+    readonly platform?: "api" | "web_chat";
   }): Promise<ConversationId>;
 }
 

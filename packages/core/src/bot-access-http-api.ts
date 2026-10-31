@@ -7,7 +7,9 @@ import type { BotAccessGrant, BotDefinition, BotId, JsonSchema, UserId } from ".
 
 const PUBLIC_COLLECTION = "/v1/public/bots";
 const PUBLIC_DETAIL = /^\/v1\/public\/bots\/([a-z0-9]+(?:-[a-z0-9]+)*)$/;
+const PUBLIC_WEB_CHAT = /^\/v1\/public\/bots\/([a-z0-9]+(?:-[a-z0-9]+)*)\/web-chat$/;
 const PUBLIC_MESSAGE = /^\/v1\/public\/bots\/([a-z0-9]+(?:-[a-z0-9]+)*)\/messages$/;
+const PUBLIC_WEB_CHAT_MESSAGE = /^\/v1\/public\/bots\/([a-z0-9]+(?:-[a-z0-9]+)*)\/web-chat\/messages$/;
 const SHARED_MESSAGE = /^\/v1\/shared\/bots\/(bot_[a-f0-9-]{36})\/messages$/;
 const BOT_ACCESS = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/access$/;
 const BOT_GRANTS = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/access\/grants$/;
@@ -28,6 +30,8 @@ export function createBotAccessApiHandler(input: {
   return async (request) => {
     const url = new URL(request.url);
     const publicMessage = PUBLIC_MESSAGE.exec(url.pathname);
+    const publicWebChatMessage = PUBLIC_WEB_CHAT_MESSAGE.exec(url.pathname);
+    const publicWebChat = PUBLIC_WEB_CHAT.exec(url.pathname);
     const sharedMessage = SHARED_MESSAGE.exec(url.pathname);
     const publicDetail = PUBLIC_DETAIL.exec(url.pathname);
     const botAccess = BOT_ACCESS.exec(url.pathname);
@@ -37,6 +41,8 @@ export function createBotAccessApiHandler(input: {
     const isAcceptInvitation = url.pathname === ACCEPT_INVITATION;
     if (
       !publicMessage &&
+      !publicWebChatMessage &&
+      !publicWebChat &&
       !sharedMessage &&
       !publicDetail &&
       !botAccess &&
@@ -64,12 +70,15 @@ export function createBotAccessApiHandler(input: {
         return json({ items });
       }
 
-      if (publicDetail) {
+      if (publicDetail || publicWebChat) {
         if (request.method !== "GET") return methodNotAllowed("GET");
-        const slug = publicDetail[1];
+        const slug = (publicDetail ?? publicWebChat)?.[1];
         if (!slug) throw new AppError("NOT_FOUND", "Public bot was not found.", 404);
         const bot = await input.access.getPublicBotBySlug(slug);
         if (!bot) throw new AppError("NOT_FOUND", "Public bot was not found.", 404);
+        if (publicWebChat && !bot.interfaces?.includes("web_chat")) {
+          throw new AppError("NOT_FOUND", "Public bot was not found.", 404);
+        }
         return json({
           bot: {
             id: bot.id,
@@ -81,16 +90,16 @@ export function createBotAccessApiHandler(input: {
         });
       }
 
-      if (publicMessage || sharedMessage) {
+      if (publicMessage || publicWebChatMessage || sharedMessage) {
         if (request.method !== "POST") return methodNotAllowed("POST");
         const principal = await input.authenticator.authenticate(request);
         await requireApiScope(principal, "agent:run");
         const body = await readMessageBody(request);
-        const accessMode = publicMessage ? "public" : "shared";
+        const accessMode = publicMessage || publicWebChatMessage ? "public" : "shared";
         const requestedAt = now().toISOString();
         let bot: BotDefinition | undefined;
-        if (publicMessage) {
-          const slug = publicMessage[1];
+        if (publicMessage || publicWebChatMessage) {
+          const slug = (publicMessage ?? publicWebChatMessage)?.[1];
           if (!slug) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
           bot = await input.access.getPublicBotBySlug(slug);
         } else {
@@ -103,6 +112,10 @@ export function createBotAccessApiHandler(input: {
           });
         }
         if (bot?.status !== "published") throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+        const requestedInterface = publicWebChatMessage ? "web_chat" : publicMessage ? "api" : undefined;
+        if (requestedInterface && bot.interfaces !== undefined && !bot.interfaces.includes(requestedInterface)) {
+          throw new AppError("NOT_FOUND", "Bot was not found.", 404);
+        }
         const decision = await input.access.consumeBotUse({
           botId: bot.id,
           userId: principal.ownerId,
@@ -123,18 +136,20 @@ export function createBotAccessApiHandler(input: {
           botId: bot.id,
           actorId: principal.ownerId,
           conversationKey: `${principal.ownerId}:${conversationHandle}`,
+          ...(publicWebChatMessage ? { platform: "web_chat" as const } : {}),
         });
         const result = await input.engine.respond({
           bot,
           conversationId,
           actorId: principal.ownerId,
-          actorContext: { platform: "api", includeOwnerMemory: false },
+          actorContext: { platform: publicWebChatMessage ? "web_chat" : "api", includeOwnerMemory: false },
           messages: [{ role: "user", content: body.message }],
           ...(body.responseSchema ? { responseSchema: body.responseSchema } : {}),
         });
         return json({
           conversationId: conversationHandle,
           message: result.message.content,
+          ...(result.attachments?.length ? { attachments: result.attachments } : {}),
           ...(result.structuredOutput === undefined ? {} : { structuredOutput: result.structuredOutput }),
           ...(result.usage ? { usage: result.usage } : {}),
         });

@@ -685,6 +685,23 @@ describe("Cloudflare D1 repositories", () => {
           conversationKey: `${userId}:conv_cloudflare_other`,
         }),
       ).not.toBe(apiConversation);
+      const webChatConversation = await repos.getOrCreateApiConversation({
+        tenantId,
+        botId,
+        actorId: userId,
+        conversationKey: `${userId}:conv_cloudflare_test`,
+        platform: "web_chat",
+      });
+      expect(webChatConversation).not.toBe(apiConversation);
+      expect(
+        await repos.getOrCreateApiConversation({
+          tenantId,
+          botId,
+          actorId: userId,
+          conversationKey: `${userId}:conv_cloudflare_test`,
+          platform: "web_chat",
+        }),
+      ).toBe(webChatConversation);
       const approval = {
         approvalHash: "a".repeat(64),
         tenantId,

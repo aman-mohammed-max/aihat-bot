@@ -2252,18 +2252,20 @@ export class BunSqliteRepositories
     readonly botId: BotId;
     readonly actorId: UserId;
     readonly conversationKey: string;
+    readonly platform?: "api" | "web_chat";
   }): Promise<ConversationId> {
     const key = input.conversationKey.trim();
+    const platform = input.platform ?? "api";
     if (!key || key.length > 512) {
       throw new AppError("VALIDATION_ERROR", "API conversation key is invalid.", 400);
     }
     const createOrLoad = this.#db.transaction((): ConversationId => {
       const existing = this.#db
-        .query<{ id: string }, [string, string, string, string]>(`
+        .query<{ id: string }, [string, string, string, string, string]>(`
           SELECT id FROM conversations
-          WHERE tenant_id = ? AND bot_id = ? AND platform = 'api' AND platform_conversation_id = ? AND actor_id = ?
+          WHERE tenant_id = ? AND bot_id = ? AND platform = ? AND platform_conversation_id = ? AND actor_id = ?
         `)
-        .get(input.tenantId, input.botId, key, input.actorId);
+        .get(input.tenantId, input.botId, platform, key, input.actorId);
       if (existing) return existing.id as ConversationId;
       const id = `conversation_${crypto.randomUUID()}` as ConversationId;
       const now = new Date().toISOString();
@@ -2271,9 +2273,9 @@ export class BunSqliteRepositories
         .query(`
           INSERT INTO conversations (
             id, tenant_id, bot_id, actor_id, platform, platform_conversation_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, 'api', ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `)
-        .run(id, input.tenantId, input.botId, input.actorId, key, now, now);
+        .run(id, input.tenantId, input.botId, input.actorId, platform, key, now, now);
       return id;
     });
     return createOrLoad.immediate();

@@ -25,11 +25,13 @@ import type {
   UsageSummary,
   UploadedFile,
   ToolExecutionRecovery,
+  PublicChatBot,
 } from "./types.js";
 import { escapeHtml, icon } from "./view-utils.js";
 import { botManagementView } from "./views/bot.js";
 import { factoryView } from "./views/factory.js";
 import { loginView, pageTitle, shell } from "./views/shell.js";
+import { publicChatErrorView, publicChatLoginView, publicChatView } from "./views/public-chat.js";
 import {
   apiAccessView,
   automationWorkspaceView,
@@ -152,16 +154,20 @@ async function boot(): Promise<void> {
     } catch {
       telegramLoginClientId = "";
     }
-    render();
+    await applyRoute();
     return;
   }
   try {
     state.principal = await api<Principal>("/v1/whoami");
-    await loadWorkspace();
-    await restoreFactorySession();
+    if (!getPublicChatSlug()) {
+      await loadWorkspace();
+      await restoreFactorySession();
+    }
     await applyRoute();
-    await processMcpOAuthCallback();
-    await acceptPendingWorkspaceInvitation();
+    if (!getPublicChatSlug()) {
+      await processMcpOAuthCallback();
+      await acceptPendingWorkspaceInvitation();
+    }
   } catch (error) {
     clearSession();
     renderLogin(asMessage(error));
@@ -257,6 +263,22 @@ async function processMcpOAuthCallback(): Promise<void> {
 }
 
 async function applyRoute(): Promise<void> {
+  const publicSlug = getPublicChatSlug();
+  if (publicSlug) {
+    if (state.publicChatSlug !== publicSlug) {
+      state.publicChatSlug = publicSlug;
+      state.publicChatBot = undefined;
+      state.publicChatLines = [];
+      state.publicChatConversationId = undefined;
+      state.publicChatError = undefined;
+    }
+    state.route = `chat/${publicSlug}`;
+    state.page = "public-chat";
+    state.pageError = undefined;
+    if (!state.publicChatBot && !state.publicChatError) await loadPublicChat(publicSlug);
+    render();
+    return;
+  }
   const previousPage = state.page;
   const route = location.hash.replace(/^#\/?/, "") || "dashboard";
   state.route = route;
@@ -507,6 +529,28 @@ async function loadOlderConversationMessages(): Promise<void> {
 }
 
 function render(): void {
+  if (getPublicChatSlug()) {
+    if (!state.publicChatBot && state.publicChatError) {
+      app.innerHTML = publicChatErrorView(state.publicChatError);
+    } else if (!accessToken || !state.principal) {
+      app.innerHTML = publicChatLoginView(
+        state.publicChatBot,
+        state.publicChatError ?? state.pageError ?? "",
+        telegramLoginClientId,
+      );
+    } else if (state.publicChatBot) {
+      const chatError = state.publicChatError ?? state.pageError;
+      app.innerHTML = publicChatView({
+        bot: state.publicChatBot,
+        lines: state.publicChatLines,
+        busy: state.publicChatBusy,
+        ...(chatError ? { error: chatError } : {}),
+      });
+    } else {
+      app.innerHTML = publicChatErrorView(state.publicChatError ?? "Loading public chat…");
+    }
+    return;
+  }
   if (!accessToken || !state.principal) {
     app.innerHTML = loginView("", telegramLoginClientId);
     return;
@@ -576,7 +620,11 @@ function factoryAssistantView(): string {
 }
 
 function renderLogin(error = ""): void {
-  if (app) app.innerHTML = loginView(error, telegramLoginClientId);
+  if (app) {
+    app.innerHTML = getPublicChatSlug()
+      ? publicChatLoginView(state.publicChatBot, error, telegramLoginClientId)
+      : loginView(error, telegramLoginClientId);
+  }
 }
 
 async function handleClick(event: MouseEvent): Promise<void> {
@@ -604,7 +652,9 @@ async function handleClick(event: MouseEvent): Promise<void> {
     else if (action === "open-search") openSearch();
     else if (action === "toggle-menu") document.getElementById("sidebar")?.classList.toggle("sidebar-open");
     else if (action === "copy-miniapp-url") await copyText(`${location.origin}/miniapp/`, "Mini App URL copied");
-    else if (action === "switch-workspace") await switchWorkspace(target.dataset.tenantId ?? "");
+    else if (action === "copy-public-web-chat") {
+      await copyText(target.dataset.url ?? "", "Public Web Chat link copied");
+    } else if (action === "switch-workspace") await switchWorkspace(target.dataset.tenantId ?? "");
     else if (action === "copy-workspace-invitation") {
       await copyText(state.newWorkspaceInvitation?.url ?? "", "Workspace invitation link copied");
     } else if (action === "copy-workspace-invitation-token") {
@@ -806,6 +856,9 @@ async function handleSubmit(event: SubmitEvent): Promise<void> {
       case "chat-form":
         await sendChat(data);
         break;
+      case "public-chat-form":
+        await sendPublicChat(data);
+        break;
       case "memory-toggle-form":
         await toggleBotMemory(data);
         break;
@@ -885,11 +938,15 @@ async function logIn(token: string): Promise<void> {
   state.principal = identity;
   sessionStorage.setItem(TOKEN_KEY, token);
   state.pageError = undefined;
-  await loadWorkspace();
-  await restoreFactorySession();
+  if (!getPublicChatSlug()) {
+    await loadWorkspace();
+    await restoreFactorySession();
+  }
   await applyRoute();
-  await processMcpOAuthCallback();
-  await acceptPendingWorkspaceInvitation();
+  if (!getPublicChatSlug()) {
+    await processMcpOAuthCallback();
+    await acceptPendingWorkspaceInvitation();
+  }
 }
 
 function clearSession(): void {
@@ -2198,6 +2255,66 @@ async function sendChat(data: FormData): Promise<void> {
     }
     render();
   }
+}
+
+async function loadPublicChat(slug: string): Promise<void> {
+  try {
+    const response = await api<{ bot: PublicChatBot }>(`/v1/public/bots/${encodeURIComponent(slug)}/web-chat`);
+    state.publicChatBot = response.bot;
+    state.publicChatError = undefined;
+  } catch (error) {
+    state.publicChatBot = undefined;
+    state.publicChatError = asMessage(error);
+  }
+}
+
+async function sendPublicChat(data: FormData): Promise<void> {
+  const bot = state.publicChatBot;
+  const slug = state.publicChatSlug;
+  const message = String(data.get("message") ?? "").trim();
+  if (!bot || !slug || !message || state.publicChatBusy) return;
+  state.publicChatLines.push({ role: "user", content: message });
+  state.publicChatLines.push({ role: "assistant", content: "" });
+  state.publicChatBusy = true;
+  state.publicChatError = undefined;
+  render();
+  try {
+    const result = await api<{
+      conversationId: string;
+      message: string;
+      attachments?: readonly { kind: "image"; url: string; alt?: string }[];
+    }>(`/v1/public/bots/${encodeURIComponent(slug)}/web-chat/messages`, {
+      method: "POST",
+      body: jsonBody({
+        message,
+        ...(state.publicChatConversationId ? { conversationId: state.publicChatConversationId } : {}),
+      }),
+    });
+    state.publicChatConversationId = result.conversationId;
+    const assistantLine = state.publicChatLines[state.publicChatLines.length - 1];
+    if (assistantLine?.role === "assistant") {
+      assistantLine.content = result.message;
+      if (result.attachments?.length) assistantLine.attachments = result.attachments;
+    }
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      clearSession();
+      state.publicChatError = "Your sign-in expired. Sign in again to continue.";
+    } else {
+      state.publicChatError = asMessage(error);
+    }
+    const assistantLine = state.publicChatLines[state.publicChatLines.length - 1];
+    if (assistantLine?.role === "assistant") assistantLine.content = "The response could not be completed.";
+  } finally {
+    state.publicChatBusy = false;
+    render();
+    document.getElementById("public-chat-transcript")?.scrollTo({ top: 999999, behavior: "smooth" });
+  }
+}
+
+function getPublicChatSlug(): string | undefined {
+  const match = /^\/chat\/([a-z0-9]+(?:-[a-z0-9]+)*)\/?$/.exec(location.pathname);
+  return match?.[1];
 }
 
 async function refreshBot(botId: string): Promise<void> {
