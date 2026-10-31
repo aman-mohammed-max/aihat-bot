@@ -5,6 +5,7 @@ describe("persistent Bun polling worker", () => {
   test("drains the active batch on stop and does not start another batch", async () => {
     let releaseBatch: (() => void) | undefined;
     let markStarted: (() => void) | undefined;
+    let continueAfterDrain: (() => boolean) | undefined;
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
@@ -15,8 +16,9 @@ describe("persistent Bun polling worker", () => {
 
     const worker = startPersistentPoller({
       intervalMs: 2,
-      run: async () => {
+      run: async (shouldContinue) => {
         runs += 1;
+        continueAfterDrain = shouldContinue;
         markStarted?.();
         await batch;
       },
@@ -38,6 +40,7 @@ describe("persistent Bun polling worker", () => {
     await stopped;
     await Bun.sleep(8);
     expect(stopFinished).toBe(true);
+    expect(continueAfterDrain?.()).toBe(false);
     expect(runs).toBe(1);
   });
 

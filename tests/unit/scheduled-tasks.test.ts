@@ -8,7 +8,15 @@ import {
   nextTaskRunAt,
   parseTaskSchedule,
 } from "../../packages/core/src/index.js";
-import type { AgentEngine, ScheduledTaskScheduler } from "../../packages/core/src/ports.js";
+import type {
+  AgentEngine,
+  ApiConversationRepository,
+  BotRepository,
+  ConversationRepository,
+  ScheduledTaskRepository,
+  ScheduledTaskScheduler,
+} from "../../packages/core/src/ports.js";
+import type { ScheduledTaskNotifier } from "../../packages/core/src/scheduled-tasks.js";
 import type { CreationAnswers, JobId, ScheduledTaskId, TenantId, UserId } from "../../packages/core/src/types.js";
 import { openSqliteDatabase } from "../../apps/bun-runtime/src/migrations.js";
 import { BunSqliteRepositories } from "../../apps/bun-runtime/src/sqlite-store.js";
@@ -50,6 +58,35 @@ describe("timezone-aware task schedules", () => {
 });
 
 describe("persistent scheduled task execution", () => {
+  test("stops starting queued jobs after the worker begins draining", async () => {
+    const jobIds = ["job_first", "job_second"] as JobId[];
+    const processed: JobId[] = [];
+    let shouldContinue = true;
+
+    class DrainAwareRunner extends ScheduledTaskRunner {
+      constructor() {
+        super(
+          { listDueScheduledJobIds: async () => jobIds } as unknown as ScheduledTaskRepository,
+          {} as BotRepository,
+          {} as ApiConversationRepository & ConversationRepository,
+          {} as AgentEngine,
+          {} as ScheduledTaskNotifier,
+        );
+      }
+
+      override async process(jobId: JobId) {
+        processed.push(jobId);
+        shouldContinue = false;
+        return "completed" as const;
+      }
+    }
+
+    const count = await new DrainAwareRunner().runDueBatch("2026-10-31T12:00:00.000Z", 10, () => shouldContinue);
+
+    expect(processed).toEqual(jobIds.slice(0, 1));
+    expect(count).toBe(1);
+  });
+
   test("creates owner-scoped schedules and retries Telegram delivery from the saved result", async () => {
     const db = openSqliteDatabase(":memory:");
     const repositories = new BunSqliteRepositories(db);

@@ -468,7 +468,7 @@ logger.info("bun_runtime_started", { host: config.host, port: config.port, envir
 
 const scheduledWorker = startPersistentPoller({
   intervalMs: 5_000,
-  run: () => scheduledTaskRunner.runDueBatch(new Date().toISOString(), 10),
+  run: (shouldContinue) => scheduledTaskRunner.runDueBatch(new Date().toISOString(), 10, shouldContinue),
   onError: (error) => logger.error("scheduled_task_batch_failed", { error }),
 });
 

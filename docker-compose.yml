@@ -17,6 +17,7 @@ services:
       CLAMAV_TIMEOUT_MS: ${CLAMAV_TIMEOUT_MS:-30000}
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"
+    stop_grace_period: ${STOP_GRACE_PERIOD:-5m}
     volumes:
       - aihat_data:/data
     init: true

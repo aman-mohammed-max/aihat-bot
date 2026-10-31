@@ -311,10 +311,19 @@ export class ScheduledTaskRunner {
     }
   }
 
-  async runDueBatch(now = new Date().toISOString(), limit = 10): Promise<number> {
+  async runDueBatch(
+    now = new Date().toISOString(),
+    limit = 10,
+    shouldContinue: () => boolean = () => true,
+  ): Promise<number> {
     const jobs = await this.tasks.listDueScheduledJobIds({ now, limit });
-    for (const jobId of jobs) await this.process(jobId, now);
-    return jobs.length;
+    let processed = 0;
+    for (const jobId of jobs) {
+      if (!shouldContinue()) break;
+      await this.process(jobId, now);
+      processed += 1;
+    }
+    return processed;
   }
 
   async #schedule(task: ScheduledTask, runAt: string, jobId: JobId): Promise<void> {

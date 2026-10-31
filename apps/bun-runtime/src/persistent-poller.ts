@@ -5,7 +5,7 @@ export interface PersistentPoller {
 /** Runs durable work periodically and drains the current batch during shutdown. */
 export function startPersistentPoller(input: {
   readonly intervalMs: number;
-  readonly run: () => Promise<unknown>;
+  readonly run: (shouldContinue: () => boolean) => Promise<unknown>;
   readonly onError: (error: unknown) => void;
 }): PersistentPoller {
   if (!Number.isSafeInteger(input.intervalMs) || input.intervalMs < 1 || input.intervalMs > 2_147_483_647) {
@@ -20,7 +20,7 @@ export function startPersistentPoller(input: {
     if (stopped || inFlight) return;
 
     const current = Promise.resolve()
-      .then(() => input.run())
+      .then(() => input.run(() => !stopped))
       .then(() => undefined)
       .catch((error: unknown) => {
         try {

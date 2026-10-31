@@ -132,7 +132,7 @@ docker compose up --build -d
 docker compose logs -f aihat-bot-factory
 ```
 
-The image builds the Bun runtime in a multi-stage build and runs it as an unprivileged user. Compose keeps SQLite data in the `aihat_data` volume, binds port 3000 to `127.0.0.1` by default, and applies a read-only root filesystem with a writable data volume. Set `BIND_ADDRESS` deliberately if a different host binding is required. The container does not require Cloudflare services. API access still requires bootstrapping an owner token with `docker compose exec aihat-bot-factory bun dist/apps/bun-runtime/src/bootstrap.js "My workspace" owner-subject factory:read,factory:write,bots:read,bots:write,agent:run,tokens:manage,members:manage`.
+The image builds the Bun runtime in a multi-stage build and runs it as an unprivileged user. Compose keeps SQLite data in the `aihat_data` volume, binds port 3000 to `127.0.0.1` by default, and applies a read-only root filesystem with a writable data volume. On stop, Compose allows up to `STOP_GRACE_PERIOD` (default `5m`) for the active scheduled job to finish; the worker stops starting queued jobs as shutdown begins. Remaining jobs stay durable and recover after restart if the container must be killed after the grace period. Set `BIND_ADDRESS` deliberately if a different host binding is required. The container does not require Cloudflare services. API access still requires bootstrapping an owner token with `docker compose exec aihat-bot-factory bun dist/apps/bun-runtime/src/bootstrap.js "My workspace" owner-subject factory:read,factory:write,bots:read,bots:write,agent:run,tokens:manage,members:manage`.
 
 To enable local malware scanning, set `CLAMAV_HOST=clamav` in `.env` and start the optional scanner profile:
 
