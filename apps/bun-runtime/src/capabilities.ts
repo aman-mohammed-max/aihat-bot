@@ -26,6 +26,7 @@ export const runtimeCapabilities: RuntimeCapabilities = {
     telegramMasterBot: false,
     mcp: true,
     mcpOAuth: true,
+    mcpOAuthAuthorizationCode: true,
     arbitraryCodeExecution: false,
   },
 };

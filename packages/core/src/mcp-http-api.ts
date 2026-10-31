@@ -10,6 +10,7 @@ const BOT_SERVERS = new RegExp(`^/v1/bots/(${BOT_ID})/mcp-servers$`);
 const SERVER_ROUTE = new RegExp(
   `^/v1/bots/(${BOT_ID})/mcp-servers/([A-Za-z0-9_-]{1,100})(?:/(connect|disconnect|test|tools))?$`,
 );
+const OAUTH_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/mcp-servers/([A-Za-z0-9_-]{1,100})/oauth/(start|callback)$`);
 const TOOL_ROUTE = new RegExp(`^/v1/bots/(${BOT_ID})/mcp-servers/([A-Za-z0-9_-]{1,100})/tools/([^/]{1,128})$`);
 
 /** Owner-scoped MCP connection and tool permission API. */
@@ -22,12 +23,13 @@ export function createMcpApiHandler(
     const pathname = new URL(request.url).pathname;
     const collection = BOT_SERVERS.exec(pathname);
     const serverRoute = SERVER_ROUTE.exec(pathname);
+    const oauthRoute = OAUTH_ROUTE.exec(pathname);
     const toolRoute = TOOL_ROUTE.exec(pathname);
-    if (!collection && !serverRoute && !toolRoute) return undefined;
+    if (!collection && !serverRoute && !oauthRoute && !toolRoute) return undefined;
 
     try {
       const principal = await authenticator.authenticate(request);
-      const botId = (collection?.[1] ?? serverRoute?.[1] ?? toolRoute?.[1]) as BotId | undefined;
+      const botId = (collection?.[1] ?? serverRoute?.[1] ?? oauthRoute?.[1] ?? toolRoute?.[1]) as BotId | undefined;
       if (!botId) return undefined;
       const bot = await bots.get(principal.tenantId, botId);
       if (!bot || bot.ownerId !== principal.ownerId) throw new AppError("NOT_FOUND", "Bot was not found.", 404);
@@ -56,6 +58,8 @@ export function createMcpApiHandler(
           throw new AppError("VALIDATION_ERROR", "MCP server settings are invalid.", 400);
         }
         const authentication = parseAuthentication(body.authentication);
+        const redirectUri =
+          authentication?.mode === "oauth_authorization_code" ? dashboardOAuthRedirectUri(request) : undefined;
         const id = `mcp_${crypto.randomUUID()}`;
         await mcp.addServer({
           id,
@@ -63,6 +67,7 @@ export function createMcpApiHandler(
           botId,
           name: body.name,
           endpoint: body.endpoint,
+          ...(redirectUri ? { redirectUri } : {}),
           ...(typeof body.credentialRef === "string" ? { credentialRef: body.credentialRef } : {}),
           ...(authentication ? { authentication } : {}),
           installedBy: principal.ownerId,
@@ -71,6 +76,45 @@ export function createMcpApiHandler(
         const created = servers.find((server) => server.id === id);
         if (!created) throw new AppError("INTERNAL_ERROR", "MCP server could not be loaded after creation.", 500);
         return json({ server: serverSummary(created), tools: [] }, 201);
+      }
+
+      if (oauthRoute) {
+        if (request.method !== "POST") return methodNotAllowed("POST");
+        await requireApiScope(principal, "bots:write");
+        assertSameBrowserOrigin(request);
+        const serverId = oauthRoute[2];
+        const action = oauthRoute[3];
+        if (!serverId) throw new AppError("VALIDATION_ERROR", "MCP OAuth route is invalid.", 400);
+        if (action === "start") {
+          const result = await mcp.beginOAuthAuthorization(principal.tenantId, botId, serverId);
+          return json(result);
+        }
+        const body = await readJsonBody(request);
+        if (!hasOnlyKeys(body, ["code", "state", "issuer", "error"]) || typeof body.state !== "string") {
+          throw new AppError("VALIDATION_ERROR", "MCP OAuth callback is invalid.", 400);
+        }
+        if (body.error === true && body.code === undefined) {
+          await mcp.rejectOAuthAuthorization({ tenantId: principal.tenantId, botId, serverId, state: body.state });
+          return json({ cancelled: true });
+        }
+        if (
+          typeof body.code !== "string" ||
+          (body.issuer !== undefined && typeof body.issuer !== "string") ||
+          body.error !== undefined
+        ) {
+          throw new AppError("VALIDATION_ERROR", "MCP OAuth callback is invalid.", 400);
+        }
+        const tools = await mcp.completeOAuthAuthorization({
+          tenantId: principal.tenantId,
+          botId,
+          serverId,
+          code: body.code,
+          state: body.state,
+          ...(typeof body.issuer === "string" ? { issuer: body.issuer } : {}),
+        });
+        const servers = await mcp.listServers(principal.tenantId, botId);
+        const server = servers.find((item) => item.id === serverId);
+        return json({ server: server ? serverSummary(server) : undefined, discoveredTools: tools.length, tools });
       }
 
       if (toolRoute) {
@@ -159,6 +203,7 @@ function serverSummary(server: McpServerConnection) {
     endpoint: server.endpoint,
     status: server.status,
     hasCredential: Boolean(server.credentialRef),
+    authenticationMode: server.authenticationMode ?? (server.credentialRef ? "bearer" : "none"),
     createdAt: server.createdAt,
     updatedAt: server.updatedAt,
   };
@@ -190,6 +235,24 @@ function parseAuthentication(value: unknown): McpAuthenticationInput | undefined
       mode: "oauth_client_credentials",
       clientId: authentication.clientId,
       clientSecret: authentication.clientSecret,
+      issuer: authentication.issuer,
+      ...(typeof authentication.scope === "string" ? { scope: authentication.scope } : {}),
+    };
+  }
+  if (authentication.mode === "oauth_authorization_code") {
+    if (
+      !hasOnlyKeys(authentication, ["mode", "clientId", "clientSecret", "issuer", "scope"]) ||
+      typeof authentication.clientId !== "string" ||
+      typeof authentication.issuer !== "string" ||
+      (authentication.clientSecret !== undefined && typeof authentication.clientSecret !== "string") ||
+      (authentication.scope !== undefined && typeof authentication.scope !== "string")
+    ) {
+      throw new AppError("VALIDATION_ERROR", "MCP OAuth authorization-code settings are invalid.", 400);
+    }
+    return {
+      mode: "oauth_authorization_code",
+      clientId: authentication.clientId,
+      ...(typeof authentication.clientSecret === "string" ? { clientSecret: authentication.clientSecret } : {}),
       issuer: authentication.issuer,
       ...(typeof authentication.scope === "string" ? { scope: authentication.scope } : {}),
     };
@@ -234,6 +297,25 @@ function json(body: unknown, status = 200): Response {
 
 function noStoreHeaders(): HeadersInit {
   return { "cache-control": "no-store" };
+}
+
+function assertSameBrowserOrigin(request: Request): void {
+  const origin = request.headers.get("origin");
+  const requestOrigin = new URL(request.url).origin;
+  if (!origin || origin !== requestOrigin) {
+    throw new AppError("FORBIDDEN", "MCP OAuth actions must come from the dashboard origin.", 403);
+  }
+}
+
+function dashboardOAuthRedirectUri(request: Request): string {
+  assertSameBrowserOrigin(request);
+  const requestUrl = new URL(request.url);
+  const localLoopback =
+    requestUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(requestUrl.hostname);
+  if (requestUrl.protocol !== "https:" && !localLoopback) {
+    throw new AppError("FORBIDDEN", "MCP OAuth requires a secure dashboard origin.", 403);
+  }
+  return new URL("/miniapp/", requestUrl.origin).href;
 }
 
 function methodNotAllowed(allow: string): Response {

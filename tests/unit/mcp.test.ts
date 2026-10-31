@@ -3,6 +3,7 @@ import { McpManager, MCP_INVOKE_PERMISSION, exposedToolName } from "../../packag
 import { AppError } from "../../packages/core/src/errors.js";
 import { ApiTokenAuthenticator, createApiTokenMaterial } from "../../packages/core/src/api-auth.js";
 import { createMcpApiHandler } from "../../packages/core/src/mcp-http-api.js";
+import { decodeMcpOAuthAuthorizationState, MCP_OAUTH_CODE_SECRET_PREFIX } from "../../packages/core/src/mcp-oauth.js";
 import type { McpRepository, SecretStore } from "../../packages/core/src/ports.js";
 import type {
   McpDiscoveredTool,
@@ -355,6 +356,443 @@ describe("MCP manager", () => {
     expect(authenticatedMcpRequests).toBeGreaterThan(0);
   });
 
+  test("persists the PKCE authorization flow, validates callbacks once, and saves refreshed tokens", async () => {
+    const state = memoryRepository();
+    const secrets = new Map<string, string>();
+    let secretSequence = 10;
+    let authorizationCodeExchanges = 0;
+    let refreshTokenExchanges = 0;
+    let authenticatedMcpRequests = 0;
+    const fetchMock: TestFetch = async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.origin === "https://mcp.example.com" && url.pathname.includes("oauth-protected-resource")) {
+        return Response.json({ resource: endpoint, authorization_servers: ["https://auth.example.com"] });
+      }
+      if (url.origin === "https://auth.example.com" && url.pathname.includes("oauth-authorization-server")) {
+        return Response.json({
+          issuer: "https://auth.example.com",
+          authorization_endpoint: "https://auth.example.com/authorize",
+          token_endpoint: "https://auth.example.com/token",
+          response_types_supported: ["code"],
+          grant_types_supported: ["authorization_code", "refresh_token"],
+          token_endpoint_auth_methods_supported: ["none", "client_secret_basic"],
+          code_challenge_methods_supported: ["S256"],
+        });
+      }
+      if (url.origin === "https://auth.example.com" && url.pathname === "/token") {
+        const form = new URLSearchParams(await request.text());
+        expect(request.headers.get("authorization")).toBeNull();
+        if (form.get("grant_type") === "authorization_code") {
+          authorizationCodeExchanges += 1;
+          expect(form.get("code")).toBe("authorization-code");
+          expect(form.get("code_verifier")).toBeTruthy();
+          expect(form.get("redirect_uri")).toBe("https://dashboard.example.test/miniapp/");
+          expect(form.get("client_id")).toBe("registered-public-client");
+          return Response.json({
+            access_token: "short-lived-access-token",
+            token_type: "Bearer",
+            expires_in: 0,
+            refresh_token: "initial-refresh-token",
+          });
+        }
+        if (form.get("grant_type") === "refresh_token") {
+          refreshTokenExchanges += 1;
+          expect(form.get("refresh_token")).toBe("initial-refresh-token");
+          return Response.json({
+            access_token: "refreshed-access-token",
+            token_type: "Bearer",
+            expires_in: 3600,
+            refresh_token: "rotated-refresh-token",
+          });
+        }
+        throw new Error("Unexpected OAuth grant type");
+      }
+      if (url.origin === "https://mcp.example.com" && url.pathname === "/mcp") {
+        if (request.headers.get("authorization") !== "Bearer refreshed-access-token") {
+          return new Response(null, {
+            status: 401,
+            headers: {
+              "www-authenticate":
+                'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"',
+            },
+          });
+        }
+        authenticatedMcpRequests += 1;
+        const message = (await request.json()) as {
+          id?: string | number;
+          method: string;
+          params?: Record<string, unknown>;
+        };
+        if (message.id === undefined) return new Response(null, { status: 202 });
+        const result =
+          message.method === "initialize"
+            ? {
+                protocolVersion: message.params?.protocolVersion ?? "2025-11-25",
+                capabilities: { tools: {} },
+                serverInfo: { name: "OAuth MCP", version: "1" },
+              }
+            : { tools: [tool] };
+        return Response.json({ jsonrpc: "2.0", id: message.id, result });
+      }
+      throw new Error(`Unexpected request origin or route: ${url.origin}${url.pathname}`);
+    };
+    const manager = new McpManager({
+      repository: state.repository,
+      secrets: { resolve: async (_tenant, reference) => secrets.get(reference) ?? "" },
+      secretWriter: {
+        put: async (_tenant, value) => {
+          const reference = `secret_${(secretSequence++).toString(16).padStart(32, "0")}`;
+          secrets.set(reference, value);
+          return reference;
+        },
+        delete: async (_tenant, reference) => {
+          secrets.delete(reference);
+        },
+      },
+      allowedOrigins: new Set(["https://mcp.example.com", "https://auth.example.com"]),
+      fetch: fetchMock,
+    });
+    await manager.addServer({
+      id: "mcp_oauth_code",
+      tenantId,
+      botId,
+      name: "User consent server",
+      endpoint,
+      redirectUri: "https://dashboard.example.test/miniapp/",
+      authentication: {
+        mode: "oauth_authorization_code",
+        clientId: "registered-public-client",
+        issuer: "https://auth.example.com",
+        scope: "tools:read",
+      },
+      installedBy: ownerId,
+    });
+
+    const started = await manager.beginOAuthAuthorization(tenantId, botId, "mcp_oauth_code");
+    expect(started.connected).toBe(false);
+    expect(started.authorizationUrl).toBeTruthy();
+    const authUrl = new URL(started.authorizationUrl as string);
+    expect(authUrl.origin).toBe("https://auth.example.com");
+    expect(authUrl.searchParams.get("client_id")).toBe("registered-public-client");
+    expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(authUrl.searchParams.get("redirect_uri")).toBe("https://dashboard.example.test/miniapp/");
+    const server = state.servers[0];
+    expect(server?.credentialRef).toBeTruthy();
+    const storedFlow = decodeMcpOAuthAuthorizationState(secrets.get(server?.credentialRef ?? "") ?? "");
+    expect(storedFlow).toMatchObject({ state: authUrl.searchParams.get("state"), codeVerifier: expect.any(String) });
+    expect(storedFlow?.authorizationUrl).toBe(authUrl.href);
+
+    await expect(
+      manager.completeOAuthAuthorization({
+        tenantId,
+        botId,
+        serverId: "mcp_oauth_code",
+        code: "authorization-code",
+        state: "wrong-state",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(
+      manager.completeOAuthAuthorization({
+        tenantId,
+        botId,
+        serverId: "mcp_oauth_code",
+        code: "authorization-code",
+        state: storedFlow?.state ?? "",
+        issuer: "https://attacker.example.test",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    const tools = await manager.completeOAuthAuthorization({
+      tenantId,
+      botId,
+      serverId: "mcp_oauth_code",
+      code: "authorization-code",
+      state: storedFlow?.state ?? "",
+      issuer: "https://auth.example.com",
+    });
+    expect(tools).toHaveLength(1);
+    expect(state.servers[0]?.status).toBe("connected");
+    expect(state.tools[0]).toMatchObject({ enabled: false, grantedPermissions: [] });
+    expect(authorizationCodeExchanges).toBe(1);
+    expect(refreshTokenExchanges).toBe(1);
+    expect(authenticatedMcpRequests).toBeGreaterThan(0);
+    const storedTokens = decodeMcpOAuthAuthorizationState(secrets.get(state.servers[0]?.credentialRef ?? "") ?? "");
+    expect(storedTokens?.tokens).toMatchObject({
+      access_token: "refreshed-access-token",
+      refresh_token: "rotated-refresh-token",
+    });
+    expect(storedTokens?.state).toBeUndefined();
+    expect(storedTokens?.codeVerifier).toBeUndefined();
+    expect(storedTokens?.authorizationUrl).toBeUndefined();
+    await expect(
+      manager.completeOAuthAuthorization({
+        tenantId,
+        botId,
+        serverId: "mcp_oauth_code",
+        code: "authorization-code",
+        state: storedFlow?.state ?? "",
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  test("blocks OAuth authorization-code token exchange to metadata outside the origin allowlist", async () => {
+    const state = memoryRepository();
+    const secrets = new Map<string, string>();
+    let nextSecret = 40;
+    let outsideRequests = 0;
+    const fetchMock: TestFetch = async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.origin === "https://mcp.example.com" && url.pathname.includes("oauth-protected-resource")) {
+        return Response.json({ resource: endpoint, authorization_servers: ["https://auth.example.com"] });
+      }
+      if (url.origin === "https://auth.example.com" && url.pathname.includes("oauth-authorization-server")) {
+        return Response.json({
+          issuer: "https://auth.example.com",
+          authorization_endpoint: "https://auth.example.com/authorize",
+          token_endpoint: "https://outside.example/token",
+          response_types_supported: ["code"],
+          code_challenge_methods_supported: ["S256"],
+          token_endpoint_auth_methods_supported: ["none"],
+        });
+      }
+      if (url.origin === "https://mcp.example.com" && url.pathname === "/mcp") {
+        return new Response(null, {
+          status: 401,
+          headers: {
+            "www-authenticate":
+              'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp"',
+          },
+        });
+      }
+      if (url.origin === "https://outside.example") outsideRequests += 1;
+      throw new Error("Unexpected network request.");
+    };
+    const manager = new McpManager({
+      repository: state.repository,
+      secrets: { resolve: async (_tenant, reference) => secrets.get(reference) ?? "" },
+      secretWriter: {
+        put: async (_tenant, value) => {
+          const reference = `secret_${(nextSecret++).toString(16).padStart(32, "0")}`;
+          secrets.set(reference, value);
+          return reference;
+        },
+        delete: async (_tenant, reference) => {
+          secrets.delete(reference);
+        },
+      },
+      allowedOrigins: new Set(["https://mcp.example.com", "https://auth.example.com"]),
+      fetch: fetchMock,
+    });
+    await manager.addServer({
+      id: "mcp_oauth_egress_code",
+      tenantId,
+      botId,
+      name: "Untrusted token endpoint",
+      endpoint,
+      redirectUri: "https://dashboard.example.test/miniapp/",
+      authentication: {
+        mode: "oauth_authorization_code",
+        clientId: "registered-client",
+        issuer: "https://auth.example.com",
+      },
+      installedBy: ownerId,
+    });
+    const started = await manager.beginOAuthAuthorization(tenantId, botId, "mcp_oauth_egress_code");
+    const server = state.servers[0];
+    const stored = decodeMcpOAuthAuthorizationState(secrets.get(server?.credentialRef ?? "") ?? "");
+    expect(started.authorizationUrl).toBeTruthy();
+    expect(stored?.state).toBeTruthy();
+    await expect(
+      manager.completeOAuthAuthorization({
+        tenantId,
+        botId,
+        serverId: "mcp_oauth_egress_code",
+        code: "authorization-code",
+        state: stored?.state ?? "",
+        issuer: "https://auth.example.com",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(outsideRequests).toBe(0);
+  });
+
+  test("rejects expired authorization-code callback state before contacting the OAuth server", async () => {
+    const state = memoryRepository();
+    const secrets = new Map<string, string>();
+    let nextRef = "secret_00000000000000000000000000000020";
+    const manager = new McpManager({
+      repository: state.repository,
+      secrets: { resolve: async (_tenant, reference) => secrets.get(reference) ?? "" },
+      secretWriter: {
+        put: async (_tenant, value) => {
+          secrets.set(nextRef, value);
+          return nextRef;
+        },
+        delete: async (_tenant, reference) => {
+          secrets.delete(reference);
+        },
+      },
+      allowedOrigins: new Set(["https://mcp.example.com", "https://auth.example.com"]),
+      fetch: async () => {
+        throw new Error("Expired callback must not make a network request.");
+      },
+    });
+    await manager.addServer({
+      id: "mcp_oauth_expired",
+      tenantId,
+      botId,
+      name: "Expired server",
+      endpoint,
+      redirectUri: "https://dashboard.example.test/miniapp/",
+      authentication: {
+        mode: "oauth_authorization_code",
+        clientId: "registered-client",
+        issuer: "https://auth.example.com",
+      },
+      installedBy: ownerId,
+    });
+    const server = state.servers[0];
+    expect(server?.credentialRef).toBeTruthy();
+    const stored = JSON.parse(
+      secrets.get(server?.credentialRef ?? "")?.slice(MCP_OAUTH_CODE_SECRET_PREFIX.length) ?? "{}",
+    ) as Record<string, unknown>;
+    stored.state = "expired-state";
+    stored.codeVerifier = "saved-verifier";
+    stored.flowExpiresAt = new Date(Date.now() - 1000).toISOString();
+    stored.authorizationUrl = "https://auth.example.com/authorize?state=expired-state";
+    secrets.set(server?.credentialRef ?? "", `${MCP_OAUTH_CODE_SECRET_PREFIX}${JSON.stringify(stored)}`);
+    nextRef = "secret_00000000000000000000000000000021";
+
+    await expect(
+      manager.completeOAuthAuthorization({
+        tenantId,
+        botId,
+        serverId: "mcp_oauth_expired",
+        code: "authorization-code",
+        state: "expired-state",
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  test("binds OAuth setup and callbacks to the owner dashboard origin and redacts credentials", async () => {
+    const state = memoryRepository();
+    const secrets = new Map<string, string>();
+    const token = await createApiTokenMaterial();
+    const principal = { tenantId, ownerId, tokenId: "mcp-oauth-api-token", scopes: ["bots:read", "bots:write"] };
+    const bot: BotDefinition = {
+      id: botId,
+      tenantId,
+      ownerId,
+      name: "OAuth API bot",
+      description: "Test",
+      systemPrompt: "Help.",
+      model: { providerId: "mock", model: "mock" },
+      visibility: "private",
+      status: "draft",
+      version: 1,
+      createdAt: "2026-10-30T00:00:00.000Z",
+      updatedAt: "2026-10-30T00:00:00.000Z",
+    };
+    let sequence = 30;
+    let networkRequests = 0;
+    const manager = new McpManager({
+      repository: state.repository,
+      secrets: { resolve: async (_tenant, reference) => secrets.get(reference) ?? "" },
+      secretWriter: {
+        put: async (_tenant, value) => {
+          const reference = `secret_${(sequence++).toString(16).padStart(32, "0")}`;
+          secrets.set(reference, value);
+          return reference;
+        },
+        delete: async (_tenant, reference) => {
+          secrets.delete(reference);
+        },
+      },
+      allowedOrigins: new Set(["https://mcp.example.com", "https://auth.example.com"]),
+      fetch: async () => {
+        networkRequests += 1;
+        throw new Error("This test does not start a remote OAuth flow.");
+      },
+    });
+    const handler = createMcpApiHandler(
+      new ApiTokenAuthenticator({
+        findActive: async () => principal,
+        create: async () => {},
+        revoke: async () => {},
+        consumeApiRequest: async () => true,
+        recordApiMutation: async () => {},
+      }),
+      { get: async () => bot, saveDraft: async () => {} },
+      manager,
+    );
+    const collection = `https://dashboard.example.test/v1/bots/${botId}/mcp-servers`;
+    const authentication = {
+      mode: "oauth_authorization_code",
+      clientId: "private-client-id",
+      clientSecret: "private-client-secret",
+      issuer: "https://auth.example.com",
+      scope: "tools:read",
+    };
+    const createWithoutOrigin = await handler(
+      new Request(collection, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "User consent", endpoint, authentication }),
+      }),
+    );
+    expect(createWithoutOrigin?.status).toBe(403);
+    expect(state.servers).toHaveLength(0);
+
+    const createResponse = await handler(
+      new Request(collection, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token.token}`,
+          "content-type": "application/json",
+          origin: "https://dashboard.example.test",
+        },
+        body: JSON.stringify({ name: "User consent", endpoint, authentication }),
+      }),
+    );
+    expect(createResponse?.status).toBe(201);
+    expect(createResponse?.headers.get("cache-control")).toBe("no-store");
+    const responseText = await createResponse?.text();
+    expect(responseText).not.toContain(authentication.clientId);
+    expect(responseText).not.toContain(authentication.clientSecret);
+    expect(responseText).not.toContain("credentialRef");
+    const storedServer = state.servers[0];
+    expect(storedServer?.credentialRef).toBeTruthy();
+    const saved = decodeMcpOAuthAuthorizationState(secrets.get(storedServer?.credentialRef ?? "") ?? "");
+    expect(saved).toMatchObject({
+      clientId: authentication.clientId,
+      clientSecret: authentication.clientSecret,
+      redirectUri: "https://dashboard.example.test/miniapp/",
+    });
+
+    const oauthStartUrl = `${collection}/${storedServer?.id}/oauth/start`;
+    const startWithoutOrigin = await handler(
+      new Request(oauthStartUrl, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token.token}` },
+      }),
+    );
+    expect(startWithoutOrigin?.status).toBe(403);
+    const callbackWrongOrigin = await handler(
+      new Request(`${collection}/${storedServer?.id}/oauth/callback`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token.token}`,
+          "content-type": "application/json",
+          origin: "https://attacker.example.test",
+        },
+        body: JSON.stringify({ code: "secret-code", state: "state" }),
+      }),
+    );
+    expect(callbackWrongOrigin?.status).toBe(403);
+    expect(networkRequests).toBe(0);
+  });
+
   test("blocks OAuth metadata that points a token request at an unapproved origin", async () => {
     const state = memoryRepository();
     let storedSecret = "";
@@ -585,6 +1023,17 @@ function memoryRepository() {
       );
       const server = servers[index];
       if (server) servers[index] = { ...server, status: input.status, updatedAt: new Date().toISOString() };
+    },
+    setServerCredentialRef: async (input) => {
+      const index = servers.findIndex(
+        (server) => server.id === input.serverId && server.tenantId === input.tenantId && server.botId === input.botId,
+      );
+      const server = servers[index];
+      if (!server) throw new AppError("NOT_FOUND", "MCP server was not found for this bot.", 404);
+      if (server.credentialRef !== input.expectedCredentialRef) {
+        throw new AppError("CONFLICT", "MCP credentials changed during OAuth state persistence.", 409);
+      }
+      servers[index] = { ...server, credentialRef: input.credentialRef, updatedAt: new Date().toISOString() };
     },
     deleteServer: async (input) => {
       const index = servers.findIndex(

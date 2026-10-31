@@ -974,6 +974,13 @@ export interface McpRepository {
     readonly serverId: string;
     readonly status: McpServerConnection["status"];
   }): Promise<void>;
+  setServerCredentialRef(input: {
+    readonly tenantId: TenantId;
+    readonly botId: BotId;
+    readonly serverId: string;
+    readonly expectedCredentialRef: string;
+    readonly credentialRef: string;
+  }): Promise<void>;
   deleteServer(input: { readonly tenantId: TenantId; readonly botId: BotId; readonly serverId: string }): Promise<void>;
   listTools(tenantId: TenantId, botId: BotId, serverId?: string): Promise<readonly McpDiscoveredTool[]>;
   getTool(tenantId: TenantId, botId: BotId, serverId: string, toolName: string): Promise<McpDiscoveredTool | undefined>;

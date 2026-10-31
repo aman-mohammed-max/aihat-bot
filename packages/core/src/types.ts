@@ -413,6 +413,7 @@ export interface McpServerConnection {
   readonly name: string;
   readonly endpoint: string;
   readonly credentialRef?: string;
+  readonly authenticationMode?: "none" | "bearer" | "oauth_client_credentials" | "oauth_authorization_code";
   readonly status: McpServerStatus;
   readonly createdAt: string;
   readonly updatedAt: string;

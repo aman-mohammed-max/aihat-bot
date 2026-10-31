@@ -58,11 +58,29 @@ const TOKEN_KEY = "aihat.owner-token";
 const SESSION_TOKEN_ID_KEY = "aihat.telegram-session-token-id";
 const SESSION_KEY = "aihat.factory-session";
 const WORKSPACE_INVITATION_KEY = "aihat.workspace-invitation";
+const MCP_OAUTH_FLOW_KEY = "aihat.mcp-oauth-flow";
+const MCP_OAUTH_CALLBACK_KEY = "aihat.mcp-oauth-callback";
 const initialQuery = new URLSearchParams(location.search);
 const linkedInvitation = initialQuery.get("invite");
 if (linkedInvitation && /^ahf_invite_[A-Za-z0-9_-]{43}$/.test(linkedInvitation)) {
   sessionStorage.setItem(WORKSPACE_INVITATION_KEY, linkedInvitation);
   initialQuery.delete("invite");
+  const remainingQuery = initialQuery.toString();
+  history.replaceState(null, "", `${location.pathname}${remainingQuery ? `?${remainingQuery}` : ""}${location.hash}`);
+}
+const oauthCallbackKeys = ["code", "state", "iss", "error", "error_description", "error_uri"];
+if (oauthCallbackKeys.some((key) => initialQuery.has(key))) {
+  const code = initialQuery.get("code");
+  const oauthState = initialQuery.get("state");
+  const issuer = initialQuery.get("iss");
+  const denied = initialQuery.has("error");
+  if (oauthState && oauthState.length <= 256 && ((code && code.length <= 8192 && !denied) || (!code && denied))) {
+    sessionStorage.setItem(
+      MCP_OAUTH_CALLBACK_KEY,
+      JSON.stringify({ ...(code ? { code } : {}), state: oauthState, ...(issuer ? { issuer } : {}), denied }),
+    );
+  }
+  for (const key of oauthCallbackKeys) initialQuery.delete(key);
   const remainingQuery = initialQuery.toString();
   history.replaceState(null, "", `${location.pathname}${remainingQuery ? `?${remainingQuery}` : ""}${location.hash}`);
 }
@@ -127,6 +145,7 @@ async function boot(): Promise<void> {
     await loadWorkspace();
     await restoreFactorySession();
     await applyRoute();
+    await processMcpOAuthCallback();
     await acceptPendingWorkspaceInvitation();
   } catch (error) {
     clearSession();
@@ -168,6 +187,57 @@ async function restoreFactorySession(): Promise<void> {
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) throw error;
     sessionStorage.removeItem(SESSION_KEY);
+  }
+}
+
+async function processMcpOAuthCallback(): Promise<void> {
+  const rawCallback = sessionStorage.getItem(MCP_OAUTH_CALLBACK_KEY);
+  if (!rawCallback) return;
+  sessionStorage.removeItem(MCP_OAUTH_CALLBACK_KEY);
+  const rawFlow = sessionStorage.getItem(MCP_OAUTH_FLOW_KEY);
+  sessionStorage.removeItem(MCP_OAUTH_FLOW_KEY);
+  let callback: { code?: string; state?: string; issuer?: string; denied?: boolean };
+  let flow: { botId?: string; serverId?: string } | undefined;
+  try {
+    callback = JSON.parse(rawCallback) as typeof callback;
+    flow = rawFlow ? (JSON.parse(rawFlow) as typeof flow) : undefined;
+  } catch {
+    showToast("The MCP authorization callback could not be verified. Start authorization again.");
+    return;
+  }
+  if (
+    !flow?.botId ||
+    !/^bot_[a-f0-9-]{36}$/.test(flow.botId) ||
+    !flow.serverId ||
+    !/^[A-Za-z0-9_-]{1,100}$/.test(flow.serverId) ||
+    !callback.state
+  ) {
+    showToast("The MCP authorization callback could not be matched to a connection. Start authorization again.");
+    return;
+  }
+  const callbackPath = `${botBase(flow.botId)}/mcp-servers/${encodeURIComponent(flow.serverId)}/oauth/callback`;
+  try {
+    if (callback.denied) {
+      await api(`${callbackPath}`, {
+        method: "POST",
+        body: jsonBody({ state: callback.state, error: true }),
+      });
+      showToast("MCP authorization was cancelled.");
+    } else {
+      if (!callback.code || callback.code.length > 8192) throw new Error("Authorization callback is incomplete.");
+      const result = await api<{ tools: McpTool[] }>(callbackPath, {
+        method: "POST",
+        body: jsonBody({
+          code: callback.code,
+          state: callback.state,
+          ...(callback.issuer ? { issuer: callback.issuer } : {}),
+        }),
+      });
+      showToast(`${result.tools.length} tools discovered; review before enabling`);
+    }
+    navigate(`bot/${flow.botId}/mcp`);
+  } catch (error) {
+    showToast(asMessage(error));
   }
 }
 
@@ -524,6 +594,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
     else if (action === "resolve-tool-recovery") {
       await resolveToolRecovery(target.dataset.executionKey ?? "", target.dataset.resolution ?? "");
     } else if (action.startsWith("mcp-connect:")) await connectMcp(action.slice("mcp-connect:".length));
+    else if (action.startsWith("mcp-oauth-start:")) await startMcpOAuth(action.slice("mcp-oauth-start:".length));
     else if (action.startsWith("mcp-delete:")) await deleteMcp(action.slice("mcp-delete:".length));
     else if (action === "toggle-mcp-tool") await toggleMcpTool(target);
     else if (action === "toggle-skill") await toggleSkill(target);
@@ -659,7 +730,9 @@ async function handleChange(event: Event): Promise<void> {
       fields.hidden = !active;
       for (const input of fields.querySelectorAll<HTMLInputElement>("input")) {
         input.required =
-          active && ["mcpBearerToken", "mcpClientId", "mcpClientSecret", "mcpIssuer"].includes(input.name);
+          active &&
+          (["mcpBearerToken", "mcpClientId", "mcpIssuer", "mcpCodeClientId", "mcpCodeIssuer"].includes(input.name) ||
+            (target.value === "oauth_client_credentials" && input.name === "mcpClientSecret"));
       }
     }
     return;
@@ -706,6 +779,7 @@ async function logIn(token: string): Promise<void> {
   await loadWorkspace();
   await restoreFactorySession();
   await applyRoute();
+  await processMcpOAuthCallback();
   await acceptPendingWorkspaceInvitation();
 }
 
@@ -1499,7 +1573,17 @@ async function addMcpServer(data: FormData): Promise<void> {
             issuer: String(data.get("mcpIssuer") ?? ""),
             scope: String(data.get("mcpScope") ?? "").trim(),
           }
-        : undefined;
+        : authMode === "oauth_authorization_code"
+          ? {
+              mode: "oauth_authorization_code",
+              clientId: String(data.get("mcpCodeClientId") ?? ""),
+              ...(String(data.get("mcpCodeClientSecret") ?? "")
+                ? { clientSecret: String(data.get("mcpCodeClientSecret")) }
+                : {}),
+              issuer: String(data.get("mcpCodeIssuer") ?? ""),
+              scope: String(data.get("mcpCodeScope") ?? "").trim(),
+            }
+          : undefined;
   const response = await api<{ server: McpServer }>(`${botBase(botId)}/mcp-servers`, {
     method: "POST",
     body: jsonBody({ name, endpoint, ...(authentication ? { authentication } : {}) }),
@@ -1525,6 +1609,25 @@ async function connectMcp(serverId: string): Promise<void> {
   state.toolsByServer[serverId] = result.tools;
   await refreshBot(bot.id);
   showToast(`${result.tools.length} tools discovered; review before enabling`);
+}
+
+async function startMcpOAuth(serverId: string): Promise<void> {
+  const botId = state.page === "bot" ? requireActiveBot().id : selectedBotId("mcp-target-bot");
+  const result = await api<{ authorizationUrl?: string; connected: boolean }>(
+    `${botBase(botId)}/mcp-servers/${encodeURIComponent(serverId)}/oauth/start`,
+    { method: "POST" },
+  );
+  if (result.authorizationUrl) {
+    const authorizationUrl = new URL(result.authorizationUrl);
+    if (authorizationUrl.protocol !== "https:" || authorizationUrl.username || authorizationUrl.password) {
+      throw new Error("The MCP provider returned an invalid authorization URL.");
+    }
+    sessionStorage.setItem(MCP_OAUTH_FLOW_KEY, JSON.stringify({ botId, serverId }));
+    location.assign(authorizationUrl.href);
+    return;
+  }
+  await refreshBot(botId);
+  showToast(result.connected ? "MCP server connected" : "MCP authorization started");
 }
 
 async function deleteMcp(serverId: string): Promise<void> {

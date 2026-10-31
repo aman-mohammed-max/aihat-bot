@@ -1320,14 +1320,47 @@ describe("SQLite and D1 schema", () => {
       expect(await repos.skillRateLimiter.consume(skillLimit)).toBe(false);
       expect(await repos.skillRateLimiter.consume({ ...skillLimit, now: 120_000 })).toBe(true);
 
+      const oldMcpCredentialRef = `secret_${"1".repeat(32)}`;
+      const newMcpCredentialRef = `secret_${"2".repeat(32)}`;
+      for (const reference of [oldMcpCredentialRef, newMcpCredentialRef]) {
+        await repos.secretRecords.create({
+          tenantId,
+          reference,
+          keyId: "test-key",
+          nonce: "nonce",
+          ciphertext: "ciphertext",
+          version: 1,
+          createdAt: "2026-10-30T00:00:00.000Z",
+        });
+      }
       await repos.mcp.createServer({
         id: "mcp-bun-test",
         tenantId,
         botId,
         name: "Bun MCP test",
         endpoint: "https://mcp.example.test/mcp",
+        credentialRef: oldMcpCredentialRef,
         installedBy: actorId,
       });
+      await repos.mcp.setServerCredentialRef({
+        tenantId,
+        botId,
+        serverId: "mcp-bun-test",
+        expectedCredentialRef: oldMcpCredentialRef,
+        credentialRef: newMcpCredentialRef,
+      });
+      expect(await repos.mcp.getServer(tenantId, botId, "mcp-bun-test")).toMatchObject({
+        credentialRef: newMcpCredentialRef,
+      });
+      await expect(
+        repos.mcp.setServerCredentialRef({
+          tenantId,
+          botId,
+          serverId: "mcp-bun-test",
+          expectedCredentialRef: oldMcpCredentialRef,
+          credentialRef: oldMcpCredentialRef,
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
       await repos.mcp.replaceDiscoveredTools({
         tenantId,
         botId,

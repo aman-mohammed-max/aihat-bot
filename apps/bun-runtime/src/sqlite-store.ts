@@ -479,6 +479,7 @@ export class BunSqliteRepositories
       getServer: (tenantId, botId, serverId) => this.getMcpServer(tenantId, botId, serverId),
       createServer: (input) => this.createMcpServer(input),
       setServerStatus: (input) => this.setMcpServerStatus(input),
+      setServerCredentialRef: (input) => this.setMcpServerCredentialRef(input),
       deleteServer: (input) => this.deleteMcpServer(input),
       listTools: (tenantId, botId, serverId) => this.listMcpTools(tenantId, botId, serverId),
       getTool: (tenantId, botId, serverId, toolName) => this.getMcpTool(tenantId, botId, serverId, toolName),
@@ -3445,6 +3446,26 @@ export class BunSqliteRepositories
       .query("UPDATE mcp_servers SET status = ?, updated_at = ? WHERE tenant_id = ? AND bot_id = ? AND id = ?")
       .run(input.status, new Date().toISOString(), input.tenantId, input.botId, input.serverId);
     if (result.changes !== 1) throw new AppError("NOT_FOUND", "MCP server was not found for this bot.", 404);
+  }
+
+  async setMcpServerCredentialRef(input: Parameters<McpRepository["setServerCredentialRef"]>[0]): Promise<void> {
+    const result = this.#db
+      .query(`
+        UPDATE mcp_servers SET credential_ref = ?, updated_at = ?
+        WHERE tenant_id = ? AND bot_id = ? AND id = ? AND credential_ref = ?
+      `)
+      .run(
+        input.credentialRef,
+        new Date().toISOString(),
+        input.tenantId,
+        input.botId,
+        input.serverId,
+        input.expectedCredentialRef,
+      );
+    if (result.changes === 1) return;
+    const server = await this.getMcpServer(input.tenantId, input.botId, input.serverId);
+    if (!server) throw new AppError("NOT_FOUND", "MCP server was not found for this bot.", 404);
+    throw new AppError("CONFLICT", "MCP credentials changed during OAuth state persistence.", 409);
   }
 
   async deleteMcpServer(input: Parameters<McpRepository["deleteServer"]>[0]): Promise<void> {

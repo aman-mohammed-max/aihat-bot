@@ -1,10 +1,21 @@
-import { Client, ClientCredentialsProvider, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import {
+  Client,
+  ClientCredentialsProvider,
+  StreamableHTTPClientTransport,
+  UnauthorizedError,
+} from "@modelcontextprotocol/client";
 import type { FetchLike, JsonSchemaType } from "@modelcontextprotocol/client";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/client/validators/cf-worker";
 import { AppError } from "./errors.js";
 import type { AuditLogRepository, McpRepository, SecretStore, SecretWriter, TelegramRepository } from "./ports.js";
 import type { McpDiscoveredTool, McpRemoteTool, McpServerConnection, TenantId } from "./types.js";
 import type { AgentToolRegistry, ToolContext } from "./tools.js";
+import {
+  decodeMcpOAuthAuthorizationState,
+  encodeMcpOAuthAuthorizationState,
+  PersistentMcpOAuthProvider,
+} from "./mcp-oauth.js";
+import type { McpOAuthAuthorizationState } from "./mcp-oauth.js";
 
 export const MCP_INVOKE_PERMISSION = "mcp:invoke";
 const MAX_TOOL_SCHEMA_BYTES = 32_768;
@@ -22,7 +33,22 @@ export type McpAuthenticationInput =
       readonly clientSecret: string;
       readonly issuer: string;
       readonly scope?: string;
+    }
+  | {
+      readonly mode: "oauth_authorization_code";
+      readonly clientId: string;
+      readonly clientSecret?: string;
+      readonly issuer: string;
+      readonly scope?: string;
     };
+
+interface OAuthClientOptions<T> {
+  readonly beforeConnect?: (
+    transport: StreamableHTTPClientTransport,
+    provider: PersistentMcpOAuthProvider,
+  ) => Promise<void>;
+  readonly onUnauthorized?: (provider: PersistentMcpOAuthProvider) => Promise<T>;
+}
 
 interface OAuthClientCredentials {
   readonly mode: "oauth_client_credentials";
@@ -72,6 +98,7 @@ export class McpManager implements AgentToolRegistry {
     readonly botId: ToolContext["botId"];
     readonly name: string;
     readonly endpoint: string;
+    readonly redirectUri?: string;
     readonly credentialRef?: string;
     readonly authentication?: McpAuthenticationInput;
     readonly installedBy: ToolContext["actorId"];
@@ -92,7 +119,7 @@ export class McpManager implements AgentToolRegistry {
     }
     let credentialRef = input.credentialRef;
     if (input.authentication !== undefined) {
-      const secret = serializeAuthentication(input.authentication, this.#allowedOrigins);
+      const secret = serializeAuthentication(input.authentication, this.#allowedOrigins, input.redirectUri);
       if (!this.#secretWriter)
         throw new AppError("INTERNAL_ERROR", "Encrypted MCP credential storage is unavailable.", 500);
       credentialRef = await this.#secretWriter.put(input.tenantId, secret);
@@ -116,7 +143,134 @@ export class McpManager implements AgentToolRegistry {
   }
 
   async listServers(tenantId: TenantId, botId: ToolContext["botId"]): Promise<readonly McpServerConnection[]> {
-    return this.#repository.listServers(tenantId, botId);
+    const servers = await this.#repository.listServers(tenantId, botId);
+    return Promise.all(
+      servers.map(async (server) => ({ ...server, authenticationMode: await this.#authenticationMode(server) })),
+    );
+  }
+
+  async beginOAuthAuthorization(
+    tenantId: TenantId,
+    botId: ToolContext["botId"],
+    serverId: string,
+  ): Promise<{ readonly authorizationUrl?: string; readonly connected: boolean }> {
+    const server = await this.#requiredServer(tenantId, botId, serverId);
+    const stored = await this.#requiredOAuthAuthorizationState(server);
+    const provider = this.#createOAuthProvider(server, stored);
+    const expiresAt = stored.flowExpiresAt ? Date.parse(stored.flowExpiresAt) : 0;
+    if (stored.state && expiresAt > Date.now()) {
+      if (stored.authorizationUrl) return { authorizationUrl: stored.authorizationUrl, connected: false };
+      throw new AppError("CONFLICT", "MCP OAuth authorization is already starting. Try again shortly.", 409);
+    }
+    let activeServer = server;
+    if (stored.state || stored.codeVerifier || stored.authorizationUrl) {
+      await provider.beginFreshFlow();
+      activeServer = await this.#requiredServer(tenantId, botId, serverId);
+    }
+    return this.#withClient<{ readonly authorizationUrl?: string; readonly connected: boolean }>(
+      activeServer,
+      async (client) => {
+        const result = await client.listTools();
+        const tools = normalizeToolList(result.tools);
+        await this.#repository.replaceDiscoveredTools({
+          tenantId,
+          botId,
+          serverId,
+          tools,
+          discoveredAt: new Date().toISOString(),
+        });
+        await this.#repository.setServerStatus({ tenantId, botId, serverId, status: "connected" });
+        return { connected: true as const };
+      },
+      undefined,
+      {
+        onUnauthorized: async (authorizationProvider) => {
+          const url = authorizationProvider.authorizationUrl;
+          if (!url) throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP authorization URL was not produced.", 502);
+          return { authorizationUrl: url, connected: false as const };
+        },
+      },
+    );
+  }
+
+  async completeOAuthAuthorization(input: {
+    readonly tenantId: TenantId;
+    readonly botId: ToolContext["botId"];
+    readonly serverId: string;
+    readonly code: string;
+    readonly state: string;
+    readonly issuer?: string;
+  }): Promise<readonly McpRemoteTool[]> {
+    const server = await this.#requiredServer(input.tenantId, input.botId, input.serverId);
+    const stored = await this.#requiredOAuthAuthorizationState(server);
+    if (
+      !stored.state ||
+      !stored.codeVerifier ||
+      !stored.authorizationUrl ||
+      !stored.flowExpiresAt ||
+      Date.parse(stored.flowExpiresAt) <= Date.now()
+    ) {
+      throw new AppError("CONFLICT", "MCP OAuth authorization state has expired. Start authorization again.", 409);
+    }
+    if (input.state !== stored.state) {
+      throw new AppError("FORBIDDEN", "MCP OAuth callback state did not match the active authorization flow.", 403);
+    }
+    if (!input.code || input.code.length > 8192 || /[\r\n\0]/.test(input.code)) {
+      throw new AppError("VALIDATION_ERROR", "MCP OAuth authorization code is invalid.", 400);
+    }
+    if (input.issuer && !sameIssuer(stored.issuer, input.issuer)) {
+      throw new AppError("FORBIDDEN", "MCP OAuth callback issuer did not match the configured issuer.", 403);
+    }
+    const callback = new URLSearchParams({ code: input.code, state: input.state });
+    if (input.issuer) callback.set("iss", input.issuer);
+    try {
+      const tools = await this.#withClient(
+        server,
+        async (client) => {
+          const result = await client.listTools();
+          return normalizeToolList(result.tools);
+        },
+        undefined,
+        {
+          beforeConnect: async (transport, provider) => {
+            await provider.consumeAuthorizationCallback(input.state);
+            await transport.finishAuth(callback);
+            await provider.clearAuthorizationChallenge();
+          },
+        },
+      );
+      await this.#repository.replaceDiscoveredTools({
+        tenantId: input.tenantId,
+        botId: input.botId,
+        serverId: input.serverId,
+        tools,
+        discoveredAt: new Date().toISOString(),
+      });
+      await this.#repository.setServerStatus({
+        tenantId: input.tenantId,
+        botId: input.botId,
+        serverId: input.serverId,
+        status: "connected",
+      });
+      return tools;
+    } catch (cause) {
+      if (cause instanceof AppError) throw cause;
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP OAuth authorization could not be completed.", 502);
+    }
+  }
+
+  async rejectOAuthAuthorization(input: {
+    readonly tenantId: TenantId;
+    readonly botId: ToolContext["botId"];
+    readonly serverId: string;
+    readonly state: string;
+  }): Promise<void> {
+    const server = await this.#requiredServer(input.tenantId, input.botId, input.serverId);
+    const stored = await this.#requiredOAuthAuthorizationState(server);
+    if (!stored.state || input.state !== stored.state) {
+      throw new AppError("FORBIDDEN", "MCP OAuth callback state did not match the active authorization flow.", 403);
+    }
+    await this.#createOAuthProvider(server, stored).clearAuthorizationChallenge();
   }
 
   async listTools(
@@ -132,14 +286,7 @@ export class McpManager implements AgentToolRegistry {
     try {
       const tools = await this.#withClient(server, async (client) => {
         const result = await client.listTools();
-        if (!Array.isArray(result.tools) || result.tools.length > 256) {
-          throw new AppError("VALIDATION_ERROR", "MCP server returned an invalid or oversized tool list.", 502);
-        }
-        const normalized = result.tools.map(normalizeRemoteTool);
-        if (new Set(normalized.map(({ name }) => name)).size !== normalized.length) {
-          throw new AppError("VALIDATION_ERROR", "MCP server returned duplicate tool names.", 502);
-        }
-        return normalized;
+        return normalizeToolList(result.tools);
       });
       await this.#repository.replaceDiscoveredTools({
         tenantId,
@@ -311,6 +458,57 @@ export class McpManager implements AgentToolRegistry {
     return server;
   }
 
+  async #authenticationMode(
+    server: McpServerConnection,
+  ): Promise<NonNullable<McpServerConnection["authenticationMode"]>> {
+    if (!server.credentialRef) return "none";
+    const credential = await this.#secrets.resolve(server.tenantId, server.credentialRef);
+    if (decodeMcpOAuthAuthorizationState(credential)) return "oauth_authorization_code";
+    if (parseOAuthCredentials(credential)) return "oauth_client_credentials";
+    validateCredential(credential);
+    return "bearer";
+  }
+
+  async #requiredOAuthAuthorizationState(server: McpServerConnection): Promise<McpOAuthAuthorizationState> {
+    if (!server.credentialRef) {
+      throw new AppError("VALIDATION_ERROR", "MCP server does not have OAuth authorization-code settings.", 400);
+    }
+    const credential = await this.#secrets.resolve(server.tenantId, server.credentialRef);
+    const state = decodeMcpOAuthAuthorizationState(credential);
+    if (!state) {
+      throw new AppError("VALIDATION_ERROR", "MCP server does not use OAuth authorization-code authentication.", 400);
+    }
+    validateIssuer(state.issuer, this.#allowedOrigins);
+    return state;
+  }
+
+  #createOAuthProvider(server: McpServerConnection, state: McpOAuthAuthorizationState): PersistentMcpOAuthProvider {
+    if (!server.credentialRef || !this.#secretWriter) {
+      throw new AppError("INTERNAL_ERROR", "Encrypted MCP OAuth storage is unavailable.", 500);
+    }
+    let currentRef = server.credentialRef;
+    return new PersistentMcpOAuthProvider(state, async (next) => {
+      const nextRef = await this.#secretWriter?.put(server.tenantId, encodeMcpOAuthAuthorizationState(next));
+      if (!nextRef) throw new AppError("INTERNAL_ERROR", "MCP OAuth state could not be encrypted.", 500);
+      const previousRef = currentRef;
+      try {
+        await this.#repository.setServerCredentialRef({
+          tenantId: server.tenantId,
+          botId: server.botId,
+          serverId: server.id,
+          expectedCredentialRef: previousRef,
+          credentialRef: nextRef,
+        });
+      } catch (cause) {
+        await this.#secretWriter?.delete(server.tenantId, nextRef).catch(() => undefined);
+        throw cause;
+      }
+      currentRef = nextRef;
+      if (previousRef !== nextRef)
+        await this.#secretWriter?.delete(server.tenantId, previousRef).catch(() => undefined);
+    });
+  }
+
   #validateEndpoint(value: string): URL {
     let endpoint: URL;
     try {
@@ -335,6 +533,7 @@ export class McpManager implements AgentToolRegistry {
     server: McpServerConnection,
     operation: (client: Client) => Promise<T>,
     signal?: AbortSignal,
+    oauthOptions?: OAuthClientOptions<T>,
   ): Promise<T> {
     if (signal?.aborted) {
       throw new AppError("DEPENDENCY_UNAVAILABLE", "MCP request was cancelled.", 504);
@@ -342,11 +541,15 @@ export class McpManager implements AgentToolRegistry {
     // Revalidate before secret lookup and every network request.
     const endpoint = this.#validateEndpoint(server.endpoint);
     const headers = new Headers();
-    let authProvider: ClientCredentialsProvider | undefined;
+    let authProvider: ClientCredentialsProvider | PersistentMcpOAuthProvider | undefined;
     if (server.credentialRef) {
       const credential = await this.#secrets.resolve(server.tenantId, server.credentialRef, signal);
+      const authorizationCode = decodeMcpOAuthAuthorizationState(credential);
       const oauth = parseOAuthCredentials(credential);
-      if (oauth) {
+      if (authorizationCode) {
+        validateIssuer(authorizationCode.issuer, this.#allowedOrigins);
+        authProvider = this.#createOAuthProvider(server, authorizationCode);
+      } else if (oauth) {
         const issuer = validateIssuer(oauth.issuer, this.#allowedOrigins);
         const key = oauthCacheKey(server);
         authProvider = oauthProviderCache.get(key);
@@ -406,7 +609,21 @@ export class McpManager implements AgentToolRegistry {
         : new Promise<never>(() => undefined);
       return await Promise.race([
         (async () => {
-          await client.connect(transport);
+          if (oauthOptions?.beforeConnect) {
+            if (!(authProvider instanceof PersistentMcpOAuthProvider)) {
+              throw new AppError("CONFLICT", "MCP OAuth authorization state is unavailable.", 409);
+            }
+            await oauthOptions.beforeConnect(transport, authProvider);
+          }
+          try {
+            await client.connect(transport);
+          } catch (cause) {
+            if (cause instanceof UnauthorizedError && authProvider instanceof PersistentMcpOAuthProvider) {
+              if (oauthOptions?.onUnauthorized) return oauthOptions.onUnauthorized(authProvider);
+              throw new AppError("CONFLICT", "Authorize this MCP server before connecting.", 409);
+            }
+            throw cause;
+          }
           return operation(client);
         })(),
         timeout,
@@ -481,12 +698,16 @@ function validateCredential(value: string): void {
   }
 }
 
-function serializeAuthentication(input: McpAuthenticationInput, allowedOrigins: ReadonlySet<string>): string {
+function serializeAuthentication(
+  input: McpAuthenticationInput,
+  allowedOrigins: ReadonlySet<string>,
+  redirectUri?: string,
+): string {
   if (input.mode === "bearer") {
     validateCredential(input.token);
     return input.token;
   }
-  if (input.mode !== "oauth_client_credentials") {
+  if (input.mode !== "oauth_client_credentials" && input.mode !== "oauth_authorization_code") {
     throw new AppError("VALIDATION_ERROR", "MCP authentication mode is unsupported.", 400);
   }
   const issuer = validateIssuer(input.issuer, allowedOrigins);
@@ -494,15 +715,29 @@ function serializeAuthentication(input: McpAuthenticationInput, allowedOrigins: 
     !input.clientId.trim() ||
     input.clientId.length > 256 ||
     /[\r\n\0]/.test(input.clientId) ||
-    !input.clientSecret ||
-    input.clientSecret.length > 8192 ||
-    /[\r\n\0]/.test(input.clientSecret)
+    (input.mode === "oauth_client_credentials" && !input.clientSecret) ||
+    (input.clientSecret !== undefined && (input.clientSecret.length > 8192 || /[\r\n\0]/.test(input.clientSecret)))
   ) {
-    throw new AppError("VALIDATION_ERROR", "MCP OAuth client credentials are invalid.", 400);
+    throw new AppError("VALIDATION_ERROR", "MCP OAuth client settings are invalid.", 400);
   }
   const scope = input.scope?.trim();
   if (scope !== undefined && (scope.length > 1000 || /[\r\n\0]/.test(scope))) {
     throw new AppError("VALIDATION_ERROR", "MCP OAuth scope is invalid.", 400);
+  }
+  if (input.mode === "oauth_authorization_code") {
+    if (!redirectUri) {
+      throw new AppError("VALIDATION_ERROR", "MCP OAuth redirect URL could not be verified.", 400);
+    }
+    const redirect = validateRedirectUri(redirectUri);
+    const value: McpOAuthAuthorizationState = {
+      mode: "oauth_authorization_code",
+      clientId: input.clientId.trim(),
+      ...(input.clientSecret ? { clientSecret: input.clientSecret } : {}),
+      issuer,
+      ...(scope ? { scope } : {}),
+      redirectUri: redirect,
+    };
+    return encodeMcpOAuthAuthorizationState(value);
   }
   const value: OAuthClientCredentials = {
     mode: "oauth_client_credentials",
@@ -512,6 +747,17 @@ function serializeAuthentication(input: McpAuthenticationInput, allowedOrigins: 
     ...(scope ? { scope } : {}),
   };
   return `${OAUTH_SECRET_PREFIX}${JSON.stringify(value)}`;
+}
+
+function normalizeToolList(value: unknown): McpRemoteTool[] {
+  if (!Array.isArray(value) || value.length > 256) {
+    throw new AppError("VALIDATION_ERROR", "MCP server returned an invalid or oversized tool list.", 502);
+  }
+  const normalized = value.map(normalizeRemoteTool);
+  if (new Set(normalized.map(({ name }) => name)).size !== normalized.length) {
+    throw new AppError("VALIDATION_ERROR", "MCP server returned duplicate tool names.", 502);
+  }
+  return normalized;
 }
 
 function parseOAuthCredentials(value: string): OAuthClientCredentials | undefined {
@@ -555,6 +801,40 @@ function validateIssuer(value: string, allowedOrigins: ReadonlySet<string>): str
     throw new AppError("FORBIDDEN", "MCP OAuth issuer must use an approved HTTPS origin.", 403);
   }
   return issuer.href;
+}
+
+function validateRedirectUri(value: string): string {
+  let redirect: URL;
+  try {
+    redirect = new URL(value);
+  } catch (cause) {
+    throw new AppError("VALIDATION_ERROR", "MCP OAuth redirect URL is invalid.", 400, { cause });
+  }
+  const localLoopback =
+    redirect.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(redirect.hostname);
+  if (
+    (!localLoopback && redirect.protocol !== "https:") ||
+    redirect.username ||
+    redirect.password ||
+    redirect.pathname !== "/miniapp/" ||
+    redirect.search ||
+    redirect.hash
+  ) {
+    throw new AppError("VALIDATION_ERROR", "MCP OAuth redirect URL must be the dashboard Mini App URL.", 400);
+  }
+  return redirect.href;
+}
+
+function sameIssuer(expected: string, actual: string): boolean {
+  try {
+    const left = new URL(expected);
+    const right = new URL(actual);
+    left.hash = "";
+    right.hash = "";
+    return left.href.replace(/\/$/, "") === right.href.replace(/\/$/, "");
+  } catch {
+    return false;
+  }
 }
 
 function requestUrl(input: string | URL): URL {

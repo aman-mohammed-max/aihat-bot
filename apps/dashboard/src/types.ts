@@ -111,6 +111,7 @@ export interface McpServer {
   endpoint: string;
   status: "disconnected" | "connected" | "unhealthy" | "disabled";
   hasCredential: boolean;
+  authenticationMode: "none" | "bearer" | "oauth_client_credentials" | "oauth_authorization_code";
   createdAt: string;
   updatedAt: string;
 }

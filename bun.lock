@@ -26,6 +26,10 @@
         "@aihat/core": "workspace:*",
       },
     },
+    "apps/dashboard": {
+      "name": "@aihat/dashboard",
+      "version": "0.1.0",
+    },
     "packages/core": {
       "name": "@aihat/core",
       "version": "0.1.0",
@@ -40,6 +44,8 @@
     "@aihat/cloudflare-runtime": ["@aihat/cloudflare-runtime@workspace:apps/cloudflare-runtime"],
 
     "@aihat/core": ["@aihat/core@workspace:packages/core"],
+
+    "@aihat/dashboard": ["@aihat/dashboard@workspace:apps/dashboard"],
 
     "@biomejs/biome": ["@biomejs/biome@2.6.4", "", { "optionalDependencies": { "@biomejs/cli-android-arm64": "2.6.4", "@biomejs/cli-android-x64": "2.6.4", "@biomejs/cli-darwin-arm64": "2.6.4", "@biomejs/cli-darwin-x64": "2.6.4", "@biomejs/cli-linux-arm64": "2.6.4", "@biomejs/cli-linux-arm64-musl": "2.6.4", "@biomejs/cli-linux-x64": "2.6.4", "@biomejs/cli-linux-x64-musl": "2.6.4", "@biomejs/cli-win32-arm64": "2.6.4", "@biomejs/cli-win32-x64": "2.6.4" }, "bin": { "biome": "bin/biome" } }, "sha512-8sKKwaNW4ot22awZ3lBjwWLHnUFXgXnrBPYS2gNlBAXRbDC++7kqjK2H7dR/FgCDtPvO1xfKpgEhJkGxAKYkxA=="],
 

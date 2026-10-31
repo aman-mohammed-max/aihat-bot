@@ -562,17 +562,50 @@ describe("Cloudflare D1 repositories", () => {
       await repos.skills.uninstall({ tenantId, botId, skillId: "weather.lookup" });
       expect(await repos.skills.listInstalled(tenantId, botId)).toEqual([]);
 
+      const oldMcpCredentialRef = `secret_${"3".repeat(32)}`;
+      const newMcpCredentialRef = `secret_${"4".repeat(32)}`;
+      for (const reference of [oldMcpCredentialRef, newMcpCredentialRef]) {
+        await repos.secretRecords.create({
+          tenantId,
+          reference,
+          keyId: "test-key",
+          nonce: "nonce",
+          ciphertext: "ciphertext",
+          version: 1,
+          createdAt: "2026-10-30T00:00:00.000Z",
+        });
+      }
       await repos.mcp.createServer({
         id: "mcp-cloudflare-test",
         tenantId,
         botId,
         name: "Cloudflare MCP test",
         endpoint: "https://mcp.example.test/mcp",
+        credentialRef: oldMcpCredentialRef,
         installedBy: userId,
       });
       expect(await repos.mcp.listServers(tenantId, botId)).toMatchObject([
-        { id: "mcp-cloudflare-test", status: "disconnected" },
+        { id: "mcp-cloudflare-test", status: "disconnected", credentialRef: oldMcpCredentialRef },
       ]);
+      await repos.mcp.setServerCredentialRef({
+        tenantId,
+        botId,
+        serverId: "mcp-cloudflare-test",
+        expectedCredentialRef: oldMcpCredentialRef,
+        credentialRef: newMcpCredentialRef,
+      });
+      expect(await repos.mcp.getServer(tenantId, botId, "mcp-cloudflare-test")).toMatchObject({
+        credentialRef: newMcpCredentialRef,
+      });
+      await expect(
+        repos.mcp.setServerCredentialRef({
+          tenantId,
+          botId,
+          serverId: "mcp-cloudflare-test",
+          expectedCredentialRef: oldMcpCredentialRef,
+          credentialRef: oldMcpCredentialRef,
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
       const discovered = {
         name: "lookup",
         description: "Lookup one item.",
