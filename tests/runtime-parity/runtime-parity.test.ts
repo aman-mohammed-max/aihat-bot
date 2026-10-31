@@ -668,6 +668,99 @@ describe("Bun and Cloudflare runtime repository parity", () => {
     }
   });
 
+  test("owners can recover failed scheduled jobs identically in Bun and D1", async () => {
+    const bunDatabase = openSqliteDatabase(":memory:");
+    const cloudflareDatabase = openSqliteDatabase(":memory:");
+    const bunRepositories = new BunSqliteRepositories(bunDatabase);
+    const cloudflareRepositories = new CloudflareD1Repositories(
+      new SqliteD1(cloudflareDatabase) as unknown as D1Database,
+    );
+    try {
+      seedTenant(bunDatabase);
+      seedTenant(cloudflareDatabase);
+      const recover = async (repositories: BunSqliteRepositories | CloudflareD1Repositories, suffix: string) => {
+        const botId = await repositories.createDraft({
+          tenantId,
+          ownerId,
+          idempotencyKey: `retry-scheduled-${suffix}`,
+          answers: creationAnswers(),
+        });
+        await repositories.publish({
+          tenantId,
+          ownerId,
+          botId,
+          idempotencyKey: `retry-scheduled-publish-${suffix}`,
+        });
+        const taskId = `task_${"e".repeat(32)}` as ScheduledTaskId;
+        const jobId = `job_${"f".repeat(32)}` as JobId;
+        const runAt = "2026-10-31T09:00:00.000Z";
+        await repositories.createScheduledTask({
+          task: {
+            id: taskId,
+            tenantId,
+            botId,
+            ownerId,
+            schedule: `once:${runAt}`,
+            timezone: "UTC",
+            prompt: "Prepare the daily report.",
+            notifyTelegramUserId: 54321,
+            status: "active",
+            nextRunAt: runAt,
+            createdAt,
+            updatedAt: createdAt,
+          },
+          firstJobId: jobId,
+          idempotencyKey: `${taskId}:${runAt}`,
+        });
+        const claimed = await repositories.claimScheduledJob({
+          jobId,
+          now: runAt,
+          leaseUntil: "2026-10-31T09:10:00.000Z",
+        });
+        if (!claimed) throw new Error("Scheduled job could not be claimed.");
+        await repositories.failScheduledJob({ jobId, now: "2026-10-31T09:01:00.000Z" });
+        await repositories.setScheduledTaskStatus({
+          tenantId,
+          ownerId,
+          taskId,
+          status: "failed",
+          now: "2026-10-31T09:01:00.000Z",
+        });
+        const retriedJobId = await repositories.retryFailedScheduledTask({
+          tenantId,
+          ownerId,
+          taskId,
+          now: "2026-10-31T09:02:00.000Z",
+        });
+        const task = await repositories.getScheduledTask({ tenantId, taskId });
+        const job = await repositories.getScheduledJob({ jobId });
+        return {
+          retriedJobId,
+          task: task ? { status: task.status, nextRunAt: task.nextRunAt } : undefined,
+          job: job
+            ? {
+                status: job.status,
+                attempts: job.attempts,
+                availableAt: job.availableAt,
+                taskId: job.taskId,
+              }
+            : undefined,
+        };
+      };
+      const bun = await recover(bunRepositories, "bun");
+      const d1 = await recover(cloudflareRepositories, "d1");
+      expect(d1).toEqual(bun);
+      expect(bun).toMatchObject({
+        retriedJobId: `job_${"f".repeat(32)}`,
+        task: { status: "active", nextRunAt: "2026-10-31T09:02:00.000Z" },
+        job: { status: "queued", attempts: 0, availableAt: "2026-10-31T09:02:00.000Z" },
+      });
+    } finally {
+      bunDatabase.close();
+      cloudflareDatabase.close();
+    }
+  });
+
   test("tool results replay once from encrypted storage with identical Bun and D1 behavior", async () => {
     const bunDatabase = openSqliteDatabase(":memory:");
     const cloudflareDatabase = openSqliteDatabase(":memory:");

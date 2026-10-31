@@ -599,6 +599,12 @@ export interface ScheduledTaskRepository {
     readonly now: string;
   }): Promise<void>;
   failScheduledJob(input: { readonly jobId: JobId; readonly now: string }): Promise<void>;
+  retryFailedScheduledTask(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly taskId: ScheduledTaskId;
+    readonly now: string;
+  }): Promise<JobId | undefined>;
 }
 
 export interface StoredObjectMetadata {

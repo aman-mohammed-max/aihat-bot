@@ -2453,6 +2453,51 @@ export class CloudflareD1Repositories
     if (result.meta.changes !== 1) throw new AppError("CONFLICT", "Scheduled job lease was lost.", 409);
   }
 
+  async retryFailedScheduledTask(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    taskId: ScheduledTaskId;
+    now: string;
+  }): Promise<JobId | undefined> {
+    const job = await this.db
+      .prepare(`
+        SELECT jobs.id FROM jobs
+        JOIN scheduled_tasks
+          ON scheduled_tasks.tenant_id = jobs.tenant_id
+          AND json_extract(jobs.payload_json, '$.taskId') = scheduled_tasks.id
+        WHERE jobs.tenant_id = ? AND jobs.kind = 'scheduled_task' AND jobs.status = 'failed'
+          AND scheduled_tasks.tenant_id = ? AND scheduled_tasks.owner_id = ?
+          AND scheduled_tasks.id = ? AND scheduled_tasks.status = 'failed'
+        ORDER BY jobs.updated_at DESC, jobs.id DESC LIMIT 1
+      `)
+      .bind(input.tenantId, input.tenantId, input.ownerId, input.taskId)
+      .first<{ id: string }>();
+    if (!job) return undefined;
+    const results = await this.db.batch([
+      this.db
+        .prepare(`
+          UPDATE jobs SET status = 'queued', attempts = 0, available_at = ?, lease_until = NULL, updated_at = ?
+          WHERE id = ? AND tenant_id = ? AND kind = 'scheduled_task' AND status = 'failed'
+            AND EXISTS (
+              SELECT 1 FROM scheduled_tasks
+              WHERE tenant_id = ? AND owner_id = ? AND id = ? AND status = 'failed'
+            )
+        `)
+        .bind(input.now, input.now, job.id, input.tenantId, input.tenantId, input.ownerId, input.taskId),
+      this.db
+        .prepare(`
+          UPDATE scheduled_tasks SET status = 'active', next_run_at = ?, updated_at = ?
+          WHERE tenant_id = ? AND owner_id = ? AND id = ? AND status = 'failed'
+            AND EXISTS (SELECT 1 FROM jobs WHERE id = ? AND status = 'queued')
+        `)
+        .bind(input.now, input.now, input.tenantId, input.ownerId, input.taskId, job.id),
+    ]);
+    if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+      throw new AppError("CONFLICT", "Failed scheduled run changed before it could be retried.", 409);
+    }
+    return job.id as JobId;
+  }
+
   async createSession(session: CreationSession): Promise<void> {
     try {
       await this.db

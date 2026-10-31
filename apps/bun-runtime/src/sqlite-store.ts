@@ -2265,6 +2265,45 @@ export class BunSqliteRepositories
     if (result.changes !== 1) throw new AppError("CONFLICT", "Scheduled job lease was lost.", 409);
   }
 
+  async retryFailedScheduledTask(input: {
+    tenantId: TenantId;
+    ownerId: UserId;
+    taskId: ScheduledTaskId;
+    now: string;
+  }): Promise<JobId | undefined> {
+    const retry = this.#db.transaction(() => {
+      const job = this.#db
+        .query<{ id: string }, [string, string, string, string]>(`
+          SELECT jobs.id FROM jobs
+          JOIN scheduled_tasks
+            ON scheduled_tasks.tenant_id = jobs.tenant_id
+            AND json_extract(jobs.payload_json, '$.taskId') = scheduled_tasks.id
+          WHERE jobs.tenant_id = ? AND jobs.kind = 'scheduled_task' AND jobs.status = 'failed'
+            AND scheduled_tasks.tenant_id = ? AND scheduled_tasks.owner_id = ?
+            AND scheduled_tasks.id = ? AND scheduled_tasks.status = 'failed'
+          ORDER BY jobs.updated_at DESC, jobs.id DESC LIMIT 1
+        `)
+        .get(input.tenantId, input.tenantId, input.ownerId, input.taskId);
+      if (!job) return undefined;
+      const task = this.#db
+        .query(`
+          UPDATE scheduled_tasks SET status = 'active', next_run_at = ?, updated_at = ?
+          WHERE tenant_id = ? AND owner_id = ? AND id = ? AND status = 'failed'
+        `)
+        .run(input.now, input.now, input.tenantId, input.ownerId, input.taskId);
+      if (task.changes !== 1) throw new AppError("CONFLICT", "Scheduled task changed before it could be retried.", 409);
+      const updated = this.#db
+        .query(`
+          UPDATE jobs SET status = 'queued', attempts = 0, available_at = ?, lease_until = NULL, updated_at = ?
+          WHERE id = ? AND tenant_id = ? AND kind = 'scheduled_task' AND status = 'failed'
+        `)
+        .run(input.now, input.now, job.id, input.tenantId);
+      if (updated.changes !== 1) throw new AppError("CONFLICT", "Failed scheduled run changed before retry.", 409);
+      return job.id as JobId;
+    });
+    return retry.immediate();
+  }
+
   async createSession(session: CreationSession): Promise<void> {
     try {
       this.#db

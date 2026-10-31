@@ -2,7 +2,7 @@
 
 ## Current phase
 
-Core runtime expansion and tenant collaboration: verified-origin streaming and structured model output, AI-assisted bot drafting, provider-backed model selection, image attachment delivery, Telegram media input, account-wide API rate limits, scope and resource denial audits, encrypted replay for successful tool calls, workspace switching, audited tenant membership controls, and expiring single-use invitations are implemented in both runtimes; production readiness remains incomplete
+Core runtime expansion and tenant collaboration: verified-origin streaming and structured model output, AI-assisted bot drafting, provider-backed model selection, image attachment delivery, Telegram media input, account-wide API rate limits, scope and resource denial audits, encrypted replay for successful tool calls, workspace switching, audited tenant membership controls, expiring single-use invitations, and owner recovery for failed scheduled jobs are implemented in both runtimes; production readiness remains incomplete
 
 ## Completed work
 
@@ -69,6 +69,7 @@ Core runtime expansion and tenant collaboration: verified-origin streaming and s
 - Added Telegram integration tests for token handling, webhook registration, invalid-secret rejection before token resolution, message delivery, duplicate updates, and storage isolation/recovery.
 - Added tenant-scoped durable scheduled-task APIs for one-time and timezone-aware daily schedules, with recipient validation against the Telegram owner allowlist.
 - Added persisted schedule/job adapters in Bun SQLite and D1, stable job IDs, job claims with expiring leases, persisted model results, bounded retry backoff, pause/resume, and task completion/failure state.
+- Added an owner-only retry route and dashboard action for failed schedules. It atomically requeues the latest failed job, resets its attempt counter, and keeps any saved model result; the UI warns that Telegram delivery can be duplicated after an ambiguous timeout. Bun and D1 repository parity plus authenticated API tests cover recovery.
 - Added shared scheduled-task execution through the existing agent engine, Telegram delivery, Bun's persistent job poller, and Cloudflare Durable Object alarm plus Queue consumer processing.
 - Added schedule creation/list/run recovery tests, including retrying a failed Telegram delivery from the saved model result without calling the model again.
 - Added MCP protocol tests for allowlist-before-secret behavior, discovery defaults, grants, schema checks, bearer routing, redirect rejection, unhealthy states, and D1 schema-change invalidation.
@@ -117,7 +118,7 @@ Core runtime expansion and tenant collaboration: verified-origin streaming and s
 
 ## Remaining work
 
-- Add operator-managed retry/recovery policies and service-specific idempotency keys where external APIs support them; completed local tool results are replayed, but a process failure after a remote effect and before result commit can still cause at-least-once re-execution.
+- Add operator-managed recovery for model-issued tool executions with ambiguous remote outcomes, and broader per-service retry policies. Completed local tool results replay, HTTP skills can send configured idempotency keys, and failed schedules can be manually retried; a process failure after a remote effect but before result commit can still cause at-least-once re-execution.
 - Add broader team collaboration. Admin/member roles do not inherit management access to another member's private bots; bots remain owner-scoped unless separately shared.
 - Add persistent uploaded-file management, malware scanning, broader media formats, and Telegram delivery guarantees beyond at-least-once sends.
 - Complete staging/production deployment setup: provision their D1, R2, and Queue resources, replace placeholder identifiers, configure environment secrets, and deploy. Add the development Worker host as the Mini App domain in BotFather for testing.
@@ -130,12 +131,12 @@ Core runtime expansion and tenant collaboration: verified-origin streaming and s
 - The first Cloudflare tenant/token still requires operator provisioning in D1; no remote bootstrap operation exists.
 - The development Cloudflare account has the `aihat-bot-development` D1, R2 bucket, and Queue; all 21 migrations are applied. Staging and production still use placeholder D1 IDs and have no provisioned resources.
 - A read-only Wrangler inventory on 2026-10-30 initially found no matching AI Hat resources. The development D1, R2 bucket, and Queue were subsequently created; the account's unrelated D1 resource was left untouched.
-- Cloudflare alarms and Queue consumers execute scheduled tasks through D1-backed jobs. Telegram's send API cannot deduplicate outbound notifications, so a crash after Telegram accepts a message but before D1 records completion can produce a duplicate; retries are at-least-once.
+- Cloudflare alarms and Queue consumers execute scheduled tasks through D1-backed jobs. Telegram's send API cannot deduplicate outbound notifications, so a crash after Telegram accepts a message but before D1 records completion can produce a duplicate; automatic retries and owner-requested recovery are at-least-once.
 - Encrypted-secret operations require deployment-injected keyrings. Bun secret rotation is available through `bun run rotate-secrets:bun`; Cloudflare D1 rotation uses `bun run rotate-secrets:cloudflare` with the operator-only Worker secret configured. Both object stores provide bounded streaming and buffered methods up to 25 MiB; Telegram attachment handling still buffers its smaller, explicitly bounded files.
 - MCP currently supports static bearer credentials over Streamable HTTP. OAuth, SSE-only transports, reconnect scheduling, and permissions beyond the explicit `mcp:invoke` grant are unavailable.
 - Image providers must return an HTTPS URL; inline-base64-only image output cannot yet be delivered. Generated provider URLs are shown in the immediate response but are not retained in conversation history; durable uploaded-file management and malware scanning remain outstanding.
 - Workflow execution is available for installed catalog entries, with up to 32 forward-only steps and 60 KiB encrypted checkpoints that expire after 30 days and are purged on a later workflow invocation. Owner-published workflow definitions are validated against enabled catalog children; packaged native handlers remain outstanding.
-- Successful non-workflow tool results are encrypted and replayed for seven days by the shared tool registry. Expired results are purged opportunistically on a later tool call from the same tenant. External effects remain at-least-once when a process stops after the remote action succeeds but before the result commit; operator-managed recovery controls are still needed.
+- Successful non-workflow tool results are encrypted and replayed for seven days by the shared tool registry. Expired results are purged opportunistically on a later tool call from the same tenant. External effects remain at-least-once when a process stops after the remote action succeeds but before the result commit; owner resolution for ambiguous tool outcomes remains outstanding.
 - Telegram accepts text, bounded JPEG/PNG/WebP photos, and bounded UTF-8 text documents. Image analysis is disabled unless the operator enables it for a vision-capable model. Only owner-approved sender IDs can invoke the agent, and each sender needs an explicit grant for every installed skill or enabled MCP tool in addition to the bot-level grant.
 - Customer Telegram bot tokens are submitted over HTTPS through the owner-scoped management API and encrypted at rest. `TELEGRAM_MASTER_BOT_TOKEN` (or legacy `TELEGRAME_BOT_TOKEN`) is used for Mini App identity verification and master-bot API calls; the master webhook separately requires `TELEGRAM_MASTER_WEBHOOK_SECRET`. `TELEGRAM_BOT_TOKEN` is not consumed.
 - Public/shared access has per-user quotas and revocable grants, authenticated API requests have an account-wide rate limit, and API writes, scope/resource denials, bot access outcomes, membership/invitation changes, skill/MCP permission checks, and factory/credential approval outcomes are audited. Workspace invitations grant membership only; they do not grant access to private bots. This repository is not production-ready.
@@ -143,7 +144,7 @@ Core runtime expansion and tenant collaboration: verified-origin streaming and s
 ## Validation
 
 - Unit tests executed: `bun test`.
-- Full `bun test`: 123 passed, 940 assertions, 0 failed.
+- Full `bun test`: 124 passed, 949 assertions, 0 failed.
 - `git diff --check`: passed.
 - Current `bun run check`: passed, including Wrangler type generation, both TypeScript configurations, and Biome lint.
 - Formatting: `bun run format:check` passed for 118 files; `git diff --check` passed.
@@ -166,4 +167,4 @@ Core runtime expansion and tenant collaboration: verified-origin streaming and s
 - Structured-output tests cover strict request formatting, provider output validation, owner and public/shared API responses, malformed schemas, and verified-origin gating.
 - `bun run benchmark`: 2,000 calls each at concurrency 1, 8, and 32; measured 65,058 / 134,607 / 184,848 requests per second in this local run, with p95 0.017 / 0.069 / 0.223 ms. These figures measure only mocked in-process orchestration, not end-to-end provider or storage latency.
 - Live master-bot webhook check: Telegram reports the webhook targets the development Worker with zero pending updates and no delivery error; a request without Telegram's secret header returned HTTP 401.
-- Latest development deployment: `https://aihat-bot-factory.work-fdc.workers.dev/miniapp/`, Worker version `711ddf0e-1199-454e-9880-0661e86e991c`; `/health`, `/ready`, and `/miniapp/` returned HTTP 200, while unauthenticated `/v1/workspaces` returned the expected HTTP 401. Factory model configuration remains in development Worker variables and its token is a Worker secret; no secret values are stored in Git. Migration `0021_tenant_invitations.sql` is applied and remote D1 has no pending migrations. Bun and Cloudflare builds, all 123 unit/runtime-parity tests, type checks, lint, and formatting pass. Production is not deployed.
+- Latest development deployment: `https://aihat-bot-factory.work-fdc.workers.dev/miniapp/`, Worker version `a08208f6-7b5a-4012-9159-df27cff88fe5`; `/health` and `/miniapp/` returned HTTP 200, the served dashboard bundle contains the scheduled-task retry action, and the unauthenticated retry route returned the expected HTTP 401. Factory model configuration remains in development Worker variables and its token is a Worker secret; no secret values are stored in Git. Migration `0021_tenant_invitations.sql` is applied and remote D1 has no pending migrations. Bun and Cloudflare builds, all 124 unit/runtime-parity tests, type checks, lint, and formatting pass. Production is not deployed.

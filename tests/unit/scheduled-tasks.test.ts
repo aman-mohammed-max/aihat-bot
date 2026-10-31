@@ -191,6 +191,50 @@ describe("persistent scheduled task execution", () => {
         status: "active",
         nextRunAt: "2026-10-30T09:00:00.000Z",
       });
+
+      const failedJob = db
+        .query<{ id: string }, [string]>(
+          "SELECT id FROM jobs WHERE kind = 'scheduled_task' AND status = 'queued' AND json_extract(payload_json, '$.taskId') = ?",
+        )
+        .get(daily.id);
+      if (!failedJob) throw new Error("Resumed scheduled job is missing.");
+      const claimedFailedJob = await repositories.claimScheduledJob({
+        jobId: failedJob.id as JobId,
+        now: "2026-10-30T09:00:00.000Z",
+        leaseUntil: "2026-10-30T09:10:00.000Z",
+      });
+      expect(claimedFailedJob?.status).toBe("running");
+      await repositories.failScheduledJob({ jobId: failedJob.id as JobId, now: "2026-10-30T09:01:00.000Z" });
+      await repositories.setScheduledTaskStatus({
+        tenantId,
+        ownerId,
+        taskId: daily.id,
+        status: "failed",
+        now: "2026-10-30T09:01:00.000Z",
+      });
+      const retryResponse = await api(
+        new Request(`${endpoint}/${daily.id}/retry`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${material.token}` },
+        }),
+      );
+      expect(retryResponse?.status).toBe(200);
+      const retried = (await retryResponse?.json()) as { task: { status: string; nextRunAt: string } };
+      expect(retried.task.status).toBe("active");
+      expect(await repositories.getScheduledTask({ tenantId, taskId: daily.id })).toMatchObject({ status: "active" });
+      expect(await repositories.getScheduledJob({ jobId: failedJob.id as JobId })).toMatchObject({
+        status: "queued",
+        attempts: 0,
+        availableAt: retried.task.nextRunAt,
+      });
+      expect(scheduled.at(-1)).toMatchObject({ taskId: daily.id, payloadRef: failedJob.id });
+      const secondRetry = await api(
+        new Request(`${endpoint}/${daily.id}/retry`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${material.token}` },
+        }),
+      );
+      expect(secondRetry?.status).toBe(409);
     } finally {
       db.close();
     }

@@ -226,7 +226,9 @@ function taskRow(task: import("../types.js").ScheduledTask): string {
   const control =
     task.status === "active" || task.status === "paused"
       ? `<button class="button button-secondary button-small" data-action="toggle-task" data-task-id="${escapeHtml(task.id)}" data-status="${task.status}">${task.status === "active" ? "Pause" : "Resume"}</button>`
-      : "—";
+      : task.status === "failed"
+        ? `<button class="button button-secondary button-small" data-action="retry-task" data-task-id="${escapeHtml(task.id)}">Retry run</button>`
+        : "—";
   return `<tr><td><b>${escapeHtml(task.prompt.slice(0, 56))}${task.prompt.length > 56 ? "…" : ""}</b><small>${escapeHtml(schedule)}</small></td><td>${escapeHtml(formatDate(task.nextRunAt))}</td><td><code>${task.notifyTelegramUserId}</code></td><td>${statusPill(task.status)}</td><td>${control}</td></tr>`;
 }
 

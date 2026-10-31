@@ -140,6 +140,23 @@ export class ScheduledTaskService {
     return { ...task, status: "active", nextRunAt: runAt, updatedAt: now };
   }
 
+  async retryFailed(input: {
+    readonly tenantId: TenantId;
+    readonly ownerId: UserId;
+    readonly taskId: ScheduledTaskId;
+    readonly now?: string;
+  }): Promise<ScheduledTask> {
+    const task = await this.get(input);
+    if (task.status !== "failed") {
+      throw new AppError("CONFLICT", "Only failed scheduled tasks can be retried.", 409);
+    }
+    const now = input.now ?? new Date().toISOString();
+    const jobId = await this.tasks.retryFailedScheduledTask({ ...input, now });
+    if (!jobId) throw new AppError("CONFLICT", "No failed scheduled run is available to retry.", 409);
+    await this.#schedule(task, now, jobId);
+    return { ...task, status: "active", nextRunAt: now, updatedAt: now };
+  }
+
   async #schedule(task: ScheduledTask, runAt: string, jobId: JobId): Promise<void> {
     await this.scheduler?.schedule({
       tenantId: task.tenantId,

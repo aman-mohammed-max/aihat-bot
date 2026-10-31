@@ -6,6 +6,7 @@ import type { BotId, ScheduledTaskId } from "./types.js";
 
 const COLLECTION_ROUTE = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/scheduled-tasks$/;
 const TASK_ROUTE = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/scheduled-tasks\/(task_[a-f0-9]{32})$/;
+const RETRY_ROUTE = /^\/v1\/bots\/(bot_[a-f0-9-]{36})\/scheduled-tasks\/(task_[a-f0-9]{32})\/retry$/;
 
 export function createScheduledTasksApiHandler(
   authenticator: ApiTokenAuthenticator,
@@ -15,10 +16,11 @@ export function createScheduledTasksApiHandler(
     const url = new URL(request.url);
     const collection = COLLECTION_ROUTE.exec(url.pathname);
     const taskMatch = TASK_ROUTE.exec(url.pathname);
-    if (!collection && !taskMatch) return undefined;
+    const retryMatch = RETRY_ROUTE.exec(url.pathname);
+    if (!collection && !taskMatch && !retryMatch) return undefined;
     try {
       const principal = await authenticator.authenticate(request);
-      const botId = (collection?.[1] ?? taskMatch?.[1]) as BotId;
+      const botId = (collection?.[1] ?? taskMatch?.[1] ?? retryMatch?.[1]) as BotId;
       if (collection && request.method === "GET") {
         await requireApiScope(principal, "bots:read");
         const tasks = await service.list({ tenantId: principal.tenantId, ownerId: principal.ownerId, botId });
@@ -58,6 +60,21 @@ export function createScheduledTasksApiHandler(
         if (task.botId !== botId) throw new AppError("NOT_FOUND", "Scheduled task was not found.", 404);
         return Response.json({ task: serializeTask(task) }, noStore);
       }
+      if (retryMatch && request.method === "POST") {
+        await requireApiScope(principal, "bots:write");
+        const existing = await service.get({
+          tenantId: principal.tenantId,
+          ownerId: principal.ownerId,
+          taskId: retryMatch[2] as ScheduledTaskId,
+        });
+        if (existing.botId !== botId) throw new AppError("NOT_FOUND", "Scheduled task was not found.", 404);
+        const task = await service.retryFailed({
+          tenantId: principal.tenantId,
+          ownerId: principal.ownerId,
+          taskId: retryMatch[2] as ScheduledTaskId,
+        });
+        return Response.json({ task: serializeTask(task) }, noStore);
+      }
       if (taskMatch && request.method === "PATCH") {
         await requireApiScope(principal, "bots:write");
         const existing = await service.get({
@@ -94,7 +111,7 @@ export function createScheduledTasksApiHandler(
         });
         return new Response(null, { status: 204, headers: noStore.headers });
       }
-      return methodNotAllowed(collection ? "GET, POST" : "GET, PATCH, DELETE");
+      return methodNotAllowed(collection ? "GET, POST" : retryMatch ? "POST" : "GET, PATCH, DELETE");
     } catch (cause) {
       if (cause instanceof AppError) {
         await recordApiAuthorizationDenial(request, cause);

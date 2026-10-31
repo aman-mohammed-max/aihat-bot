@@ -520,6 +520,7 @@ async function handleClick(event: MouseEvent): Promise<void> {
     else if (action === "revoke-bot-grant") await revokeBotGrant(target.dataset.grantId ?? "");
     else if (action === "delete-memory-record") await deleteBotMemory(target.dataset.memoryKey ?? "");
     else if (action === "toggle-task") await toggleTask(target);
+    else if (action === "retry-task") await retryScheduledTask(target);
     else if (action === "dismiss-search") closeSearch();
     else if (action === "search-goto") {
       const destination = target.dataset.destination;
@@ -1393,6 +1394,19 @@ async function toggleTask(target: HTMLElement): Promise<void> {
   });
   await refreshBot(botId);
   showToast(status === "active" ? "Task paused" : "Task resumed");
+}
+
+async function retryScheduledTask(target: HTMLElement): Promise<void> {
+  const botId = state.page === "bot" ? requireActiveBot().id : selectedBotId("automation-target-bot");
+  const taskId = target.dataset.taskId;
+  if (!taskId) return;
+  const confirmed = window.confirm(
+    "Retry this failed run? If Telegram accepted the previous message before a timeout, the recipient may receive it again.",
+  );
+  if (!confirmed) return;
+  await api(`${botBase(botId)}/scheduled-tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST" });
+  await refreshBot(botId);
+  showToast("Failed schedule queued for retry");
 }
 
 async function createToken(data: FormData): Promise<void> {
