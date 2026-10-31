@@ -350,6 +350,7 @@ export default {
             sessions: d1.masterBot,
             factory: botFactory,
             bots: d1,
+            ...(factoryAssistant ? { assistant: factoryAssistant } : {}),
             retryPolicy: runtimeConfig.telegramRetryPolicy,
             requestsPerMinute: runtimeConfig.telegramMasterRequestsPerMinute,
             logger: runtimeLogger,

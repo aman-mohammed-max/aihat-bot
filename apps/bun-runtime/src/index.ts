@@ -106,6 +106,16 @@ const networkAbuseGuard = createNetworkAbuseGuard({
 const approvals = new CreationApprovalService(repositories.creationApprovals);
 const botCredentialApprovals = new BotCredentialApprovalService(repositories.botCredentialApprovals);
 const botFactory = new BotFactory({ sessions: repositories.sessions, approvals, drafts: repositories });
+const factoryAssistant =
+  process.env.FACTORY_LLM_ENDPOINT?.trim() &&
+  process.env.FACTORY_LLM_TOKEN?.trim() &&
+  process.env.FACTORY_LLM_MODEL?.trim()
+    ? new FactoryAssistant({
+        endpoint: process.env.FACTORY_LLM_ENDPOINT,
+        token: process.env.FACTORY_LLM_TOKEN,
+        model: process.env.FACTORY_LLM_MODEL,
+      })
+    : undefined;
 const telegramWebhookBaseUrl = process.env.TELEGRAM_WEBHOOK_BASE_URL ?? "";
 const telegramMasterWebhookSecret = process.env.TELEGRAM_MASTER_WEBHOOK_SECRET ?? "";
 const telegramMasterBot =
@@ -118,6 +128,7 @@ const telegramMasterBot =
         sessions: repositories.masterBot,
         factory: botFactory,
         bots: repositories,
+        ...(factoryAssistant ? { assistant: factoryAssistant } : {}),
         retryPolicy: config.telegramRetryPolicy,
         requestsPerMinute: config.telegramMasterRequestsPerMinute,
         logger,
@@ -231,16 +242,6 @@ const scheduledTaskRunner = new ScheduledTaskRunner(
   config.scheduledTaskRetryPolicy,
   logger,
 );
-const factoryAssistant =
-  process.env.FACTORY_LLM_ENDPOINT?.trim() &&
-  process.env.FACTORY_LLM_TOKEN?.trim() &&
-  process.env.FACTORY_LLM_MODEL?.trim()
-    ? new FactoryAssistant({
-        endpoint: process.env.FACTORY_LLM_ENDPOINT,
-        token: process.env.FACTORY_LLM_TOKEN,
-        model: process.env.FACTORY_LLM_MODEL,
-      })
-    : undefined;
 const factoryApi = createFactoryApiHandler(authenticator, botFactory, approvals, secretStore, {
   modelDiscoveryOrigins: new Set(
     (process.env.MODEL_ALLOWED_ORIGINS ?? "")

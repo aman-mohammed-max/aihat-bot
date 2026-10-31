@@ -1,6 +1,7 @@
 import { AppError } from "./errors.js";
 import { type BotFactory, CREATION_STEPS } from "./bot-factory.js";
 import { DEFAULT_TELEGRAM_MASTER_REQUESTS_PER_MINUTE } from "./config.js";
+import type { FactoryAssistant } from "./factory-assistant.js";
 import { telegramAccountIds } from "./telegram-auth.js";
 import type {
   BotManagementRepository,
@@ -31,6 +32,7 @@ export class TelegramMasterBot {
   readonly #sessions: MasterBotRepository;
   readonly #factory: BotFactory;
   readonly #bots: BotManagementRepository;
+  readonly #assistant: FactoryAssistant | undefined;
   readonly #fetch: FetchLike;
   readonly #now: () => Date;
   readonly #retryPolicy: TelegramRetryPolicy | undefined;
@@ -45,6 +47,7 @@ export class TelegramMasterBot {
     readonly sessions: MasterBotRepository;
     readonly factory: BotFactory;
     readonly bots: BotManagementRepository;
+    readonly assistant?: FactoryAssistant;
     readonly fetch?: FetchLike;
     readonly now?: () => Date;
     readonly retryPolicy?: TelegramRetryPolicy;
@@ -79,6 +82,7 @@ export class TelegramMasterBot {
     this.#sessions = input.sessions;
     this.#factory = input.factory;
     this.#bots = input.bots;
+    this.#assistant = input.assistant;
     this.#fetch = input.fetch ?? globalThis.fetch.bind(globalThis);
     this.#now = input.now ?? (() => new Date());
     this.#retryPolicy = input.retryPolicy;
@@ -187,6 +191,19 @@ export class TelegramMasterBot {
     }
     if (name === "mybots") return this.#listBots(message.chatId, message.from.id, message.from.firstName);
     if (name === "create") {
+      const idea = command?.[2]?.trim() ?? "";
+      if (idea && !this.#assistant) {
+        return {
+          chat_id: message.chatId,
+          text: "AI bot drafting isn’t configured right now. Send /create without an idea to build your bot step by step.",
+        };
+      }
+      if (idea && session) {
+        return {
+          chat_id: message.chatId,
+          text: "You already have a saved setup. Send /continue to resume it, or /cancel before starting a new AI draft.",
+        };
+      }
       const account = await this.#ensureAccount(message.from.id, message.from.firstName);
       const current = session ? await this.#loadFactorySession(session) : undefined;
       if (current && session) {
@@ -208,6 +225,17 @@ export class TelegramMasterBot {
         }
         return this.#sessionPrompt(message.chatId, current);
       }
+      let profile: Awaited<ReturnType<FactoryAssistant["generate"]>> | undefined;
+      if (idea && this.#assistant) {
+        try {
+          profile = await this.#assistant.generate(idea);
+        } catch {
+          return {
+            chat_id: message.chatId,
+            text: "I couldn’t generate a bot profile just now. No setup was created. Try again, or send /create to build it step by step.",
+          };
+        }
+      }
       const created = await this.#factory.start(account.tenantId, account.ownerId);
       const ownerSession = {
         telegramUserId: message.from.id,
@@ -218,6 +246,34 @@ export class TelegramMasterBot {
         updatedAt: this.#now().toISOString(),
       };
       await this.#sessions.saveSession(ownerSession);
+      if (profile) {
+        const creativeAnswers = [
+          ["name", profile.name],
+          ["description", profile.description],
+          ["purpose", profile.purpose],
+          ["audience", profile.audience],
+          ["personality", profile.personality],
+        ] as const satisfies readonly (readonly [CreationStep, string])[];
+        let updated = created;
+        try {
+          for (const [step, value] of creativeAnswers) {
+            updated = await this.#factory.answer(account.tenantId, account.ownerId, created.id, step, value);
+          }
+        } catch {
+          return {
+            chat_id: message.chatId,
+            text: "I generated your bot profile, but couldn’t save every field. Open the Mini App to review the saved progress; nothing has been published.",
+            ...this.#miniAppButton(created.id),
+          };
+        }
+        await this.#sessions.saveSession({ ...ownerSession, updatedAt: this.#now().toISOString() });
+        const nextStep = updated.currentStep;
+        return {
+          chat_id: message.chatId,
+          text: `AI draft ready for “${profile.name}”. I filled in the creative profile from your idea. Review or edit it in the Mini App; nothing has been published.${nextStep ? `\n\nNext: ${stepPrompt(nextStep)}` : ""}`,
+          ...this.#miniAppButton(updated.id),
+        };
+      }
       return this.#sessionPrompt(message.chatId, created);
     }
     if (name === "continue") {
@@ -473,7 +529,7 @@ function helpText(): string {
   return [
     "Welcome to AI Hat Bot Factory.",
     "",
-    "/create — start a bot setup",
+    "/create [idea] — start a setup or draft a bot from your idea with AI",
     "/continue — resume your saved setup",
     "/mybots — list your bots",
     "/cancel — pause and clear this chat’s setup shortcut",

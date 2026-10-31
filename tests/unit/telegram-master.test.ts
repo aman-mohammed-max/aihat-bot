@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { BotFactory, CreationApprovalService, TelegramMasterBot } from "../../packages/core/src/index.js";
+import {
+  BotFactory,
+  CreationApprovalService,
+  FactoryAssistant,
+  TelegramMasterBot,
+} from "../../packages/core/src/index.js";
 import { openSqliteDatabase } from "../../apps/bun-runtime/src/migrations.js";
 import { BunSqliteRepositories } from "../../apps/bun-runtime/src/sqlite-store.js";
 import type { TenantId, UserId } from "../../packages/core/src/types.js";
@@ -82,6 +87,74 @@ describe("Telegram master bot onboarding", () => {
       const accountTenant = mapping.tenantId as TenantId;
       const session = await factory.get(accountTenant, accountOwner, mapping.sessionId);
       expect(session.currentStep).toBe("credentialRef");
+    } finally {
+      db.close();
+    }
+  });
+
+  test("uses the factory AI to prefill creative fields from a Telegram bot idea", async () => {
+    const db = openSqliteDatabase(":memory:");
+    const repositories = new BunSqliteRepositories(db);
+    const sent: Record<string, unknown>[] = [];
+    const idea = "A nutrition helper for busy students that suggests affordable meals.";
+    const profile = {
+      name: "Student Meal Guide",
+      description: "An assistant for practical, affordable meal ideas.",
+      purpose: "Suggest meals that fit a student's budget and schedule.",
+      audience: "Students looking for quick and affordable food.",
+      personality: "Friendly, practical, and careful about nutrition advice.",
+    };
+    const assistant = new FactoryAssistant({
+      endpoint: "https://factory.example.test/v1",
+      token: "factory-test-token",
+      model: "factory-model",
+      fetch: async (_input, init) => {
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer factory-test-token");
+        const body = JSON.parse(String(init?.body)) as { model: string; messages: Array<{ content: string }> };
+        expect(body.model).toBe("factory-model");
+        expect(body.messages.at(-1)?.content).toBe(idea);
+        return Response.json({ choices: [{ message: { content: JSON.stringify(profile) } }] });
+      },
+    });
+    const bot = new TelegramMasterBot({
+      token: "123456789:master-bot-test-token",
+      webhookSecret,
+      webhookBaseUrl: "https://factory.example.test",
+      accounts: repositories.telegramAuth,
+      sessions: repositories.masterBot,
+      factory: new BotFactory({
+        sessions: repositories.sessions,
+        approvals: new CreationApprovalService(repositories.creationApprovals),
+        drafts: repositories,
+      }),
+      bots: repositories,
+      assistant,
+      fetch: async (_input, init) => {
+        sent.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return Response.json({ ok: true, result: true });
+      },
+    });
+
+    try {
+      const response = await sendUpdate(bot, 150, `/create ${idea}`);
+      expect(response.status).toBe(200);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.text).toContain("AI draft ready for “Student Meal Guide”");
+      expect(sent[0]?.text).toContain("Which model provider should it use?");
+      expect(sent[0]?.text).toContain("nothing has been published");
+
+      const mapping = await repositories.masterBot.getSession(456789123);
+      if (!mapping) throw new Error("AI-drafted master bot session mapping was not saved.");
+      const session = await new BotFactory({
+        sessions: repositories.sessions,
+        approvals: new CreationApprovalService(repositories.creationApprovals),
+        drafts: repositories,
+      }).get(mapping.tenantId, mapping.ownerId, mapping.sessionId);
+      expect(session.status).toBe("in_progress");
+      expect(session.currentStep).toBe("providerId");
+      expect(session.answers).toMatchObject(profile);
+      expect(session.botId).toBeUndefined();
+      expect(await repositories.listOwned(mapping.tenantId, mapping.ownerId)).toHaveLength(0);
     } finally {
       db.close();
     }
