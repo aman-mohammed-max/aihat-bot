@@ -1,10 +1,12 @@
 import { AppError } from "./errors.js";
+import { decodeGeneratedImageDataUrl, isGeneratedImageDataUrl } from "./image-data.js";
 import type { SecretStore, SecretWriter, ToolExecutionRepository } from "./ports.js";
 import { getToolAttachments, withToolAttachments, type AgentToolRegistry, type ToolContext } from "./tools.js";
 import type { AgentImageAttachment, ModelToolDefinition } from "./types.js";
 
 const MAX_RESULT_BYTES = 16_384;
 const MAX_ATTACHMENT_URL_LENGTH = 4_096;
+const MAX_DURABLE_RESULT_BYTES = 1_050_000;
 const MAX_EXECUTION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const LEASE_DURATION_MS = 150_000;
 
@@ -96,7 +98,15 @@ export class DurableToolRegistry implements AgentToolRegistry {
       if (acquired.replacedResultRef) await this.#secretWriter.delete(context.tenantId, acquired.replacedResultRef);
       const result = await this.#registry.execute(context, name, input);
       const stored = normalizeResult(result, getToolAttachments(result));
-      resultRef = await this.#secretWriter.put(context.tenantId, JSON.stringify(stored));
+      const serialized = JSON.stringify(stored);
+      if (stored.attachments.some((attachment) => isGeneratedImageDataUrl(attachment.url))) {
+        if (!this.#secretWriter.putLarge) {
+          throw new AppError("UNSUPPORTED_CAPABILITY", "Encrypted image attachment storage is unavailable.", 501);
+        }
+        resultRef = await this.#secretWriter.putLarge(context.tenantId, serialized);
+      } else {
+        resultRef = await this.#secretWriter.put(context.tenantId, serialized);
+      }
       const saved = await this.#executions.complete({
         tenantId: context.tenantId,
         botId: context.botId,
@@ -161,7 +171,7 @@ function normalizeResult(result: unknown, attachments: readonly AgentImageAttach
     throw new AppError("INTERNAL_ERROR", "Tool attachments require an object result.", 500);
   }
   const stored = { version: 1 as const, value, attachments: boundedAttachments };
-  if (new TextEncoder().encode(JSON.stringify(stored)).byteLength > 60 * 1024) {
+  if (new TextEncoder().encode(JSON.stringify(stored)).byteLength > MAX_DURABLE_RESULT_BYTES) {
     return { version: 1, value: { error: "RESULT_TOO_LARGE" }, attachments: [] };
   }
   return stored;
@@ -175,11 +185,15 @@ function restoreResult(stored: StoredToolResult): unknown {
 }
 
 function validateAttachment(attachment: AgentImageAttachment): AgentImageAttachment {
+  const isHttpImage =
+    typeof attachment.url === "string" &&
+    attachment.url.length <= MAX_ATTACHMENT_URL_LENGTH &&
+    isHttpsUrl(attachment.url);
   if (
     attachment.kind !== "image" ||
     typeof attachment.url !== "string" ||
-    attachment.url.length > MAX_ATTACHMENT_URL_LENGTH ||
-    !isHttpsUrl(attachment.url) ||
+    attachment.url.length > MAX_DURABLE_RESULT_BYTES ||
+    (!isHttpImage && !decodeGeneratedImageDataUrl(attachment.url)) ||
     (attachment.alt !== undefined && (typeof attachment.alt !== "string" || attachment.alt.length > 500))
   ) {
     throw new AppError("VALIDATION_ERROR", "Tool returned an invalid attachment.", 502);

@@ -1,4 +1,5 @@
 import { AppError } from "./errors.js";
+import { decodeGeneratedImageDataUrl } from "./image-data.js";
 import { DEFAULT_TELEGRAM_CUSTOMER_REQUESTS_PER_MINUTE } from "./config.js";
 import { TELEGRAM_AUDIO_MAX_BYTES, type AudioTranscriber } from "./audio-transcription.js";
 import {
@@ -279,10 +280,22 @@ export class TelegramManager {
         try {
           for (const attachment of reply.attachments ?? []) {
             if (attachment.kind !== "image") continue;
-            if (!isHttpsImageUrl(attachment.url)) {
-              throw new AppError("VALIDATION_ERROR", "Telegram image attachment URL is invalid.", 400);
+            const inlineImage = decodeGeneratedImageDataUrl(attachment.url);
+            if (!isHttpsImageUrl(attachment.url) && !inlineImage) {
+              throw new AppError("VALIDATION_ERROR", "Telegram image attachment is invalid.", 400);
             }
-            savedRefs.push({ kind: "image", secretRef: await this.#secrets.put(deployment.tenantId, attachment.url) });
+            const secretRef = inlineImage
+              ? this.#secrets.putLarge
+                ? await this.#secrets.putLarge(deployment.tenantId, attachment.url)
+                : (() => {
+                    throw new AppError(
+                      "UNSUPPORTED_CAPABILITY",
+                      "Encrypted image attachment storage is unavailable.",
+                      501,
+                    );
+                  })()
+              : await this.#secrets.put(deployment.tenantId, attachment.url);
+            savedRefs.push({ kind: "image", secretRef });
           }
           attachmentRefs = savedRefs;
           await this.#repository.saveTelegramUpdateResponse({
@@ -318,12 +331,26 @@ export class TelegramManager {
         }
         for (const attachment of attachmentRefs) {
           const photo = await this.#secrets.resolve(deployment.tenantId, attachment.secretRef);
-          if (!isHttpsImageUrl(photo)) throw new AppError("INTERNAL_ERROR", "Stored image attachment is invalid.", 500);
-          await this.#api<boolean>(token, "sendPhoto", {
-            chat_id: chatId,
-            ...(threadId === undefined ? {} : { message_thread_id: threadId }),
-            photo,
-          });
+          const inlineImage = decodeGeneratedImageDataUrl(photo);
+          if (inlineImage) {
+            const form = new FormData();
+            form.set("chat_id", String(chatId));
+            if (threadId !== undefined) form.set("message_thread_id", String(threadId));
+            form.set(
+              "photo",
+              new Blob([inlineImage.bytes.slice().buffer as ArrayBuffer], { type: inlineImage.contentType }),
+              `generated.${inlineImage.extension}`,
+            );
+            await this.#api<boolean>(token, "sendPhoto", form);
+          } else {
+            if (!isHttpsImageUrl(photo))
+              throw new AppError("INTERNAL_ERROR", "Stored image attachment is invalid.", 500);
+            await this.#api<boolean>(token, "sendPhoto", {
+              chat_id: chatId,
+              ...(threadId === undefined ? {} : { message_thread_id: threadId }),
+              photo,
+            });
+          }
         }
       }
       await this.#repository.completeTelegramUpdate({
@@ -944,8 +971,8 @@ export async function telegramApi<T>(
         method: "POST",
         redirect: "error",
         signal: controller.signal,
-        headers: { "content-type": "application/json" },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(isFormData(body) ? {} : { headers: { "content-type": "application/json" } }),
+        ...(body === undefined ? {} : { body: isFormData(body) ? body : JSON.stringify(body) }),
       });
       const text = await response.text();
       if (text.length > 65_536) throw new Error("Telegram response was too large.");
@@ -987,6 +1014,10 @@ export async function telegramApi<T>(
     if (retryAfter > 0) await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
   }
   throw new AppError("DEPENDENCY_UNAVAILABLE", "Telegram Bot API request failed.", 502);
+}
+
+function isFormData(value: unknown): value is FormData {
+  return typeof FormData !== "undefined" && value instanceof FormData;
 }
 
 function normalizeTelegramRetryPolicy(policy: TelegramRetryPolicy): TelegramRetryPolicy {

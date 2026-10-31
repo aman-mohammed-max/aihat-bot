@@ -349,8 +349,14 @@ function renderChatLine(line: ChatLine): string {
     .slice(0, 4)
     .flatMap((attachment) => {
       try {
+        if (attachment.kind !== "image") return [];
+        if (isInlineGeneratedImage(attachment.url)) {
+          return [
+            `<img class="chat-image-attachment" src="${escapeHtml(attachment.url)}" alt="${escapeHtml(attachment.alt || "Generated image")}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />`,
+          ];
+        }
         const url = new URL(attachment.url);
-        if (attachment.kind !== "image" || url.protocol !== "https:" || url.username || url.password) return [];
+        if (url.protocol !== "https:" || url.username || url.password) return [];
         return [
           `<img class="chat-image-attachment" src="${escapeHtml(url.toString())}" alt="${escapeHtml(attachment.alt || "Generated image")}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />`,
         ];
@@ -360,6 +366,10 @@ function renderChatLine(line: ChatLine): string {
     })
     .join("");
   return `<div class="chat-line chat-${line.role}"><span class="chat-avatar">${line.role === "assistant" ? icon("botfather", 15) : "You"}</span><div class="chat-line-body"><p>${escapeHtml(line.content)}</p>${images}</div></div>`;
+}
+
+function isInlineGeneratedImage(value: string): boolean {
+  return value.length <= 1_000_000 && /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
 }
 
 function monogram(name: string): string {

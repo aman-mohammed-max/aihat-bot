@@ -9,6 +9,7 @@ import type {
 import type { TenantId } from "./types.js";
 
 const MAX_SECRET_BYTES = 64 * 1024;
+const MAX_LARGE_SECRET_BYTES = 1_050_000;
 const MAX_ROTATION_PAGE_SIZE = 250;
 
 export interface SecretRotationCursor {
@@ -37,12 +38,25 @@ export class EncryptedSecretStore implements SecretStore, SecretWriter {
   }
 
   async put(tenantId: TenantId, plaintext: string): Promise<string> {
+    return this.#put(tenantId, plaintext, MAX_SECRET_BYTES, "Credential must contain between 1 byte and 64 KiB.");
+  }
+
+  async putLarge(tenantId: TenantId, plaintext: string): Promise<string> {
+    return this.#put(
+      tenantId,
+      plaintext,
+      MAX_LARGE_SECRET_BYTES,
+      "Encrypted attachment must contain between 1 byte and 1,050,000 bytes.",
+    );
+  }
+
+  async #put(tenantId: TenantId, plaintext: string, maximumBytes: number, message: string): Promise<string> {
     if (
       typeof plaintext !== "string" ||
       plaintext.length === 0 ||
-      new TextEncoder().encode(plaintext).length > MAX_SECRET_BYTES
+      new TextEncoder().encode(plaintext).length > maximumBytes
     ) {
-      throw new AppError("VALIDATION_ERROR", "Credential must contain between 1 byte and 64 KiB.", 400);
+      throw new AppError("VALIDATION_ERROR", message, 400);
     }
     const reference = `secret_${crypto.randomUUID().replaceAll("-", "")}`;
     const active = await this.#keyring.activeKey();

@@ -1556,7 +1556,7 @@ describe("Bun and Cloudflare runtime repository parity", () => {
       getKey: async (id: string) => (id === "tool-result-key" ? keyMaterial : undefined),
     };
     const now = new Date("2026-10-30T12:00:00.000Z");
-    const resultUrl = "https://images.example.test/generated.png";
+    const resultUrl = "data:image/png;base64,iVBORw0KGgo=";
     try {
       seedTenant(bunDatabase);
       seedTenant(cloudflareDatabase);

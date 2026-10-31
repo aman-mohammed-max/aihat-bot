@@ -46,6 +46,20 @@ describe("Telegram webhook integration", () => {
         });
         return reference;
       },
+      putLarge: async (_tenant: TenantId, plaintext: string) => {
+        const reference = `secret_${crypto.randomUUID().replaceAll("-", "").slice(0, 32)}`;
+        secrets.set(reference, plaintext);
+        await repositories.secretRecords.create({
+          tenantId,
+          reference,
+          keyId: "test-key",
+          nonce: "nonce",
+          ciphertext: "encrypted-test-value",
+          version: 1,
+          createdAt: new Date().toISOString(),
+        });
+        return reference;
+      },
       resolve: async (_tenant: TenantId, reference: string) => {
         resolvedReferences.push(reference);
         const secret = secrets.get(reference);
@@ -60,6 +74,8 @@ describe("Telegram webhook integration", () => {
     const calls: string[] = [];
     const sentMessages: Record<string, unknown>[] = [];
     const sentPhotos: Record<string, unknown>[] = [];
+    let expectedImageUpdateId = 9045;
+    const inlinePng = "data:image/png;base64,iVBORw0KGgo=";
     const chatActions: Record<string, unknown>[] = [];
     let telegramDeploymentId: TelegramDeploymentId | undefined;
     const storedObjects = new Map<string, StoredObject>();
@@ -156,19 +172,33 @@ describe("Telegram webhook integration", () => {
         return Response.json({ ok: true, result: true });
       }
       if (method === "sendPhoto") {
-        const payload = (await request.json()) as Record<string, unknown>;
+        const isMultipart = request.headers.get("content-type")?.startsWith("multipart/form-data") === true;
+        let payload: Record<string, unknown>;
+        if (isMultipart) {
+          const form = await request.formData();
+          const photo = form.get("photo");
+          expect(photo).toBeInstanceOf(File);
+          if (!(photo instanceof File)) throw new Error("Expected generated image upload");
+          expect(photo.type).toBe("image/png");
+          expect(new Uint8Array(await photo.arrayBuffer())).toEqual(
+            Uint8Array.from(atob("iVBORw0KGgo="), (char) => char.charCodeAt(0)),
+          );
+          payload = { chat_id: form.get("chat_id"), photo: "multipart image/png" };
+        } else {
+          payload = (await request.json()) as Record<string, unknown>;
+        }
         sentPhotos.push(payload);
         if (!telegramDeploymentId) throw new Error("Telegram deployment ID was not initialized");
         const stored = db
           .query<{ response_attachments_json: string }, [string, number]>(
             "SELECT response_attachments_json FROM telegram_updates WHERE deployment_id = ? AND update_id = ?",
           )
-          .get(telegramDeploymentId, 9045);
+          .get(telegramDeploymentId, expectedImageUpdateId);
         expect(stored?.response_attachments_json).not.toContain("images.example.test");
         const references = JSON.parse(stored?.response_attachments_json ?? "[]") as { secretRef: string }[];
         expect(references).toHaveLength(1);
         expect(secrets.get(references[0]?.secretRef ?? "")).toBe(
-          "https://images.example.test/generated.png?signature=private",
+          isMultipart ? inlinePng : "https://images.example.test/generated.png?signature=private",
         );
         return Response.json({ ok: true, result: true });
       }
@@ -219,12 +249,18 @@ describe("Telegram webhook integration", () => {
           if (engineCalls.length === 1) {
             expect(request.messages).toEqual([{ role: "user", content: "Hello from Telegram" }]);
           }
-          if (request.messages[0]?.content === "Generate image") {
+          if (request.messages.at(-1)?.content === "Generate image") {
             return {
               message: { role: "assistant", content: "Here is your image." },
               attachments: [
                 { kind: "image", url: "https://images.example.test/generated.png?signature=private", alt: "A kite" },
               ],
+            };
+          }
+          if (request.messages.at(-1)?.content === "Generate inline image") {
+            return {
+              message: { role: "assistant", content: "Here is your inline image." },
+              attachments: [{ kind: "image", url: inlinePng, alt: "A pixel" }],
             };
           }
           return { message: { role: "assistant", content: "Welcome." } };
@@ -686,6 +722,24 @@ describe("Telegram webhook integration", () => {
       );
       expect(duplicateImage?.status).toBe(200);
       expect(sentPhotos).toHaveLength(1);
+
+      expectedImageUpdateId = 9052;
+      const inlineImageResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9052,
+            message: { text: "Generate inline image", chat: { id: -10012346 }, from: { id: 54321, is_bot: false } },
+          }),
+        }),
+      );
+      expect(inlineImageResponse?.status).toBe(200);
+      expect(sentPhotos).toHaveLength(2);
+      expect(sentPhotos[1]).toEqual({ chat_id: "-10012346", photo: "multipart image/png" });
 
       const videoCallsBefore = calls.length;
       const agentCallsBeforeVideo = engineCalls.length;

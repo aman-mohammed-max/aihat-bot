@@ -9,6 +9,7 @@ export * from "./model.js";
 export * from "./model-catalog.js";
 export * from "./structured-output.js";
 export * from "./tools.js";
+export * from "./image-data.js";
 export * from "./durable-tools.js";
 export * from "./agent.js";
 export * from "./agent-runtime.js";

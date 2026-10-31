@@ -28,13 +28,20 @@ function renderLine(bot: PublicChatBot, line: ChatLine): string {
   const attachments =
     line.attachments
       ?.map((attachment) => {
-        const url = safeHttpsUrl(attachment.url);
+        const url = safeHttpsUrl(attachment.url) ?? safeInlineGeneratedImage(attachment.url);
         return url
           ? `<img class="public-chat-attachment" src="${escapeHtml(url)}" alt="${escapeHtml(attachment.alt ?? "Generated image")}" loading="lazy" referrerpolicy="no-referrer" />`
           : "";
       })
       .join("") ?? "";
   return `<article class="public-chat-line ${assistant ? "public-chat-assistant" : "public-chat-user"}"><div class="public-chat-line-avatar">${assistant ? icon("spark", 13) : "You"}</div><div class="public-chat-line-body"><b>${assistant ? escapeHtml(bot.name) : "You"}</b><p>${escapeHtml(line.content || (assistant ? "Thinking…" : ""))}</p>${attachments}</div></article>`;
+}
+
+function safeInlineGeneratedImage(value: string): string | undefined {
+  if (value.length > 1_000_000 || !/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    return undefined;
+  }
+  return value;
 }
 
 function safeHttpsUrl(value: string): string | undefined {

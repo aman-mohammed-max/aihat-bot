@@ -529,6 +529,8 @@ export interface SecretStore {
 
 export interface SecretWriter {
   put(tenantId: TenantId, plaintext: string): Promise<string>;
+  /** Stores bounded non-credential payloads such as generated image attachments. */
+  putLarge?(tenantId: TenantId, plaintext: string): Promise<string>;
   delete(tenantId: TenantId, reference: string): Promise<void>;
 }
 

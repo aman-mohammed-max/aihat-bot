@@ -31,6 +31,7 @@ describe("public web chat views", () => {
           content: "Here is the result.",
           attachments: [
             { kind: "image", url: "https://images.example.test/generated.png", alt: "A picture" },
+            { kind: "image", url: "data:image/png;base64,iVBORw0KGgo=", alt: "An inline picture" },
             { kind: "image", url: "javascript:alert(1)", alt: "Unsafe" },
           ],
         },
@@ -39,6 +40,7 @@ describe("public web chat views", () => {
 
     expect(html).toContain("Hello &lt;img src=x&gt;");
     expect(html).toContain('src="https://images.example.test/generated.png"');
+    expect(html).toContain('src="data:image/png;base64,iVBORw0KGgo="');
     expect(html).toContain('referrerpolicy="no-referrer"');
     expect(html).not.toContain("javascript:");
     expect(html).toContain('id="public-chat-form"');

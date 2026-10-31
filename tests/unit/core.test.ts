@@ -1201,6 +1201,10 @@ describe("encrypted credential storage", () => {
     expect(record).toBeDefined();
     expect(JSON.stringify(record)).not.toContain(plaintext);
     expect(await secretStore.resolve(tenantId, reference)).toBe(plaintext);
+    const imagePayload = `data:image/png;base64,${"A".repeat(100_000)}`;
+    const imageReference = await secretStore.putLarge(tenantId, imagePayload);
+    expect(await secretStore.resolve(tenantId, imageReference)).toBe(imagePayload);
+    await expect(secretStore.put(tenantId, imagePayload)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(secretStore.resolve("tenant-b" as TenantId, reference)).rejects.toMatchObject({ code: "NOT_FOUND" });
 
     if (!record) throw new Error("expected encrypted secret record");

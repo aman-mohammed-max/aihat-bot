@@ -109,7 +109,23 @@ describe("configured image and search model tools", () => {
     expect(fetchCount).toBe(0);
   });
 
-  test("reports when the configured image provider returns inline data instead of a delivery URL", async () => {
+  test("returns bounded inline image data as a response attachment", async () => {
+    const registry = new ProviderCapabilityTools({
+      bots: { get: async () => bot, saveDraft: async () => {} },
+      secrets: { resolve: async () => "model-secret" },
+      allowedOrigins: new Set(["https://provider.example.test"]),
+      fetch: async () => Response.json({ data: [{ b64_json: "iVBORw0KGgo=" }] }),
+    });
+
+    const result = await registry.execute(context, "generate_image", { prompt: "A blue bot" });
+    expect(result).toEqual({ status: "generated", model: "image-model" });
+    expect(getToolAttachments(result)).toEqual([
+      { kind: "image", url: "data:image/png;base64,iVBORw0KGgo=", alt: "A blue bot" },
+    ]);
+    expect(JSON.stringify(result)).not.toContain("iVBORw0KGgo=");
+  });
+
+  test("rejects inline image data without supported image magic", async () => {
     const registry = new ProviderCapabilityTools({
       bots: { get: async () => bot, saveDraft: async () => {} },
       secrets: { resolve: async () => "model-secret" },
@@ -118,8 +134,8 @@ describe("configured image and search model tools", () => {
     });
 
     await expect(registry.execute(context, "generate_image", { prompt: "A blue bot" })).rejects.toMatchObject({
-      code: "UNSUPPORTED_CAPABILITY",
-      status: 501,
+      code: "DEPENDENCY_UNAVAILABLE",
+      status: 502,
     });
   });
 });

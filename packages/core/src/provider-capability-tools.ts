@@ -1,4 +1,5 @@
 import { AppError } from "./errors.js";
+import { decodeGeneratedImageBase64, decodeGeneratedImageDataUrl } from "./image-data.js";
 import type { BotRepository, SecretStore } from "./ports.js";
 import { withToolAttachments, type AgentToolRegistry, type ToolContext } from "./tools.js";
 import type { BotDefinition, ModelToolDefinition } from "./types.js";
@@ -79,20 +80,39 @@ export class ProviderCapabilityTools implements AgentToolRegistry {
         size: "1024x1024",
       });
       const image = firstItem(payload, ["data", "images"]);
-      const imageUrl = image && firstString(image, ["url", "image_url"]);
+      const imageUrl = image && firstBoundedString(image, ["data_url", "url", "image_url"], MAX_RESPONSE_BYTES);
+      if (imageUrl?.startsWith("data:")) {
+        const decoded = decodeGeneratedImageDataUrl(imageUrl);
+        if (!decoded) {
+          throw new AppError("DEPENDENCY_UNAVAILABLE", "Image provider returned invalid inline image data.", 502);
+        }
+        return withToolAttachments({ status: "generated", model: bot.model.imageModel }, [
+          { kind: "image", url: decoded.dataUrl, alt: prompt.slice(0, 240) },
+        ]);
+      }
       if (imageUrl) {
         return withToolAttachments({ status: "generated", model: bot.model.imageModel }, [
           { kind: "image", url: validateHttpsResultUrl(imageUrl), alt: prompt.slice(0, 240) },
         ]);
       }
-      if (image && firstString(image, ["b64_json", "base64"])) {
+      const imageBase64 = image && firstBoundedString(image, ["b64_json", "base64"], MAX_RESPONSE_BYTES);
+      if (imageBase64) {
+        const decoded = decodeGeneratedImageBase64(imageBase64);
+        if (!decoded) {
+          throw new AppError("DEPENDENCY_UNAVAILABLE", "Image provider returned invalid inline image data.", 502);
+        }
+        return withToolAttachments({ status: "generated", model: bot.model.imageModel }, [
+          { kind: "image", url: decoded.dataUrl, alt: prompt.slice(0, 240) },
+        ]);
+      }
+      if (image && ("b64_json" in image || "base64" in image)) {
         throw new AppError(
-          "UNSUPPORTED_CAPABILITY",
-          "The image provider returned inline image data; this delivery channel requires URL-form image output.",
-          501,
+          "DEPENDENCY_UNAVAILABLE",
+          "Image provider returned inline image data outside the supported size limit.",
+          502,
         );
       }
-      throw new AppError("DEPENDENCY_UNAVAILABLE", "The image provider did not return an image URL.", 502);
+      throw new AppError("DEPENDENCY_UNAVAILABLE", "The image provider did not return a supported image.", 502);
     }
     if (name === SEARCH_TOOL.name) {
       if (!bot.model.searchModel) {
@@ -238,6 +258,19 @@ function firstItem(value: unknown, arrayFields: readonly string[]): Record<strin
 function firstString(value: Record<string, unknown>, fields: readonly string[]): string | undefined {
   for (const field of fields) {
     if (typeof value[field] === "string" && (value[field] as string).length <= 10_000) {
+      return value[field] as string;
+    }
+  }
+  return undefined;
+}
+
+function firstBoundedString(
+  value: Record<string, unknown>,
+  fields: readonly string[],
+  maximum: number,
+): string | undefined {
+  for (const field of fields) {
+    if (typeof value[field] === "string" && (value[field] as string).length <= maximum) {
       return value[field] as string;
     }
   }
