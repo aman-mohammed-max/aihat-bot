@@ -408,7 +408,7 @@ export class TelegramManager {
       !message.voice
     ) {
       return {
-        text: "I can read photos, small text files, PDF or DOCX documents, and audio when a transcription model is configured.",
+        text: "Video, animation, video-note, and sticker attachments aren’t supported yet. I can read photos, small text files, PDF and DOCX documents, and audio when transcription is configured. Scanned PDFs need OCR, which isn’t available yet.",
       };
     }
     const thread = Number.isSafeInteger(message.message_thread_id) ? String(message.message_thread_id) : "0";

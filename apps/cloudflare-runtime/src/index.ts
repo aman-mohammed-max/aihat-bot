@@ -5,6 +5,7 @@ import { CloudflareConversationAgentEngine } from "./conversation-agent-engine.j
 import { CloudflareAlarmScheduler } from "./scheduler.js";
 import { CloudflareR2ObjectStore } from "./r2-object-store.js";
 import { CloudflareD1UploadedFileRepository } from "./uploaded-file-repository.js";
+import { runtimeCapabilities } from "./capabilities.js";
 import {
   ApiTokenAuthenticator,
   BotFactory,
@@ -67,41 +68,9 @@ import {
 } from "@aihat/core";
 
 export { BotCoordinator, ConversationCoordinator };
+export { runtimeCapabilities } from "./capabilities.js";
 
 const nativeSkills = createDefaultNativeSkillRegistry();
-
-export const runtimeCapabilities = {
-  runtime: "cloudflare",
-  features: {
-    sharedAgentEngine: true,
-    databasePersistence: true,
-    durableObjectSqlite: true,
-    durableConversationCoordination: true,
-    durableObjectAlarms: true,
-    queueEnqueue: true,
-    queueProcessing: true,
-    objectStorage: true,
-    uploadedFileManagement: true,
-    fileMalwareScanning: false,
-    encryptedSecrets: true,
-    authentication: true,
-    networkAbuseProtection: true,
-    longTermMemory: true,
-    promptSkills: true,
-    httpSkills: true,
-    workflowSkills: true,
-    nativeSkills: true,
-    modelStreaming: false,
-    modelStructuredOutput: false,
-    telegram: true,
-    telegramMasterBot: false,
-    telegramAudioTranscription: false,
-    mcp: true,
-    mcpOAuth: true,
-    mcpOAuthAuthorizationCode: true,
-    arbitraryCodeExecution: false,
-  },
-} as const;
 
 /** D1 repository adapter shared by authenticated request handlers. */
 export function repositories(env: Env): CloudflareD1Repositories {

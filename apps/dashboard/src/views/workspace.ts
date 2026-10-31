@@ -13,6 +13,21 @@ const scopeLabels: Record<ApiScope, string> = {
   "members:manage": "Manage workspace members and roles",
 };
 
+const capabilityNames: Readonly<Record<string, string>> = {
+  telegramVideoParsing: "Telegram video parsing",
+  scannedPdfOcr: "Scanned PDF OCR",
+};
+
+export function capabilityLabel(feature: string): string {
+  return (
+    capabilityNames[feature] ??
+    feature
+      .replaceAll(/([A-Z])/g, " $1")
+      .replaceAll("_", " ")
+      .replace(/^./, (letter) => letter.toUpperCase())
+  );
+}
+
 export function dashboardView(state: UiState): string {
   const published = state.bots.filter((bot) => bot.status === "published").length;
   const drafts = state.bots.filter((bot) => bot.status === "draft").length;
@@ -192,6 +207,10 @@ export function apiAccessView(state: UiState): string {
 export function securityView(state: UiState): string {
   const principal = state.principal;
   const featureRows = Object.entries(state.capabilities?.features ?? {});
+  const unsupportedAttachmentNotes = [
+    state.capabilities?.features.telegramVideoParsing === false ? "Telegram video parsing is not available." : "",
+    state.capabilities?.features.scannedPdfOcr === false ? "Scanned PDFs require OCR, which is not available." : "",
+  ].filter(Boolean);
   const miniAppUrl = `${location.origin}/miniapp/`;
   const memberScope = principal?.scopes.includes("members:manage") ?? false;
   const currentMember = state.tenantMembers.find((member) => member.userId === principal?.userId);
@@ -288,7 +307,7 @@ export function securityView(state: UiState): string {
     <section class="panel member-panel field-wide"><div class="panel-heading"><div><div class="eyebrow">BOT OWNERSHIP</div><h2>Accept a bot transfer</h2><p class="panel-subtitle">The token is tied to your account and this workspace. You will own the bot only after you confirm acceptance.</p></div></div><form id="bot-transfer-accept-form" class="member-add-form"><label class="field"><span>One-time transfer token</span><input name="token" required maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="ahf_transfer_…" /></label><button class="button button-primary" type="submit">Review and accept</button></form></section>
     <section class="panel member-panel field-wide"><div class="panel-heading"><div><div class="eyebrow">WORKSPACE ACCESS</div><h2>Members and roles</h2><p class="panel-subtitle">Owners can add existing accounts, invite people, assign roles, and revoke workspace access.</p></div><span class="quiet-badge">${state.tenantMembers.length} members</span></div>${memberManagement}${invitationManagement}</section>
     <section class="panel audit-panel field-wide"><div class="panel-heading"><div><div class="eyebrow">SECURITY HISTORY</div><h2>Recent security events</h2><p class="panel-subtitle">API writes and bot, skill, and MCP access decisions. Message contents and Telegram user IDs are not stored.</p></div><span class="quiet-badge">${state.auditLogs.length} recent</span></div><ul class="audit-activity-list">${auditRows}</ul></section>
-    <section class="panel capability-panel field-wide"><div class="panel-heading"><div><div class="eyebrow">RUNTIME CAPABILITIES</div><h2>${escapeHtml(state.capabilities?.runtime ?? "Unknown")} environment</h2></div><span class="quiet-badge">${featureRows.filter(([, enabled]) => enabled).length} enabled</span></div><div class="capability-grid">${featureRows.map(([feature, enabled]) => `<div class="capability-item"><span class="capability-check ${enabled ? "on" : "off"}">${icon(enabled ? "check" : "close", 13)}</span><span>${escapeHtml(feature.replaceAll(/([A-Z])/g, " $1").replaceAll("_", " "))}</span></div>`).join("")}</div><p class="field-hint">Capabilities describe the runtime adapter. They do not indicate that external credentials, allowlists, or Cloudflare resources have been provisioned.</p></section></div>`;
+    <section class="panel capability-panel field-wide"><div class="panel-heading"><div><div class="eyebrow">RUNTIME CAPABILITIES</div><h2>${escapeHtml(state.capabilities?.runtime ?? "Unknown")} environment</h2></div><span class="quiet-badge">${featureRows.filter(([, enabled]) => enabled).length} enabled</span></div><div class="capability-grid">${featureRows.map(([feature, enabled]) => `<div class="capability-item"><span class="capability-check ${enabled ? "on" : "off"}" role="img" aria-label="${enabled ? "Available" : "Unavailable"}">${icon(enabled ? "check" : "close", 13)}</span><span>${escapeHtml(capabilityLabel(feature))}</span></div>`).join("")}</div><p class="field-hint">Capabilities describe the runtime adapter. They do not indicate that external credentials, allowlists, or Cloudflare resources have been provisioned.</p>${unsupportedAttachmentNotes.length ? `<p class="field-hint">${unsupportedAttachmentNotes.join(" ")}</p>` : ""}</section></div>`;
 }
 
 export function skillCard(skill: Skill, botId: string): string {

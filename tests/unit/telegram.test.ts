@@ -687,6 +687,33 @@ describe("Telegram webhook integration", () => {
       expect(duplicateImage?.status).toBe(200);
       expect(sentPhotos).toHaveLength(1);
 
+      const videoCallsBefore = calls.length;
+      const agentCallsBeforeVideo = engineCalls.length;
+      const videoResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9051,
+            message: {
+              video: { file_id: "video-file", mime_type: "video/mp4", file_size: 128 },
+              chat: { id: -10012345 },
+              from: { id: 54321, is_bot: false },
+            },
+          }),
+        }),
+      );
+      expect(videoResponse?.status).toBe(200);
+      expect(sentMessages.at(-1)?.text).toContain(
+        "Video, animation, video-note, and sticker attachments aren’t supported yet.",
+      );
+      expect(sentMessages.at(-1)?.text).toContain("Scanned PDFs need OCR, which isn’t available yet.");
+      expect(engineCalls).toHaveLength(agentCallsBeforeVideo);
+      expect(calls.slice(videoCallsBefore)).not.toContain("getFile");
+
       const usage = db
         .query<{ actor_hash: string }, [string]>(
           "SELECT actor_hash FROM telegram_customer_request_usage WHERE deployment_id = ?",
