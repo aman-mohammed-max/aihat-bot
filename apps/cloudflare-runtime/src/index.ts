@@ -39,6 +39,7 @@ import {
   createMemoryAwareAgentEngine,
   createEncryptedMemoryService,
   UploadedFilesService,
+  UploadedDocumentTools,
   createUploadedFilesApiHandler,
   createOptionalHttpMalwareScanner,
   ScheduledTaskService,
@@ -241,6 +242,7 @@ export default {
       tools: new DurableToolRegistry({
         registry: new CombinedToolRegistry([
           new ProviderCapabilityTools({ bots: d1, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),
+          new UploadedDocumentTools({ bots: d1, files: uploadedFilesService }),
           new SkillEngine({
             skills: d1.skills,
             rateLimiter: d1.skillRateLimiter,
@@ -389,6 +391,12 @@ export default {
 
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     const d1 = repositories(env);
+    const uploadedFilesService = new UploadedFilesService({
+      bots: d1,
+      files: new CloudflareD1UploadedFileRepository(env.DB),
+      objects: objectStore(env),
+      runtime: "cloudflare",
+    });
     const runtimeConfig = runtimeConfigFromEnv(env);
     const runtimeLogger = createRuntimeLogger();
     const secrets = new EncryptedSecretStore(
@@ -432,6 +440,7 @@ export default {
       tools: new DurableToolRegistry({
         registry: new CombinedToolRegistry([
           new ProviderCapabilityTools({ bots: d1, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),
+          new UploadedDocumentTools({ bots: d1, files: uploadedFilesService }),
           new SkillEngine({
             skills: d1.skills,
             rateLimiter: d1.skillRateLimiter,

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { AppError } from "../../packages/core/src/errors.js";
+import { DOCX_CONTENT_TYPE } from "../../packages/core/src/document-extraction.js";
+import { UploadedDocumentTools } from "../../packages/core/src/uploaded-document-tools.js";
 import { HttpMalwareScanner, createOptionalHttpMalwareScanner } from "../../packages/core/src/file-scanner.js";
 import type { ApiTokenAuthenticator } from "../../packages/core/src/api-auth.js";
 import { UploadedFilesService } from "../../packages/core/src/uploaded-files.js";
@@ -12,6 +14,8 @@ import type {
   UploadedFileRepository,
 } from "../../packages/core/src/ports.js";
 import type { BotId, TenantId, UploadedFile, UserId } from "../../packages/core/src/types.js";
+import type { ToolContext } from "../../packages/core/src/tools.js";
+import { createDocx } from "../helpers/document-fixtures.js";
 
 const tenantId = "tenant-files" as TenantId;
 const ownerId = "user-files" as UserId;
@@ -20,6 +24,116 @@ const botId = "bot_00000000-0000-4000-8000-000000000001" as BotId;
 const text = new TextEncoder().encode("hello file");
 
 describe("uploaded files", () => {
+  test("lets only the owner read bounded, malware-clean dashboard documents in API chats", async () => {
+    const fixture = createFixture();
+    const bots = createBots();
+    const service = createService(fixture, { scan: async () => ({ verdict: "clean", scanner: "test-scanner" }) }, bots);
+    const pdfText = "A safe uploaded reference.";
+    const file = await service.upload({
+      tenantId,
+      ownerId,
+      botId,
+      fileName: "reference.txt",
+      contentType: "text/plain",
+      bytes: new TextEncoder().encode(pdfText),
+    });
+    const docx = createDocx("<w:document><w:body><w:p><w:r><w:t>DOCX handbook</w:t></w:r></w:p></w:body></w:document>");
+    const wordFile = await service.upload({
+      tenantId,
+      ownerId,
+      botId,
+      fileName: "handbook.docx",
+      contentType: DOCX_CONTENT_TYPE,
+      bytes: docx,
+    });
+    const large = await service.upload({
+      tenantId,
+      ownerId,
+      botId,
+      fileName: "long.txt",
+      contentType: "text/plain",
+      bytes: new TextEncoder().encode("x".repeat(20_000)),
+    });
+    const unicode = await service.upload({
+      tenantId,
+      ownerId,
+      botId,
+      fileName: "unicode.txt",
+      contentType: "text/plain",
+      bytes: new TextEncoder().encode("世".repeat(11_000)),
+    });
+    for (let index = 0; index < 10; index += 1) {
+      await service.upload({
+        tenantId,
+        ownerId,
+        botId,
+        fileName: `extra-${index}.txt`,
+        contentType: "text/plain",
+        bytes: new TextEncoder().encode("extra reference"),
+      });
+    }
+    const tools = new UploadedDocumentTools({ bots, files: service });
+    const ownerContext = { tenantId, botId, actorId: ownerId, platform: "api" } as ToolContext;
+
+    expect((await tools.available(ownerContext)).map((tool) => tool.name)).toEqual([
+      "list_bot_documents",
+      "read_bot_document",
+    ]);
+    const listed = (await tools.execute(ownerContext, "list_bot_documents", {})) as {
+      documents: Array<{ id: string; scanStatus: string }>;
+      total: number;
+      nextOffset?: number;
+    };
+    expect(listed.documents).toHaveLength(12);
+    expect(listed).toMatchObject({ total: 14, nextOffset: 12 });
+    expect(listed.documents.every((item) => item.scanStatus === "clean")).toBe(true);
+    const lastPage = (await tools.execute(ownerContext, "list_bot_documents", { offset: 12 })) as {
+      documents: Array<{ id: string }>;
+      total: number;
+      nextOffset?: number;
+    };
+    expect(lastPage.total).toBe(14);
+    expect(lastPage.documents).toHaveLength(2);
+    expect(lastPage.nextOffset).toBeUndefined();
+
+    const read = (await tools.execute(ownerContext, "read_bot_document", { fileId: file.id })) as {
+      content: string;
+      untrustedReferenceData: boolean;
+    };
+    expect(read).toMatchObject({ content: pdfText, untrustedReferenceData: true });
+    const readWord = (await tools.execute(ownerContext, "read_bot_document", { fileId: wordFile.id })) as {
+      content: string;
+    };
+    expect(readWord.content).toContain("DOCX handbook");
+    const readLarge = (await tools.execute(ownerContext, "read_bot_document", { fileId: large.id })) as {
+      content: string;
+    };
+    expect(readLarge.content).toContain("truncated at the safe context limit");
+    expect(new TextEncoder().encode(JSON.stringify(readLarge)).byteLength).toBeLessThan(16_384);
+    const readUnicode = (await tools.execute(ownerContext, "read_bot_document", { fileId: unicode.id })) as {
+      content: string;
+    };
+    expect(readUnicode.content).toContain("世");
+    expect(readUnicode.content).toContain("truncated at the safe context limit");
+    expect((await tools.promptInstructions(ownerContext)).join("\n")).toContain("untrusted reference data");
+
+    const publicContext = { ...ownerContext, includeOwnerMemory: false };
+    expect(await tools.available(publicContext)).toEqual([]);
+    expect(await tools.available({ ...ownerContext, platform: "telegram" })).toEqual([]);
+    expect(await tools.available({ ...ownerContext, actorId: otherOwnerId })).toEqual([]);
+    await expect(tools.execute(publicContext, "read_bot_document", { fileId: file.id })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    await expect(
+      tools.execute(ownerContext, "read_bot_document", { fileId: wordFile.id, other: true }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+    await expect(tools.execute(ownerContext, "list_bot_documents", { offset: 100 })).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+  });
+
   test("accepts bounded UTF-8 structured text formats with matching extensions and media types", async () => {
     const fixture = createFixture();
     const service = createService(fixture);
@@ -321,11 +435,14 @@ function createFixture(): Fixture {
   return { repository, objects: store };
 }
 
-function createService(fixture: Fixture, scanner?: MalwareScanner): UploadedFilesService {
-  const bots = {
+function createBots(): BotRepository {
+  return {
     get: async (tenant: TenantId, id: BotId) =>
       tenant === tenantId && id === botId ? ({ id, tenantId, ownerId } as never) : undefined,
   } as unknown as BotRepository;
+}
+
+function createService(fixture: Fixture, scanner?: MalwareScanner, bots = createBots()): UploadedFilesService {
   return new UploadedFilesService({
     bots,
     files: fixture.repository,

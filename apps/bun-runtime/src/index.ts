@@ -39,6 +39,7 @@ import {
   createMemoryAwareAgentEngine,
   createEncryptedMemoryService,
   UploadedFilesService,
+  UploadedDocumentTools,
   createUploadedFilesApiHandler,
   createOptionalHttpMalwareScanner,
   ScheduledTaskService,
@@ -143,6 +144,7 @@ const baseAgentEngine = createOpenAICompatibleAgentEngine({
   tools: new DurableToolRegistry({
     registry: new CombinedToolRegistry([
       new ProviderCapabilityTools({ bots: repositories, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),
+      new UploadedDocumentTools({ bots: repositories, files: uploadedFilesService }),
       new SkillEngine({
         skills: repositories.skills,
         rateLimiter: repositories.skillRateLimiter,

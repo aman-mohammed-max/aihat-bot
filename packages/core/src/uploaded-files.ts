@@ -12,6 +12,7 @@ const SUPPORTED_CONTENT_TYPES = new Set([
   "image/png",
   "image/webp",
   "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "text/plain",
   "text/markdown",
   "text/csv",
@@ -259,6 +260,7 @@ function validateExtension(fileName: string, contentType: string): void {
     png: "image/png",
     webp: "image/webp",
     pdf: "application/pdf",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     txt: "text/plain",
     md: "text/markdown",
     markdown: "text/markdown",
@@ -293,6 +295,8 @@ export function validateFileBytes(contentType: string, bytes: Uint8Array): void 
       bytes[10] === 0x42 &&
       bytes[11] === 0x50) ||
     (contentType === "application/pdf" && starts(0x25, 0x50, 0x44, 0x46, 0x2d)) ||
+    (contentType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" &&
+      starts(0x50, 0x4b, 0x03, 0x04)) ||
     (TEXT_CONTENT_TYPES.has(contentType) && isUtf8Text(bytes));
   if (!isValid) throw new AppError("VALIDATION_ERROR", "File bytes do not match the declared file type.", 415);
 }

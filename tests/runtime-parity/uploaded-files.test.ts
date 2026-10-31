@@ -1,11 +1,74 @@
 import { describe, expect, test } from "bun:test";
 import { openSqliteDatabase } from "../../apps/bun-runtime/src/migrations.js";
+import { BunSqliteRepositories } from "../../apps/bun-runtime/src/sqlite-store.js";
 import { BunSqliteUploadedFileRepository } from "../../apps/bun-runtime/src/uploaded-file-repository.js";
+import { CloudflareD1Repositories } from "../../apps/cloudflare-runtime/src/d1-repositories.js";
 import { CloudflareD1UploadedFileRepository } from "../../apps/cloudflare-runtime/src/uploaded-file-repository.js";
-import type { UploadedFile } from "../../packages/core/src/types.js";
+import { UploadedDocumentTools } from "../../packages/core/src/uploaded-document-tools.js";
+import { UploadedFilesService } from "../../packages/core/src/uploaded-files.js";
+import type { ObjectStore, StoredObject } from "../../packages/core/src/ports.js";
+import type { BotId, TenantId, UploadedFile, UserId } from "../../packages/core/src/types.js";
 import { SqliteD1 } from "../helpers/sqlite-d1.js";
 
 describe("uploaded file metadata runtime parity", () => {
+  test("Bun and Cloudflare agent tools expose the same owner-scoped clean document content", async () => {
+    const bunDb = openSqliteDatabase(":memory:");
+    const d1Db = openSqliteDatabase(":memory:");
+    const tenantId = "tenant-document-parity" as TenantId;
+    const ownerId = "user-document-parity" as UserId;
+    const botId = "bot_00000000-0000-4000-8000-000000000001" as BotId;
+    const now = "2026-10-31T00:00:00.000Z";
+    try {
+      seed(bunDb, tenantId, ownerId, botId, now);
+      seed(d1Db, tenantId, ownerId, botId, now);
+      const bunRepositories = new BunSqliteRepositories(bunDb);
+      const d1 = new SqliteD1(d1Db) as unknown as D1Database;
+      const cloudflareRepositories = new CloudflareD1Repositories(d1);
+      const bunService = new UploadedFilesService({
+        bots: bunRepositories,
+        files: new BunSqliteUploadedFileRepository(bunDb),
+        objects: createMemoryObjectStore(),
+        scanner: { scan: async () => ({ verdict: "clean", scanner: "test-scanner" }) },
+        runtime: "bun",
+      });
+      const cloudflareService = new UploadedFilesService({
+        bots: cloudflareRepositories,
+        files: new CloudflareD1UploadedFileRepository(d1),
+        objects: createMemoryObjectStore(),
+        scanner: { scan: async () => ({ verdict: "clean", scanner: "test-scanner" }) },
+        runtime: "cloudflare",
+      });
+      const content = "Shared owner knowledge for both runtimes.";
+      const upload = {
+        tenantId,
+        ownerId,
+        botId,
+        fileName: "notes.txt",
+        contentType: "text/plain",
+        bytes: new TextEncoder().encode(content),
+      };
+      const [bunFile, d1File] = await Promise.all([bunService.upload(upload), cloudflareService.upload(upload)]);
+      const bunTools = new UploadedDocumentTools({ bots: bunRepositories, files: bunService });
+      const d1Tools = new UploadedDocumentTools({ bots: cloudflareRepositories, files: cloudflareService });
+      const context = { tenantId, botId, actorId: ownerId, platform: "api" as const };
+      expect(await d1Tools.available(context)).toEqual(await bunTools.available(context));
+      const [bunList, d1List] = await Promise.all([
+        bunTools.execute(context, "list_bot_documents", {}),
+        d1Tools.execute(context, "list_bot_documents", {}),
+      ]);
+      expect(normalizeListedDocuments(d1List)).toEqual(normalizeListedDocuments(bunList));
+      const [bunContent, d1Content] = await Promise.all([
+        bunTools.execute(context, "read_bot_document", { fileId: bunFile.id }),
+        d1Tools.execute(context, "read_bot_document", { fileId: d1File.id }),
+      ]);
+      expect(d1Content).toEqual(bunContent);
+      expect(d1Content).toMatchObject({ content, untrustedReferenceData: true });
+    } finally {
+      bunDb.close();
+      d1Db.close();
+    }
+  });
+
   test("Bun SQLite and D1 implement owner-scoped create, scan, list, usage, and delete consistently", async () => {
     const bunDb = openSqliteDatabase(":memory:");
     const d1Db = openSqliteDatabase(":memory:");
@@ -138,6 +201,47 @@ describe("uploaded file metadata runtime parity", () => {
   });
 });
 
+function createMemoryObjectStore(): ObjectStore {
+  const objects = new Map<string, StoredObject>();
+  const key = (tenantId: TenantId, objectId: string) => `${tenantId}:${objectId}`;
+  const store: ObjectStore = {
+    put: async ({ tenantId, objectId, contentType, bytes }) => {
+      const object: StoredObject = {
+        tenantId,
+        objectId,
+        contentType,
+        size: bytes.byteLength,
+        etag: `etag-${crypto.randomUUID()}`,
+        createdAt: new Date().toISOString(),
+        bytes: bytes.slice(),
+      };
+      objects.set(key(tenantId, objectId), object);
+      return object;
+    },
+    get: async (tenantId, objectId) => objects.get(key(tenantId, objectId)),
+    putStream: async ({ tenantId, objectId, contentType, body }) => {
+      const bytes = new Uint8Array(await new Response(body).arrayBuffer());
+      return store.put({ tenantId, objectId, contentType, bytes });
+    },
+    getStream: async (tenantId, objectId) => {
+      const object = objects.get(key(tenantId, objectId));
+      return object ? { ...object, body: new Blob([object.bytes.slice().buffer as ArrayBuffer]).stream() } : undefined;
+    },
+    delete: async (tenantId, objectId) => void objects.delete(key(tenantId, objectId)),
+  };
+  return store;
+}
+
+function normalizeListedDocuments(value: unknown): unknown {
+  if (!value || typeof value !== "object" || !("documents" in value) || !Array.isArray(value.documents)) return value;
+  return {
+    documents: value.documents.map((entry: Record<string, unknown>) => {
+      const { id: _id, ...document } = entry;
+      return document;
+    }),
+  };
+}
+
 function seed(
   db: ReturnType<typeof openSqliteDatabase>,
   tenantId: string,
@@ -163,6 +267,14 @@ function seed(
     tenantId,
     ownerId,
     now,
+    now,
+  );
+  db.query(`INSERT INTO bot_versions (bot_id, tenant_id, version, configuration_json, created_by, created_at)
+    VALUES (?, ?, 1, ?, ?, ?)`).run(
+    botId,
+    tenantId,
+    JSON.stringify({ systemPrompt: "You are a file parity test bot.", model: { providerId: "test", model: "test" } }),
+    ownerId,
     now,
   );
 }
