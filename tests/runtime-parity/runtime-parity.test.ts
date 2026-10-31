@@ -33,6 +33,131 @@ const weatherEndpoint = "https://weather.example.test/lookup";
 const mcpEndpoint = "https://mcp.example.test/mcp";
 
 describe("Bun and Cloudflare runtime repository parity", () => {
+  test("keeps a privately listed bot unlisted while allowing explicitly granted users to run it", async () => {
+    const bunDatabase = openSqliteDatabase(":memory:");
+    const cloudflareDatabase = openSqliteDatabase(":memory:");
+    const bunRepositories = new BunSqliteRepositories(bunDatabase);
+    const cloudflareRepositories = new CloudflareD1Repositories(
+      new SqliteD1(cloudflareDatabase) as unknown as D1Database,
+    );
+    const inviteeTenantId = `ten_${"p".repeat(32)}` as TenantId;
+    const inviteeId = `usr_${"p".repeat(32)}` as UserId;
+    try {
+      seedTenant(bunDatabase);
+      seedTenant(cloudflareDatabase);
+      await Promise.all([
+        bunRepositories.telegramAuth.getOrCreateOwner({
+          telegramUserId: 712345681,
+          ownerId: inviteeId,
+          tenantId: inviteeTenantId,
+          workspaceName: "Private access invitee",
+          now: createdAt,
+        }),
+        cloudflareRepositories.telegramAuth.getOrCreateOwner({
+          telegramUserId: 712345681,
+          ownerId: inviteeId,
+          tenantId: inviteeTenantId,
+          workspaceName: "Private access invitee",
+          now: createdAt,
+        }),
+      ]);
+      const input = {
+        tenantId,
+        ownerId,
+        idempotencyKey: "private-direct-share",
+        answers: { ...creationAnswers(), visibility: "private" as const },
+      };
+      const [bunBotId, cloudflareBotId] = await Promise.all([
+        bunRepositories.createDraft(input),
+        cloudflareRepositories.createDraft(input),
+      ]);
+      await Promise.all([
+        bunRepositories.publish({ tenantId, ownerId, botId: bunBotId, idempotencyKey: "private-share-publish" }),
+        cloudflareRepositories.publish({
+          tenantId,
+          ownerId,
+          botId: cloudflareBotId,
+          idempotencyKey: "private-share-publish",
+        }),
+      ]);
+      expect(
+        await Promise.all([
+          bunRepositories.getSharedBot({ botId: bunBotId, userId: inviteeId, now: createdAt }),
+          cloudflareRepositories.getSharedBot({ botId: cloudflareBotId, userId: inviteeId, now: createdAt }),
+        ]),
+      ).toEqual([undefined, undefined]);
+      const [bunGrant, cloudflareGrant] = await Promise.all([
+        bunRepositories.createOwnedAccessGrant({
+          tenantId,
+          ownerId,
+          botId: bunBotId,
+          userId: inviteeId,
+          now: createdAt,
+        }),
+        cloudflareRepositories.createOwnedAccessGrant({
+          tenantId,
+          ownerId,
+          botId: cloudflareBotId,
+          userId: inviteeId,
+          now: createdAt,
+        }),
+      ]);
+      expect(cloudflareGrant).toMatchObject({
+        botId: cloudflareBotId,
+        userId: inviteeId,
+        accessLevel: bunGrant.accessLevel,
+      });
+      const [bunSharedBot, cloudflareSharedBot] = await Promise.all([
+        bunRepositories.getSharedBot({ botId: bunBotId, userId: inviteeId, now: createdAt }),
+        cloudflareRepositories.getSharedBot({ botId: cloudflareBotId, userId: inviteeId, now: createdAt }),
+      ]);
+      expect(bunSharedBot).toMatchObject({ id: bunBotId, visibility: "private" });
+      expect(cloudflareSharedBot).toMatchObject({ id: cloudflareBotId, visibility: "private" });
+      const [bunDecision, cloudflareDecision] = await Promise.all([
+        bunRepositories.consumeBotUse({ botId: bunBotId, userId: inviteeId, accessMode: "shared", now: createdAt }),
+        cloudflareRepositories.consumeBotUse({
+          botId: cloudflareBotId,
+          userId: inviteeId,
+          accessMode: "shared",
+          now: createdAt,
+        }),
+      ]);
+      expect(bunDecision).toBe("allowed");
+      expect(cloudflareDecision).toBe(bunDecision);
+      expect(await bunRepositories.listPublicBots({ limit: 10 })).toEqual([]);
+      expect(await cloudflareRepositories.listPublicBots({ limit: 10 })).toEqual([]);
+      await Promise.all([
+        bunRepositories.revokeOwnedAccessGrant({ tenantId, ownerId, botId: bunBotId, grantId: bunGrant.id }),
+        cloudflareRepositories.revokeOwnedAccessGrant({
+          tenantId,
+          ownerId,
+          botId: cloudflareBotId,
+          grantId: cloudflareGrant.id,
+        }),
+      ]);
+      expect(
+        await Promise.all([
+          bunRepositories.getSharedBot({ botId: bunBotId, userId: inviteeId, now: createdAt }),
+          cloudflareRepositories.getSharedBot({ botId: cloudflareBotId, userId: inviteeId, now: createdAt }),
+        ]),
+      ).toEqual([undefined, undefined]);
+      expect(
+        await Promise.all([
+          bunRepositories.consumeBotUse({ botId: bunBotId, userId: inviteeId, accessMode: "shared", now: createdAt }),
+          cloudflareRepositories.consumeBotUse({
+            botId: cloudflareBotId,
+            userId: inviteeId,
+            accessMode: "shared",
+            now: createdAt,
+          }),
+        ]),
+      ).toEqual(["forbidden", "forbidden"]);
+    } finally {
+      bunDatabase.close();
+      cloudflareDatabase.close();
+    }
+  });
+
   test("stores tenant skills and curates a globally shared catalog consistently", async () => {
     const bunDatabase = openSqliteDatabase(":memory:");
     const cloudflareDatabase = openSqliteDatabase(":memory:");

@@ -621,7 +621,7 @@ export class BunSqliteRepositories
                b.visibility, b.current_version, b.created_at, b.updated_at, v.configuration_json
         FROM bots AS b
         JOIN bot_versions AS v ON v.bot_id = b.id AND v.tenant_id = b.tenant_id AND v.version = b.current_version
-        WHERE b.id = ? AND b.status = 'published' AND b.visibility IN ('shared', 'invitation')
+        WHERE b.id = ? AND b.status = 'published' AND b.visibility IN ('private', 'shared', 'invitation')
           AND EXISTS (
             SELECT 1 FROM bot_access_grants AS g
             WHERE g.tenant_id = b.tenant_id AND g.bot_id = b.id AND g.user_id = ?
@@ -712,7 +712,9 @@ export class BunSqliteRepositories
       validateAccessLimits(input.dailyUsageLimit ?? 100, input.rateLimitPerMinute ?? 10);
     }
     const bot = this.requireOwnedAccessBot(input.tenantId, input.ownerId, input.botId);
-    if (bot.visibility === "private") throw new AppError("CONFLICT", "Private bots cannot grant outside access.", 409);
+    if (bot.visibility === "private" && !input.userId) {
+      throw new AppError("CONFLICT", "Private bots can only grant access directly to a named user.", 409);
+    }
     if (
       input.expiresAt !== undefined &&
       (!Number.isFinite(Date.parse(input.expiresAt)) || input.expiresAt <= input.now)
@@ -884,7 +886,7 @@ export class BunSqliteRepositories
                 SELECT 1 FROM bot_access_grants AS banned WHERE banned.tenant_id = b.tenant_id
                   AND banned.bot_id = b.id AND banned.user_id = ? AND banned.status = 'revoked'
               ))
-            OR (? = 'shared' AND b.visibility IN ('shared', 'invitation') AND g.id IS NOT NULL)
+            OR (? = 'shared' AND b.visibility IN ('private', 'shared', 'invitation') AND g.id IS NOT NULL)
           )
         `)
         .get(input.userId, input.now, input.botId, input.accessMode, input.userId, input.accessMode);

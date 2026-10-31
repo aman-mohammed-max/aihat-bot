@@ -51,6 +51,40 @@ const listing: PublicBotListing = {
 };
 
 describe("bot access API", () => {
+  test("allows direct grants on private bots without creating invitation links", async () => {
+    const token = await createApiTokenMaterial();
+    const privateBot = { ...sharedBot, ownerId, visibility: "private" as const };
+    let createdGrantInput: Parameters<BotAccessRepository["createOwnedAccessGrant"]>[0] | undefined;
+    const handler = createHandler({
+      getBot: async () => privateBot,
+      createGrant: async (grantInput) => {
+        createdGrantInput = grantInput;
+        return { ...baseGrant(), ...(grantInput.userId ? { userId: grantInput.userId } : {}) };
+      },
+    });
+    const endpoint = `https://app.example.test/v1/bots/${sharedBotId}/access/grants`;
+    const created = await handler(
+      new Request(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ userId: "target_user" }),
+      }),
+    );
+    expect(created?.status).toBe(201);
+    expect(await created?.json()).toMatchObject({ grant: { userId: "target_user" } });
+    expect(createdGrantInput).toMatchObject({ userId: "target_user" });
+    expect(createdGrantInput?.invitationTokenHash).toBeUndefined();
+
+    const invitation = await handler(
+      new Request(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(invitation?.status).toBe(409);
+  });
+
   test("serves safe public details and isolates owner memory for public runs", async () => {
     const token = await createApiTokenMaterial();
     let agentRequest: AgentRequest | undefined;
@@ -175,6 +209,7 @@ describe("bot access API", () => {
 function createHandler(
   overrides: {
     authenticate?: () => Promise<{ tenantId: TenantId; ownerId: UserId; tokenId: string; scopes: string[] }>;
+    getBot?: BotRepository["get"];
     respond?: AgentEngine["respond"];
     createGrant?: BotAccessRepository["createOwnedAccessGrant"];
     acceptInvitation?: BotAccessRepository["acceptBotInvitation"];
@@ -201,7 +236,9 @@ function createHandler(
     consumeBotUse: async () => "allowed" as const,
   } as unknown as BotAccessRepository;
   const bots = {
-    get: async (_tenantId: TenantId, botId: BotId) => (botId === sharedBotId ? sharedBot : publicBot),
+    get:
+      overrides.getBot ??
+      (async (_tenantId: TenantId, botId: BotId) => (botId === sharedBotId ? sharedBot : publicBot)),
     saveDraft: async () => {},
   } as BotRepository;
   const conversations = {
