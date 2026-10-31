@@ -81,7 +81,23 @@ The benchmark exercises the shared orchestration loop in-process at concurrency 
 
 The dashboard and Telegram Mini App are served at `/miniapp/` by both runtimes. Bun builds the dashboard before starting. For local browser work, open `http://127.0.0.1:3000/miniapp/` and sign in with an owner API token. A Telegram launch can sign in through validated `initData` when `TELEGRAM_MASTER_BOT_TOKEN` is configured; the legacy misspelling `TELEGRAME_BOT_TOKEN` is still accepted by Bun. The development master bot supports `/create [idea]` onboarding; for another environment, set `TELEGRAM_MASTER_WEBHOOK_SECRET` and `TELEGRAM_WEBHOOK_BASE_URL`, then register with `bun run telegram:register-master`. Model keys and wider-visibility confirmations are completed in the authenticated Mini App. Configure the public HTTPS Mini App URL in BotFather after deploying to that hostname. `AI Hat*.html` design exports are intentionally ignored by Git and Docker.
 
-The development Worker and Mini App are deployed at [https://aihat-bot-factory.work-fdc.workers.dev/miniapp/](https://aihat-bot-factory.work-fdc.workers.dev/miniapp/). Its D1 migrations, R2 bucket, Queue, and encryption secrets are configured. Add the Worker host as the Telegram bot's Mini App domain in BotFather. Staging and production still have placeholder D1 IDs and must be provisioned separately; the development URL is not a production deployment.
+The development Worker and Mini App are deployed at [https://aihat-bot-factory.work-fdc.workers.dev/miniapp/](https://aihat-bot-factory.work-fdc.workers.dev/miniapp/). Its D1 migrations, R2 bucket, Queue, and encryption secrets are configured. Add the Worker host as the Telegram bot's Mini App domain in BotFather. Staging and production are separate and are not deployments of the development Worker.
+
+## Provision staging or production Cloudflare resources
+
+From the repository root, inventory the account and print a dry-run plan:
+
+```sh
+bun run cloudflare:provision -- --env staging
+```
+
+After reviewing the named resources and confirming Wrangler is logged into the intended Cloudflare account, add `--apply` to create the environment's D1 database, R2 bucket, and Queue and apply its D1 migrations:
+
+```sh
+bun run cloudflare:provision -- --env staging --apply
+```
+
+Use `--env production` only when you are ready to create those production resources. The command updates the matching Wrangler D1/R2 bindings, leaves unrelated account resources alone, and never deploys the Worker or configures secrets. Review the updated `apps/cloudflare-runtime/wrangler.jsonc` and set nonsecret environment variables. Then deploy once with `bun run --cwd apps/cloudflare-runtime deploy:staging` or `deploy:production`; Wrangler requires the Worker to exist before `wrangler secret put` can configure its secrets. Add the required encryption keyring and integration secrets immediately after this first deployment and before enabling user sign-in or bot traffic. See the [Cloudflare runtime guide](apps/cloudflare-runtime/README.md#environments-and-local-checks).
 
 For operational fixes and common configuration failures, see the [troubleshooting guide](docs/troubleshooting.md).
 

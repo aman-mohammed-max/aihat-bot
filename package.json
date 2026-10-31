@@ -9,10 +9,10 @@
   "scripts": {
     "typecheck": "bun run typecheck:cloudflare && tsc --noEmit",
     "typecheck:cloudflare": "bun run --cwd apps/cloudflare-runtime typecheck",
-    "check": "bun run typecheck && biome lint packages apps tests",
-    "format": "biome format --write packages apps tests package.json tsconfig.json biome.json",
-    "format:check": "biome format packages apps tests package.json tsconfig.json biome.json",
-    "lint": "biome lint packages apps tests",
+    "check": "bun run typecheck && biome lint packages apps scripts tests",
+    "format": "biome format --write packages apps scripts tests package.json tsconfig.json biome.json",
+    "format:check": "biome format packages apps scripts tests package.json tsconfig.json biome.json",
+    "lint": "biome lint packages apps scripts tests",
     "test": "bun test",
     "benchmark": "bun tests/performance/agent-throughput.ts",
     "build:bun": "bun build packages/core/src/index.ts apps/bun-runtime/src/index.ts apps/bun-runtime/src/migrate.ts apps/bun-runtime/src/sqlite-store.ts apps/bun-runtime/src/file-object-store.ts apps/bun-runtime/src/capabilities.ts apps/bun-runtime/src/bootstrap.ts apps/bun-runtime/src/rotate-secrets.ts --target=bun --outdir dist",
@@ -26,7 +26,8 @@
     "rotate-secrets:cloudflare": "bun apps/cloudflare-runtime/src/rotate-secrets.ts",
     "bootstrap:bun": "bun apps/bun-runtime/src/bootstrap.ts",
     "dev:cloudflare": "bun run --cwd apps/cloudflare-runtime dev",
-    "telegram:register-master": "bun apps/bun-runtime/src/register-master-webhook.ts"
+    "telegram:register-master": "bun apps/bun-runtime/src/register-master-webhook.ts",
+    "cloudflare:provision": "bun scripts/provision-cloudflare-environment.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.4",
