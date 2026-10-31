@@ -1,4 +1,12 @@
 import { AppError } from "./errors.js";
+import {
+  DOCX_CONTENT_TYPE,
+  EXTRACTED_DOCUMENT_MAX_CHARS,
+  TELEGRAM_DOCUMENT_MAX_BYTES,
+  extractAgentDocumentText,
+  hasPdfSignature,
+  hasZipSignature,
+} from "./document-extraction.js";
 import type {
   AgentEngine,
   BotRepository,
@@ -360,7 +368,7 @@ export class TelegramManager {
     if (bot?.status !== "published") return { text: "" };
     if (message.unsupportedAttachment && !message.photo?.length && !message.document) {
       return {
-        text: "I can read photos and small text files such as TXT, Markdown, CSV, TSV, JSON, JSONL, XML, YAML, and logs.",
+        text: "I can read photos, small text files, and text-based PDF or DOCX documents.",
       };
     }
     const thread = Number.isSafeInteger(message.message_thread_id) ? String(message.message_thread_id) : "0";
@@ -377,6 +385,7 @@ export class TelegramManager {
     const token = await this.#secrets.resolve(deployment.tenantId, deployment.credentialRef);
     let userContent = (message.text ?? message.caption ?? "").slice(0, 10_000);
     let images: readonly { readonly dataUrl: string; readonly detail: "auto" }[] | undefined;
+    let containsUntrustedAttachments = false;
     if (message.photo?.length || message.document) {
       let attachment: { readonly image?: string; readonly text?: string; readonly unsupported?: string };
       try {
@@ -388,6 +397,7 @@ export class TelegramManager {
         throw cause;
       }
       if (attachment.unsupported) return { text: attachment.unsupported };
+      containsUntrustedAttachments = true;
       if (attachment.text) userContent = `${userContent}${userContent ? "\n\n" : ""}${attachment.text}`;
       if (attachment.image) {
         userContent = userContent || "Please describe this image.";
@@ -413,6 +423,7 @@ export class TelegramManager {
             telegramDeploymentId: deployment.id,
             telegramUserId: message.from.id,
           },
+          ...(containsUntrustedAttachments ? { containsUntrustedAttachments: true } : {}),
           messages: [{ role: "user", content: userContent, ...(images ? { images } : {}) }],
         });
         return {
@@ -445,10 +456,11 @@ export class TelegramManager {
     const name = document?.file_name ? safeFileName(document.file_name) : "attachment";
     const isDocumentImage = !!document && isSupportedImageNameOrType(name, document.mime_type);
     const isTextDocument = !!document && (isSupportedTextName(name) || isSupportedTextMime(document.mime_type));
-    if (document && !isDocumentImage && !isTextDocument) {
+    const isPdfDocument = !!document && isSupportedPdfNameOrType(name, document.mime_type);
+    const isDocxDocument = !!document && isSupportedDocxNameOrType(name, document.mime_type);
+    if (document && !isDocumentImage && !isTextDocument && !isPdfDocument && !isDocxDocument) {
       return {
-        unsupported:
-          "I can read photos and small text files such as TXT, Markdown, CSV, TSV, JSON, JSONL, XML, YAML, and logs.",
+        unsupported: "I can read photos, small text files, and text-based PDF or DOCX documents.",
       };
     }
     if (
@@ -459,13 +471,30 @@ export class TelegramManager {
     ) {
       return { unsupported: "Text attachments must be 64 KB or smaller." };
     }
+    if (
+      document &&
+      document.file_size !== undefined &&
+      document.file_size > TELEGRAM_DOCUMENT_MAX_BYTES &&
+      (isPdfDocument || isDocxDocument)
+    ) {
+      return { unsupported: "PDF and DOCX attachments must be 2 MiB or smaller." };
+    }
     const fileId = photo?.file_id ?? document?.file_id;
     if (!fileId) return { unsupported: "I couldn't read that attachment. Please send it again." };
     const imageRequested = !!photo || isDocumentImage;
-    const maxBytes = imageRequested ? MAX_TELEGRAM_IMAGE_BYTES : MAX_TELEGRAM_TEXT_BYTES;
+    const isStructuredDocument = isPdfDocument || isDocxDocument;
+    const maxBytes = imageRequested
+      ? MAX_TELEGRAM_IMAGE_BYTES
+      : isStructuredDocument
+        ? TELEGRAM_DOCUMENT_MAX_BYTES
+        : MAX_TELEGRAM_TEXT_BYTES;
     if ((photo?.file_size ?? document?.file_size ?? 0) > maxBytes) {
       return {
-        unsupported: imageRequested ? "Images must be 8 MB or smaller." : "Text attachments must be 64 KB or smaller.",
+        unsupported: imageRequested
+          ? "Images must be 8 MB or smaller."
+          : isStructuredDocument
+            ? "PDF and DOCX attachments must be 2 MiB or smaller."
+            : "Text attachments must be 64 KB or smaller.",
       };
     }
 
@@ -498,8 +527,41 @@ export class TelegramManager {
         await this.#objects.delete(deployment.tenantId, objectId).catch(() => undefined);
       }
     }
-    if (bytes.byteLength > MAX_TELEGRAM_TEXT_BYTES) {
+    if (bytes.byteLength > MAX_TELEGRAM_TEXT_BYTES && !isStructuredDocument) {
       return { unsupported: "Text attachments must be 64 KB or smaller." };
+    }
+    if (isPdfDocument || isDocxDocument) {
+      const contentType = isPdfDocument ? "application/pdf" : DOCX_CONTENT_TYPE;
+      const hasSignature = isPdfDocument ? hasPdfSignature(bytes) : hasZipSignature(bytes);
+      if (!hasSignature) {
+        return { unsupported: "That file does not match its PDF or DOCX format." };
+      }
+      if (!(await this.#scanAttachment(name, contentType, bytes))) {
+        return {
+          unsupported: "That document could not pass security scanning. Ask the bot owner to check the file scanner.",
+        };
+      }
+      const objectId = `tg_${crypto.randomUUID().replaceAll("-", "")}`;
+      try {
+        await this.#objects.put({ tenantId: deployment.tenantId, objectId, contentType, bytes });
+        const stored = await this.#objects.get(deployment.tenantId, objectId);
+        if (!stored || stored.contentType !== contentType || stored.size !== bytes.byteLength) {
+          throw new AppError("INTERNAL_ERROR", "Stored Telegram document failed validation.", 500);
+        }
+        let text: string;
+        try {
+          text = await extractAgentDocumentText(stored.bytes, contentType);
+        } catch {
+          return {
+            unsupported:
+              "I couldn't extract readable text from that document. It may be damaged, encrypted, or a scanned PDF that needs OCR.",
+          };
+        }
+        const kind = isPdfDocument ? "PDF" : "DOCX";
+        return { text: `[Attached ${kind} file: ${name}]\n${text.slice(0, EXTRACTED_DOCUMENT_MAX_CHARS)}` };
+      } finally {
+        await this.#objects.delete(deployment.tenantId, objectId).catch(() => undefined);
+      }
     }
     let text: string;
     try {
@@ -919,6 +981,14 @@ function isSupportedTextMime(mimeType: string | undefined): boolean {
       "application/yaml",
     ].includes(mimeType.split(";")[0]?.trim().toLowerCase() ?? "")
   );
+}
+
+function isSupportedPdfNameOrType(name: string, mimeType: string | undefined): boolean {
+  return /\.pdf$/i.test(name) || mimeType?.split(";")[0]?.trim().toLowerCase() === "application/pdf";
+}
+
+function isSupportedDocxNameOrType(name: string, mimeType: string | undefined): boolean {
+  return /\.docx$/i.test(name) || mimeType?.split(";")[0]?.trim().toLowerCase() === DOCX_CONTENT_TYPE;
 }
 
 function detectImageType(bytes: Uint8Array): "image/jpeg" | "image/png" | "image/webp" | undefined {

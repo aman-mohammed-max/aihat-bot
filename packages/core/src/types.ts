@@ -310,6 +310,8 @@ export interface AgentRequest {
   readonly messages: readonly ConversationMessage[];
   readonly actorId: UserId;
   readonly actorContext?: AgentActorContext;
+  /** The newest user turn includes file content that must be treated as data, never instructions. */
+  readonly containsUntrustedAttachments?: boolean;
   /** Optional strict object schema for a non-streaming response. */
   readonly responseSchema?: JsonSchema;
   /** Request cancellation is transient and is never stored with conversation messages. */

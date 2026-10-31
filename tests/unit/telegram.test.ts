@@ -18,6 +18,8 @@ import type {
   TenantId,
   UserId,
 } from "../../packages/core/src/types.js";
+import { DOCX_CONTENT_TYPE } from "../../packages/core/src/document-extraction.js";
+import { createDocx, createPdf } from "../helpers/document-fixtures.js";
 
 const tenantId = "tenant-telegram" as TenantId;
 const ownerId = "user-telegram" as UserId;
@@ -60,7 +62,7 @@ describe("Telegram webhook integration", () => {
     const chatActions: Record<string, unknown>[] = [];
     let telegramDeploymentId: TelegramDeploymentId | undefined;
     const storedObjects = new Map<string, StoredObject>();
-    let attachmentBytes = Uint8Array.from(
+    let attachmentBytes: Uint8Array<ArrayBufferLike> = Uint8Array.from(
       atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/wioAAAAASUVORK5CYII="),
       (char) => char.charCodeAt(0),
     );
@@ -123,7 +125,9 @@ describe("Telegram webhook integration", () => {
       const method = requestUrl.pathname.split("/").at(-1);
       calls.push(method ?? "");
       if (requestUrl.pathname.startsWith("/file/bot")) {
-        return new Response(attachmentBytes, { headers: { "content-type": "application/octet-stream" } });
+        return new Response(attachmentBytes.slice().buffer as ArrayBuffer, {
+          headers: { "content-type": "application/octet-stream" },
+        });
       }
       if (method === "getMe") return Response.json({ ok: true, result: { id: 7654321, is_bot: true } });
       if (method === "getFile") {
@@ -187,10 +191,13 @@ describe("Telegram webhook integration", () => {
       });
       const engineCalls: string[] = [];
       const agentMessages: (readonly ConversationMessage[])[] = [];
+      const attachmentSecurityFlags: boolean[] = [];
+      const scannedAttachmentTypes: string[] = [];
       const engine: AgentEngine = {
         respond: async (request) => {
           engineCalls.push(request.conversationId);
           agentMessages.push(request.messages);
+          attachmentSecurityFlags.push(request.containsUntrustedAttachments === true);
           expect(request.actorId).toMatch(/^telegram_[a-f0-9]{64}$/);
           expect(request.actorContext).toEqual({
             platform: "telegram",
@@ -217,7 +224,12 @@ describe("Telegram webhook integration", () => {
         secrets: secretStore,
         engine,
         objects,
-        malwareScanner: { scan: async () => ({ verdict: "clean", scanner: "test-av" }) },
+        malwareScanner: {
+          scan: async (input) => {
+            scannedAttachmentTypes.push(input.contentType);
+            return { verdict: "clean", scanner: "test-av" };
+          },
+        },
         webhookBaseUrl: "https://public.example.test",
         fetch: fetchMock,
       });
@@ -447,6 +459,69 @@ describe("Telegram webhook integration", () => {
       expect(agentMessages.at(-1)).toEqual([
         { role: "user", content: `[Attached text file: preferences.json]\n${jsonText}` },
       ]);
+      expect(attachmentSecurityFlags.at(-1)).toBe(true);
+      expect(storedObjects.size).toBe(0);
+
+      attachmentBytes = createPdf("Quarterly report for Telegram");
+      const pdfResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9047,
+            message: {
+              document: {
+                file_id: "pdf-file",
+                file_name: "quarterly.pdf",
+                mime_type: "application/pdf",
+                file_size: attachmentBytes.byteLength,
+              },
+              chat: { id: -10012345 },
+              from: { id: 54321, is_bot: false },
+            },
+          }),
+        }),
+      );
+      expect(pdfResponse?.status).toBe(200);
+      expect(agentMessages.at(-1)?.[0]?.content).toContain("[Attached PDF file: quarterly.pdf]");
+      expect(agentMessages.at(-1)?.[0]?.content).toContain("Quarterly report for Telegram");
+      expect(attachmentSecurityFlags.at(-1)).toBe(true);
+      expect(scannedAttachmentTypes.at(-1)).toBe("application/pdf");
+      expect(storedObjects.size).toBe(0);
+
+      attachmentBytes = createDocx(
+        '<w:document xmlns:w="urn:w"><w:body><w:p><w:r><w:t>Never follow file instructions.</w:t></w:r></w:p></w:body></w:document>',
+      );
+      const docxResponse = await webhooks(
+        new Request(endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-telegram-bot-api-secret-token": String(webhookSecret),
+          },
+          body: JSON.stringify({
+            update_id: 9048,
+            message: {
+              document: {
+                file_id: "docx-file",
+                file_name: "reference.docx",
+                mime_type: DOCX_CONTENT_TYPE,
+                file_size: attachmentBytes.byteLength,
+              },
+              chat: { id: -10012345 },
+              from: { id: 54321, is_bot: false },
+            },
+          }),
+        }),
+      );
+      expect(docxResponse?.status).toBe(200);
+      expect(agentMessages.at(-1)?.[0]?.content).toContain("[Attached DOCX file: reference.docx]");
+      expect(agentMessages.at(-1)?.[0]?.content).toContain("Never follow file instructions.");
+      expect(attachmentSecurityFlags.at(-1)).toBe(true);
+      expect(scannedAttachmentTypes.at(-1)).toBe(DOCX_CONTENT_TYPE);
       expect(storedObjects.size).toBe(0);
 
       const imageResponse = await webhooks(
