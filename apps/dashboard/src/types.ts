@@ -195,6 +195,12 @@ export interface UsageSummary {
   total: UsageTotal;
   byDay: Array<UsageTotal & { date: string }>;
   byBot: Array<UsageTotal & { botId: string; botName: string }>;
+  modelRetries: {
+    total: number;
+    byDay: Array<{ date: string; retries: number }>;
+    byBot: Array<{ botId: string; botName: string; retries: number }>;
+    byStatusCode: Array<{ statusCode: number; retries: number }>;
+  };
 }
 
 export interface AuditLogEvent {

@@ -1,6 +1,13 @@
 import { AppError } from "./errors.js";
 import { validateStructuredOutputSchema } from "./structured-output.js";
-import type { AgentImageAttachment, AgentRequest, AgentResponse, ConversationMessage, ModelToolCall } from "./types.js";
+import type {
+  AgentImageAttachment,
+  AgentRequest,
+  AgentResponse,
+  ConversationMessage,
+  ModelRetryObservation,
+  ModelToolCall,
+} from "./types.js";
 import type { AgentEngine, ConversationRepository } from "./ports.js";
 import type { ModelProviderRegistry } from "./model.js";
 import { getToolAttachments, type AgentToolRegistry, type ToolContext } from "./tools.js";
@@ -31,7 +38,10 @@ export class AgentOrchestrator implements AgentEngine {
 
   async respond(
     request: AgentRequest,
-    options?: { readonly onTextDelta?: (delta: string) => void },
+    options?: {
+      readonly onTextDelta?: (delta: string) => void;
+      readonly onModelRetry?: (event: ModelRetryObservation) => void | Promise<void>;
+    },
   ): Promise<AgentResponse> {
     if (
       request.messages.length === 0 ||
@@ -103,12 +113,14 @@ export class AgentOrchestrator implements AgentEngine {
     for (let round = 0; round <= this.#maxToolRounds; round += 1) {
       const turn = await provider.complete({
         tenantId: request.bot.tenantId,
+        botId: request.bot.id,
         config: request.bot.model,
         messages,
         ...(advertisedTools.length ? { tools: advertisedTools } : {}),
         ...(responseSchema ? { responseSchema } : {}),
         ...(request.signal ? { signal: request.signal } : {}),
         ...(options?.onTextDelta ? { onTextDelta: options.onTextDelta } : {}),
+        ...(options?.onModelRetry ? { onRetry: options.onModelRetry } : {}),
       });
       if (turn.usage) {
         hasUsage = true;

@@ -120,6 +120,21 @@ export function usageView(summary?: UsageSummary): string {
       return `<div class="usage-bar-column" title="${escapeHtml(`${label}: ${item.requests} requests`)}" aria-label="${escapeHtml(`${label}: ${item.requests} requests`)}"><div class="usage-bar-track"><span class="usage-bar" style="height:${height}%"></span></div><small>${escapeHtml(tick)}</small></div>`;
     })
     .join("");
+  const retryPerDay = new Map(summary.modelRetries.byDay.map((item) => [item.date, item.retries]));
+  const retrySeries = dates.map((date) => ({ date, retries: retryPerDay.get(date) ?? 0 }));
+  const retryPeak = Math.max(1, ...retrySeries.map((item) => item.retries));
+  const retryChart = retrySeries
+    .map((item, index) => {
+      const height = item.retries ? Math.max(4, Math.round((item.retries / retryPeak) * 100)) : 0;
+      const label = new Date(`${item.date}T00:00:00Z`).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        timeZone: "UTC",
+      });
+      const tick = index % 5 === 0 || index === retrySeries.length - 1 ? label : "";
+      return `<div class="usage-bar-column" title="${escapeHtml(`${label}: ${item.retries} retries`)}" aria-label="${escapeHtml(`${label}: ${item.retries} retries`)}"><div class="usage-bar-track"><span class="usage-bar" style="height:${height}%"></span></div><small>${escapeHtml(tick)}</small></div>`;
+    })
+    .join("");
   const botRows = summary.byBot.length
     ? summary.byBot
         .map(
@@ -128,10 +143,24 @@ export function usageView(summary?: UsageSummary): string {
         )
         .join("")
     : `<tr><td colspan="5" class="usage-empty-cell">No successful agent requests recorded in this period.</td></tr>`;
+  const retryRows = summary.modelRetries.byBot.length
+    ? summary.modelRetries.byBot
+        .map(
+          (bot) =>
+            `<tr><td><b>${escapeHtml(bot.botName)}</b><small>${escapeHtml(bot.botId)}</small></td><td>${formatCount(bot.retries)}</td></tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="2" class="usage-empty-cell">No model retry responses recorded in this period.</td></tr>`;
+  const retryStatuses = summary.modelRetries.byStatusCode.length
+    ? summary.modelRetries.byStatusCode
+        .map((item) => `<span class="quiet-badge">HTTP ${item.statusCode} · ${formatCount(item.retries)}</span>`)
+        .join("")
+    : `<span class="quiet-badge">No retry status codes</span>`;
   return `<section class="panel intro-panel usage-intro"><div class="intro-icon intro-blue">${icon("chart", 21)}</div><div class="intro-copy"><div class="eyebrow">USAGE & ANALYTICS</div><h2>Your workspace activity</h2><p>Owner-scoped totals for the last 30 days. Token counts are included only when the model provider reports them.</p></div><span class="quiet-badge">${escapeHtml(formatDate(summary.from))} – ${escapeHtml(formatDate(summary.through))}</span></section>
-    <section class="stat-grid usage-stat-grid" aria-label="Usage totals">${statCard("Successful requests", summary.total.requests, "Agent replies completed", "chat", "blue")}${statCard("Input tokens", summary.total.inputTokens, `${summary.total.reportedRequests} calls reported usage`, "arrow", "violet")}${statCard("Output tokens", summary.total.outputTokens, "Reported by model providers", "spark", "mint")}${statCard("Total tokens", summary.total.inputTokens + summary.total.outputTokens, "Reported input + output", "chart", "amber")}</section>
+    <section class="stat-grid usage-stat-grid" aria-label="Usage totals">${statCard("Successful requests", summary.total.requests, "Agent replies completed", "chat", "blue")}${statCard("Total tokens", summary.total.inputTokens + summary.total.outputTokens, `${summary.total.reportedRequests} calls reported usage`, "chart", "violet")}${statCard("Model retries", summary.modelRetries.total, "Transient HTTP responses retried", "refresh", "mint")}${statCard("Usage-reported calls", summary.total.reportedRequests, "Provider returned token counts", "spark", "amber")}</section>
     <section class="panel usage-chart-panel"><div class="panel-heading"><div><div class="eyebrow">DAILY REQUESTS</div><h2>Activity over time</h2><p class="panel-subtitle">Successful agent replies by UTC date</p></div><span class="quiet-badge">30 days</span></div><div class="usage-chart" role="img" aria-label="Daily successful agent requests over the last 30 days">${chart}</div><div class="usage-chart-legend"><span><i></i> Successful replies</span><span>UTC dates</span></div></section>
-    <section class="panel usage-table-panel"><div class="panel-heading"><div><div class="eyebrow">BOT BREAKDOWN</div><h2>Usage by bot</h2></div><span class="quiet-badge">${summary.byBot.length}</span></div><div class="table-wrap"><table><thead><tr><th>Bot</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Reported</th></tr></thead><tbody>${botRows}</tbody></table></div><p class="field-hint">Usage records include model and bot identifiers in storage. This view omits actor identifiers, prompts, and generated replies. Pricing is not estimated because provider rates vary.</p></section>`;
+    <section class="panel usage-table-panel"><div class="panel-heading"><div><div class="eyebrow">BOT BREAKDOWN</div><h2>Usage by bot</h2></div><span class="quiet-badge">${summary.byBot.length}</span></div><div class="table-wrap"><table><thead><tr><th>Bot</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Reported</th></tr></thead><tbody>${botRows}</tbody></table></div><p class="field-hint">Usage records include model and bot identifiers in storage. This view omits actor identifiers, prompts, and generated replies. Pricing is not estimated because provider rates vary.</p></section>
+    <section class="panel usage-table-panel"><div class="panel-heading"><div><div class="eyebrow">MODEL RETRY ANALYTICS</div><h2>Retries by bot</h2><p class="panel-subtitle">One row per transient provider response retried under the configured policy.</p></div><span class="quiet-badge">${formatCount(summary.modelRetries.total)} retries</span></div><div class="table-wrap"><table><thead><tr><th>Bot</th><th>Retry attempts</th></tr></thead><tbody>${retryRows}</tbody></table></div><div class="usage-chart usage-retry-chart" role="img" aria-label="Daily model retry attempts over the last 30 days">${retryChart}</div><div class="usage-chart-legend"><span><i></i> Model retries</span><span>UTC dates</span></div><div class="usage-retry-statuses">${retryStatuses}</div><p class="field-hint">Only bot ownership, retry attempt limits, delay, HTTP status, and timestamp are retained. Prompts, request bodies, credentials, and actor identifiers are not recorded. HTTP status totals span bots in this workspace.</p></section>`;
 }
 
 export function apiAccessView(state: UiState): string {

@@ -24,6 +24,8 @@ import type {
   JobId,
   UsageRecord,
   UsageSummary,
+  ModelRetryAnalyticsRecord,
+  ModelRetryObservation,
   UploadedFile,
   BotMemoryRecord,
   BotAccessGrant,
@@ -179,6 +181,7 @@ export interface ConversationHistoryRepository {
 
 export interface UsageRepository {
   recordUsage(record: UsageRecord): Promise<void>;
+  recordModelRetry(record: ModelRetryAnalyticsRecord): Promise<void>;
   getOwnedUsageSummary(input: {
     readonly tenantId: TenantId;
     readonly ownerId: UserId;
@@ -421,7 +424,13 @@ export interface TelegramRepository {
 }
 
 export interface AgentEngine {
-  respond(request: AgentRequest, options?: { readonly onTextDelta?: (delta: string) => void }): Promise<AgentResponse>;
+  respond(
+    request: AgentRequest,
+    options?: {
+      readonly onTextDelta?: (delta: string) => void;
+      readonly onModelRetry?: (event: ModelRetryObservation) => void | Promise<void>;
+    },
+  ): Promise<AgentResponse>;
 }
 
 export interface SecretStore {

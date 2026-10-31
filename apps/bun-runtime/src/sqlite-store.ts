@@ -265,6 +265,21 @@ interface UsageBotAggregateRow extends Omit<UsageAggregateRow, "date"> {
   bot_name: string;
 }
 
+interface ModelRetryAggregateRow {
+  date?: string;
+  retries: number;
+}
+
+interface ModelRetryBotAggregateRow extends Omit<ModelRetryAggregateRow, "date"> {
+  bot_id: string;
+  bot_name: string;
+}
+
+interface ModelRetryStatusAggregateRow {
+  status_code: number;
+  retries: number;
+}
+
 interface MemoryRow {
   id: string;
   bot_id: string;
@@ -1295,6 +1310,25 @@ export class BunSqliteRepositories
       );
   }
 
+  async recordModelRetry(record: Parameters<UsageRepository["recordModelRetry"]>[0]): Promise<void> {
+    this.#db
+      .query(
+        `INSERT INTO model_retry_events (
+          id, tenant_id, bot_id, attempt, max_attempts, delay_ms, status_code, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.tenantId,
+        record.botId,
+        record.attempt,
+        record.maxAttempts,
+        record.delayMs,
+        record.statusCode,
+        record.createdAt,
+      );
+  }
+
   async getOwnedUsageSummary(input: {
     tenantId: TenantId;
     ownerId: UserId;
@@ -1322,6 +1356,30 @@ export class BunSqliteRepositories
         FROM usage_records AS u JOIN bots AS b ON b.id = u.bot_id AND b.tenant_id = u.tenant_id
         WHERE u.tenant_id = ? AND b.owner_id = ? AND u.created_at >= ? AND u.created_at <= ?
         GROUP BY b.id ORDER BY requests DESC, b.name ASC LIMIT 100
+      `)
+      .all(...params);
+    const retryDailyRows = this.#db
+      .query<ModelRetryAggregateRow, [string, string, string, string]>(`
+        SELECT substr(r.created_at, 1, 10) AS date, count(*) AS retries
+        FROM model_retry_events AS r JOIN bots AS b ON b.id = r.bot_id AND b.tenant_id = r.tenant_id
+        WHERE r.tenant_id = ? AND b.owner_id = ? AND r.created_at >= ? AND r.created_at <= ?
+        GROUP BY substr(r.created_at, 1, 10) ORDER BY date ASC
+      `)
+      .all(...params);
+    const retryBotRows = this.#db
+      .query<ModelRetryBotAggregateRow, [string, string, string, string]>(`
+        SELECT b.id AS bot_id, b.name AS bot_name, count(*) AS retries
+        FROM model_retry_events AS r JOIN bots AS b ON b.id = r.bot_id AND b.tenant_id = r.tenant_id
+        WHERE r.tenant_id = ? AND b.owner_id = ? AND r.created_at >= ? AND r.created_at <= ?
+        GROUP BY b.id ORDER BY retries DESC, b.name ASC LIMIT 100
+      `)
+      .all(...params);
+    const retryStatusRows = this.#db
+      .query<ModelRetryStatusAggregateRow, [string, string, string, string]>(`
+        SELECT r.status_code, count(*) AS retries
+        FROM model_retry_events AS r JOIN bots AS b ON b.id = r.bot_id AND b.tenant_id = r.tenant_id
+        WHERE r.tenant_id = ? AND b.owner_id = ? AND r.created_at >= ? AND r.created_at <= ?
+        GROUP BY r.status_code ORDER BY retries DESC, r.status_code ASC
       `)
       .all(...params);
     const total = dailyRows.reduce(
@@ -1352,6 +1410,16 @@ export class BunSqliteRepositories
         inputTokens: row.input_tokens,
         outputTokens: row.output_tokens,
       })),
+      modelRetries: {
+        total: retryDailyRows.reduce((sum, row) => sum + row.retries, 0),
+        byDay: retryDailyRows.map((row) => ({ date: row.date ?? "", retries: row.retries })),
+        byBot: retryBotRows.map((row) => ({
+          botId: row.bot_id as BotId,
+          botName: row.bot_name ?? "",
+          retries: row.retries,
+        })),
+        byStatusCode: retryStatusRows.map((row) => ({ statusCode: row.status_code, retries: row.retries })),
+      },
     };
   }
 

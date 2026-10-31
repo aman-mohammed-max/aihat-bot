@@ -1363,6 +1363,16 @@ async function runParityScenario(repositories: BunSqliteRepositories | Cloudflar
     usageReported: true,
     createdAt,
   });
+  await repositories.recordModelRetry({
+    id: "retry_runtime_parity",
+    tenantId,
+    botId,
+    attempt: 1,
+    maxAttempts: 2,
+    delayMs: 250,
+    statusCode: 503,
+    createdAt,
+  });
   const usageSummary = await repositories.getOwnedUsageSummary({
     tenantId,
     ownerId,
@@ -1447,6 +1457,10 @@ async function runParityScenario(repositories: BunSqliteRepositories | Cloudflar
         inputTokens,
         outputTokens,
       })),
+      modelRetries: {
+        ...usageSummary.modelRetries,
+        byBot: usageSummary.modelRetries.byBot.map(({ botName, retries }) => ({ botName, retries })),
+      },
     },
     mcp: {
       discovered: discovered.map(({ name }) => name),

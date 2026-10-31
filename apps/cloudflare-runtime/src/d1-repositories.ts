@@ -260,6 +260,22 @@ interface UsageBotAggregateRow extends Omit<UsageAggregateRow, "date"> {
   bot_name: string;
 }
 
+interface ModelRetryAggregateRow {
+  date: string;
+  retries: number;
+}
+
+interface ModelRetryBotAggregateRow {
+  bot_id: string;
+  bot_name: string;
+  retries: number;
+}
+
+interface ModelRetryStatusAggregateRow {
+  status_code: number;
+  retries: number;
+}
+
 interface MemoryRow {
   id: string;
   bot_id: string;
@@ -1443,13 +1459,33 @@ export class CloudflareD1Repositories
       .run();
   }
 
+  async recordModelRetry(record: Parameters<UsageRepository["recordModelRetry"]>[0]): Promise<void> {
+    await this.db
+      .prepare(`
+        INSERT INTO model_retry_events (
+          id, tenant_id, bot_id, attempt, max_attempts, delay_ms, status_code, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .bind(
+        record.id,
+        record.tenantId,
+        record.botId,
+        record.attempt,
+        record.maxAttempts,
+        record.delayMs,
+        record.statusCode,
+        record.createdAt,
+      )
+      .run();
+  }
+
   async getOwnedUsageSummary(input: {
     tenantId: TenantId;
     ownerId: UserId;
     from: string;
     through: string;
   }): Promise<UsageSummary> {
-    const [dailyResult, botResult] = await Promise.all([
+    const [dailyResult, botResult, retryDailyResult, retryBotResult, retryStatusResult] = await Promise.all([
       this.db
         .prepare(`
           SELECT substr(u.created_at, 1, 10) AS date, count(*) AS requests,
@@ -1474,6 +1510,33 @@ export class CloudflareD1Repositories
         `)
         .bind(input.tenantId, input.ownerId, input.from, input.through)
         .all<UsageBotAggregateRow>(),
+      this.db
+        .prepare(`
+          SELECT substr(r.created_at, 1, 10) AS date, count(*) AS retries
+          FROM model_retry_events AS r JOIN bots AS b ON b.id = r.bot_id AND b.tenant_id = r.tenant_id
+          WHERE r.tenant_id = ? AND b.owner_id = ? AND r.created_at >= ? AND r.created_at <= ?
+          GROUP BY substr(r.created_at, 1, 10) ORDER BY date ASC
+        `)
+        .bind(input.tenantId, input.ownerId, input.from, input.through)
+        .all<ModelRetryAggregateRow>(),
+      this.db
+        .prepare(`
+          SELECT b.id AS bot_id, b.name AS bot_name, count(*) AS retries
+          FROM model_retry_events AS r JOIN bots AS b ON b.id = r.bot_id AND b.tenant_id = r.tenant_id
+          WHERE r.tenant_id = ? AND b.owner_id = ? AND r.created_at >= ? AND r.created_at <= ?
+          GROUP BY b.id ORDER BY retries DESC, b.name ASC LIMIT 100
+        `)
+        .bind(input.tenantId, input.ownerId, input.from, input.through)
+        .all<ModelRetryBotAggregateRow>(),
+      this.db
+        .prepare(`
+          SELECT r.status_code, count(*) AS retries
+          FROM model_retry_events AS r JOIN bots AS b ON b.id = r.bot_id AND b.tenant_id = r.tenant_id
+          WHERE r.tenant_id = ? AND b.owner_id = ? AND r.created_at >= ? AND r.created_at <= ?
+          GROUP BY r.status_code ORDER BY retries DESC, r.status_code ASC
+        `)
+        .bind(input.tenantId, input.ownerId, input.from, input.through)
+        .all<ModelRetryStatusAggregateRow>(),
     ]);
     const total = dailyResult.results.reduce(
       (sum, row) => ({
@@ -1503,6 +1566,19 @@ export class CloudflareD1Repositories
         inputTokens: row.input_tokens,
         outputTokens: row.output_tokens,
       })),
+      modelRetries: {
+        total: retryDailyResult.results.reduce((sum, row) => sum + row.retries, 0),
+        byDay: retryDailyResult.results.map((row) => ({ date: row.date, retries: row.retries })),
+        byBot: retryBotResult.results.map((row) => ({
+          botId: row.bot_id as BotId,
+          botName: row.bot_name,
+          retries: row.retries,
+        })),
+        byStatusCode: retryStatusResult.results.map((row) => ({
+          statusCode: row.status_code,
+          retries: row.retries,
+        })),
+      },
     };
   }
 

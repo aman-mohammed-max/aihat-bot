@@ -16,6 +16,7 @@ export function icon(name: string, size = 18): string {
     key: '<circle cx="8" cy="15" r="4"/><path d="m11 12 8-8 2 2-2 2 2 2-3 3-2-2-2 2"/>',
     shield: '<path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11"/><path d="m9 12 2 2 4-4"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+    refresh: '<path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9A7 7 0 0 1 18 6l2 6M4 12l2 6a7 7 0 0 0 12.4-3"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     arrow: '<path d="M5 12h14m-7-7 7 7-7 7"/>',
     chevron: '<path d="m9 18 6-6-6-6"/>',

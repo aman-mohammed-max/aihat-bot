@@ -12,6 +12,7 @@ import type {
   CreationAnswers,
   ConversationId,
   TenantId,
+  ModelRetryAnalyticsRecord,
   UsageRecord,
   UserId,
 } from "../../packages/core/src/types.js";
@@ -49,6 +50,36 @@ describe("owner-scoped usage analytics", () => {
         inputTokens: 120,
         outputTokens: 30,
         usageReported: true,
+        createdAt: now,
+      });
+      await repositories.recordModelRetry({
+        id: "retry-owner-1",
+        tenantId,
+        botId,
+        attempt: 1,
+        maxAttempts: 2,
+        delayMs: 250,
+        statusCode: 503,
+        createdAt: now,
+      });
+      await repositories.recordModelRetry({
+        id: "retry-owner-2",
+        tenantId,
+        botId,
+        attempt: 1,
+        maxAttempts: 3,
+        delayMs: 500,
+        statusCode: 429,
+        createdAt: now,
+      });
+      await repositories.recordModelRetry({
+        id: "retry-other-owner",
+        tenantId,
+        botId: privateBotId,
+        attempt: 1,
+        maxAttempts: 2,
+        delayMs: 250,
+        statusCode: 503,
         createdAt: now,
       });
       await repositories.recordUsage({
@@ -92,10 +123,22 @@ describe("owner-scoped usage analytics", () => {
           inputTokens: number;
           outputTokens: number;
         }>;
+        modelRetries: {
+          total: number;
+          byDay: Array<{ date: string; retries: number }>;
+          byBot: Array<{ botId: string; botName: string; retries: number }>;
+          byStatusCode: Array<{ statusCode: number; retries: number }>;
+        };
       };
       expect(body.total).toEqual({ requests: 2, reportedRequests: 1, inputTokens: 120, outputTokens: 30 });
       expect(body.byBot).toEqual([
         { botId, botName: "Usage test bot", requests: 2, reportedRequests: 1, inputTokens: 120, outputTokens: 30 },
+      ]);
+      expect(body.modelRetries.total).toBe(2);
+      expect(body.modelRetries.byBot).toEqual([{ botId, botName: "Usage test bot", retries: 2 }]);
+      expect(body.modelRetries.byStatusCode).toEqual([
+        { statusCode: 429, retries: 1 },
+        { statusCode: 503, retries: 1 },
       ]);
       expect(JSON.stringify(body)).not.toContain(ownerId);
       expect(JSON.stringify(body)).not.toContain("usage-other-owner");
@@ -141,16 +184,24 @@ describe("owner-scoped usage analytics", () => {
       const bot = await repositories.get(tenantId, botId);
       if (!bot) throw new Error("Bot fixture was not created.");
       const records: UsageRecord[] = [];
+      const retryRecords: ModelRetryAnalyticsRecord[] = [];
       const tracked = createUsageTrackingAgentEngine(
-        { respond: async () => ({ message: { role: "assistant", content: "Hello" } }) },
+        {
+          respond: async (_request, options) => {
+            await options?.onModelRetry?.({ attempt: 1, maxAttempts: 2, delayMs: 250, statusCode: 503 });
+            return { message: { role: "assistant", content: "Hello" } };
+          },
+        },
         {
           recordUsage: async (record) => void records.push(record),
+          recordModelRetry: async (record) => void retryRecords.push(record),
           getOwnedUsageSummary: async () => ({
             from: "",
             through: "",
             total: { requests: 0, reportedRequests: 0, inputTokens: 0, outputTokens: 0 },
             byDay: [],
             byBot: [],
+            modelRetries: { total: 0, byDay: [], byBot: [], byStatusCode: [] },
           }),
         },
         { info: () => {}, warn: () => {}, error: () => {} },
@@ -165,6 +216,15 @@ describe("owner-scoped usage analytics", () => {
 
       await tracked.respond(request);
       expect(records).toHaveLength(1);
+      expect(retryRecords).toHaveLength(1);
+      expect(retryRecords[0]).toMatchObject({
+        tenantId,
+        botId,
+        attempt: 1,
+        maxAttempts: 2,
+        delayMs: 250,
+        statusCode: 503,
+      });
       expect(records[0]).toMatchObject({
         tenantId,
         botId,

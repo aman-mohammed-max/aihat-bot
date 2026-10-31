@@ -48,6 +48,7 @@ describe("shared agent engine", () => {
       isAllowed: async (context, permission) => context.tenantId === tenantId && permission === "weather:read",
     });
     const stored: ConversationMessage[] = [];
+    const modelRetries: Array<{ attempt: number; maxAttempts: number; delayMs: number; statusCode: number }> = [];
     const conversations = {
       load: async () => stored.slice(-100),
       append: async (_tenant: TenantId, _conversation: ConversationId, turn: readonly ConversationMessage[]) => {
@@ -79,7 +80,7 @@ describe("shared agent engine", () => {
     providers.register({
       id: "mock",
       capabilities: () => ({ toolCalling: true, streaming: false, structuredOutput: false }),
-      complete: async ({ messages, tools: advertised }): Promise<ModelTurn> => {
+      complete: async ({ messages, tools: advertised, onRetry }): Promise<ModelTurn> => {
         round += 1;
         expect(messages[0]?.role).toBe("system");
         expect(messages[0]?.content).toContain(
@@ -87,6 +88,7 @@ describe("shared agent engine", () => {
         );
         expect(advertised?.map((item) => item.name)).toEqual(["weather"]);
         if (round === 1) {
+          await onRetry?.({ attempt: 1, maxAttempts: 2, delayMs: 250, statusCode: 503 });
           return {
             message: { role: "assistant", content: "" },
             toolCalls: [{ id: "call-1", name: "weather", arguments: { city: "Oslo" } }],
@@ -102,16 +104,20 @@ describe("shared agent engine", () => {
       },
     });
     const agent = new AgentOrchestrator({ providers, tools, conversations });
-    const result = await agent.respond({
-      bot,
-      conversationId: "conversation-a" as ConversationId,
-      messages: [{ role: "user", content: "Weather?" }],
-      actorId,
-    });
+    const result = await agent.respond(
+      {
+        bot,
+        conversationId: "conversation-a" as ConversationId,
+        messages: [{ role: "user", content: "Weather?" }],
+        actorId,
+      },
+      { onModelRetry: (event) => void modelRetries.push(event) },
+    );
 
     expect(result.message.content).toBe("It is sunny in Oslo.");
     expect(result.usage).toEqual({ inputTokens: 7, outputTokens: 6 });
     expect(executed).toBe(1);
+    expect(modelRetries).toEqual([{ attempt: 1, maxAttempts: 2, delayMs: 250, statusCode: 503 }]);
     expect(stored.map(({ role }) => role)).toEqual(["user", "assistant", "tool", "assistant"]);
   });
 
@@ -477,6 +483,7 @@ describe("OpenAI-compatible provider boundary", () => {
   test("retries configured transient HTTP responses with a bounded Retry-After", async () => {
     let attempts = 0;
     const retryEvents: Array<{ event: string; fields: Readonly<Record<string, unknown>> | undefined }> = [];
+    const retryObservations: Array<{ attempt: number; maxAttempts: number; delayMs: number; statusCode: number }> = [];
     const provider = new OpenAICompatibleProvider({
       id: "compatible",
       defaultEndpoint: "https://api.example.test/v1",
@@ -499,6 +506,7 @@ describe("OpenAI-compatible provider boundary", () => {
       tenantId,
       config: { providerId: "compatible", model: "sample", credentialRef: "secret-ref" },
       messages: [{ role: "user", content: "hello" }],
+      onRetry: (event) => void retryObservations.push(event),
     });
     expect(attempts).toBe(2);
     expect(result.message.content).toBe("recovered");
@@ -514,6 +522,7 @@ describe("OpenAI-compatible provider boundary", () => {
         },
       },
     ]);
+    expect(retryObservations).toEqual([{ attempt: 1, maxAttempts: 2, delayMs: 0, statusCode: 429 }]);
   });
 
   test("applies a validated per-bot retry override over the deployment default", async () => {

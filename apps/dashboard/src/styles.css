@@ -778,6 +778,10 @@ kbd {
   padding: 13px 5px 0;
   border-bottom: 1px solid rgba(139, 178, 201, 0.16);
 }
+.usage-retry-chart .usage-bar {
+  background: linear-gradient(180deg, #a8e877, #58ad77);
+  box-shadow: 0 0 12px rgba(107, 195, 120, 0.16);
+}
 .usage-bar-column {
   display: flex;
   flex: 1 1 0;
@@ -836,6 +840,12 @@ kbd {
   color: #6f8798;
   text-overflow: ellipsis;
   font-size: 8px;
+}
+.usage-retry-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 12px;
 }
 .table-wrap td.usage-empty-cell {
   padding: 24px;

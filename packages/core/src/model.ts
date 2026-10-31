@@ -7,6 +7,8 @@ import type {
   ModelTurn,
   ConversationMessage,
   ModelRetryPolicySettings,
+  ModelRetryObservation,
+  BotId,
   TenantId,
 } from "./types.js";
 import type { Logger, SecretStore } from "./ports.js";
@@ -23,12 +25,14 @@ export interface ModelProvider {
   capabilities(config: ModelConfig): ProviderCapabilities;
   complete(input: {
     readonly tenantId: TenantId;
+    readonly botId?: BotId;
     readonly config: ModelConfig;
     readonly messages: readonly ConversationMessage[];
     readonly tools?: readonly ModelToolDefinition[];
     readonly responseSchema?: JsonSchema;
     readonly signal?: AbortSignal;
     readonly onTextDelta?: (delta: string) => void;
+    readonly onRetry?: (event: ModelRetryObservation) => void | Promise<void>;
   }): Promise<ModelTurn>;
 }
 
@@ -155,12 +159,14 @@ export class OpenAICompatibleProvider implements ModelProvider {
 
   async complete(input: {
     readonly tenantId: TenantId;
+    readonly botId?: BotId;
     readonly config: ModelConfig;
     readonly messages: readonly ConversationMessage[];
     readonly tools?: readonly ModelToolDefinition[];
     readonly responseSchema?: JsonSchema;
     readonly signal?: AbortSignal;
     readonly onTextDelta?: (delta: string) => void;
+    readonly onRetry?: (event: ModelRetryObservation) => void | Promise<void>;
   }): Promise<ModelTurn> {
     if (input.signal?.aborted) {
       throw new AppError("DEPENDENCY_UNAVAILABLE", "Model request was cancelled.", 504);
@@ -286,6 +292,22 @@ export class OpenAICompatibleProvider implements ModelProvider {
               // Observability must not change retry behavior.
             }
             await cancelResponseBody(response);
+            try {
+              await input.onRetry?.({
+                attempt,
+                maxAttempts: retryPolicy.maxAttempts,
+                delayMs: waitMs,
+                statusCode: response.status,
+              });
+            } catch {
+              try {
+                this.#logger?.warn("model_retry_analytics_failed", {
+                  ...(input.botId ? { botId: input.botId } : {}),
+                });
+              } catch {
+                // Analytics failures must not change model retry behavior.
+              }
+            }
             await waitForRetry(waitMs, controller.signal);
             continue;
           }

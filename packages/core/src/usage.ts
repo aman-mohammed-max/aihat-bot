@@ -9,7 +9,26 @@ export function createUsageTrackingAgentEngine(
 ): AgentEngine {
   return {
     async respond(request, options) {
-      const response = await engine.respond(request, options);
+      const response = await engine.respond(request, {
+        ...options,
+        onModelRetry: async (event) => {
+          try {
+            await usage.recordModelRetry({
+              ...event,
+              id: `retry_${crypto.randomUUID().replaceAll("-", "")}`,
+              tenantId: request.bot.tenantId,
+              botId: request.bot.id,
+              createdAt: new Date().toISOString(),
+            });
+          } catch {
+            logger.warn("model_retry_analytics_failed", {
+              botId: request.bot.id,
+              providerId: request.bot.model.providerId,
+            });
+          }
+          await options?.onModelRetry?.(event);
+        },
+      });
       const sample: UsageRecord = {
         id: `usage_${crypto.randomUUID().replaceAll("-", "")}`,
         tenantId: request.bot.tenantId,

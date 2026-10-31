@@ -144,6 +144,26 @@ export interface UsageSummary {
   readonly total: UsageTotal;
   readonly byDay: readonly (UsageTotal & { readonly date: string })[];
   readonly byBot: readonly (UsageTotal & { readonly botId: BotId; readonly botName: string })[];
+  readonly modelRetries: {
+    readonly total: number;
+    readonly byDay: readonly { readonly date: string; readonly retries: number }[];
+    readonly byBot: readonly { readonly botId: BotId; readonly botName: string; readonly retries: number }[];
+    readonly byStatusCode: readonly { readonly statusCode: number; readonly retries: number }[];
+  };
+}
+
+export interface ModelRetryObservation {
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly delayMs: number;
+  readonly statusCode: number;
+}
+
+export interface ModelRetryAnalyticsRecord extends ModelRetryObservation {
+  readonly id: string;
+  readonly tenantId: TenantId;
+  readonly botId: BotId;
+  readonly createdAt: string;
 }
 
 export type UploadedFileScanStatus = "pending_scan" | "clean" | "rejected" | "scan_failed";
