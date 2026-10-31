@@ -7,6 +7,7 @@ import type {
   SkillRepository,
   TelegramRepository,
   WorkflowExecutionRepository,
+  Logger,
 } from "./ports.js";
 import type {
   InstalledSkill,
@@ -48,6 +49,7 @@ export interface SkillEngineOptions {
   readonly workflowExecutions?: WorkflowExecutionRepository;
   readonly secretWriter?: SecretWriter;
   readonly fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  readonly logger?: Pick<Logger, "warn">;
 }
 
 /** Tenant-scoped installed skills exposed to the agent as authorized tools or prompt additions. */
@@ -62,6 +64,7 @@ export class SkillEngine implements AgentToolRegistry {
   readonly #workflowExecutions: WorkflowExecutionRepository | undefined;
   readonly #secretWriter: SecretWriter | undefined;
   readonly #fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  readonly #logger: Pick<Logger, "warn"> | undefined;
 
   constructor(options: SkillEngineOptions) {
     this.#skills = options.skills;
@@ -74,6 +77,7 @@ export class SkillEngine implements AgentToolRegistry {
     this.#workflowExecutions = options.workflowExecutions;
     this.#secretWriter = options.secretWriter;
     this.#fetch = options.fetch ?? fetch;
+    this.#logger = options.logger;
   }
 
   async available(context: ToolContext): Promise<readonly ModelToolDefinition[]> {
@@ -272,14 +276,38 @@ export class SkillEngine implements AgentToolRegistry {
         if (attempt === retry.maxAttempts) {
           throw new AppError("DEPENDENCY_UNAVAILABLE", "HTTP skill request failed.", 502, { cause });
         }
-        await delay(retry.backoffMs * 2 ** (attempt - 1), signal);
+        const delayMs = retry.backoffMs * 2 ** (attempt - 1);
+        try {
+          this.#logger?.warn("dependency.retry", {
+            service: "http_skill",
+            attempt,
+            maxAttempts: retry.maxAttempts,
+            delayMs,
+            reason: "network_error",
+          });
+        } catch {
+          // Observability must not change retry behavior.
+        }
+        await delay(delayMs, signal);
         continue;
       }
 
       lastStatus = response.status;
       if (retry.retryableStatusCodes.includes(response.status) && attempt < retry.maxAttempts) {
         await response.body?.cancel();
-        await delay(retry.backoffMs * 2 ** (attempt - 1), signal);
+        const delayMs = retry.backoffMs * 2 ** (attempt - 1);
+        try {
+          this.#logger?.warn("dependency.retry", {
+            service: "http_skill",
+            attempt,
+            maxAttempts: retry.maxAttempts,
+            delayMs,
+            statusCode: response.status,
+          });
+        } catch {
+          // Observability must not change retry behavior.
+        }
+        await delay(delayMs, signal);
         continue;
       }
       if (!response.ok) {
@@ -502,7 +530,16 @@ export class SkillEngine implements AgentToolRegistry {
             delete state.inFlightStep;
             await persist(state, stepIndex);
             if ((state.attempts[step.id] ?? 0) >= maxAttempts || !isRetryableWorkflowError(cause)) throw cause;
-            await delay(backoffMs * 2 ** ((state.attempts[step.id] ?? 1) - 1), signal);
+            const attempt = state.attempts[step.id] ?? 1;
+            const delayMs = backoffMs * 2 ** (attempt - 1);
+            this.#observeRetry({
+              service: "workflow_step",
+              attempt,
+              maxAttempts,
+              delayMs,
+              stepId: step.id,
+            });
+            await delay(delayMs, signal);
           }
         }
       }
@@ -591,6 +628,14 @@ export class SkillEngine implements AgentToolRegistry {
       createdAt: new Date().toISOString(),
     });
     return allowed;
+  }
+
+  #observeRetry(fields: Readonly<Record<string, unknown>>): void {
+    try {
+      this.#logger?.warn("dependency.retry", fields);
+    } catch {
+      // Observability must not change workflow recovery behavior.
+    }
   }
 }
 

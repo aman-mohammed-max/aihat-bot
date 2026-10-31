@@ -1,5 +1,5 @@
 import { AgentOrchestrator } from "./agent.js";
-import type { ApiConversationRepository, ConversationRepository, SecretStore } from "./ports.js";
+import type { ApiConversationRepository, ConversationRepository, Logger, SecretStore } from "./ports.js";
 import { ModelProviderRegistry, OpenAICompatibleProvider } from "./model.js";
 import { ToolRegistry } from "./tools.js";
 import type { AgentToolRegistry } from "./tools.js";
@@ -18,6 +18,7 @@ export function createOpenAICompatibleAgentEngine(input: {
   readonly imageInput?: boolean;
   readonly timeoutMs?: number;
   readonly retryPolicy?: ModelRetryPolicy;
+  readonly logger?: Pick<Logger, "warn">;
 }): AgentOrchestrator {
   const origins = normalizeAllowedOrigins(input.allowedOrigins);
   const providers = new ModelProviderRegistry();
@@ -36,6 +37,7 @@ export function createOpenAICompatibleAgentEngine(input: {
       imageInput: input.imageInput ?? false,
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
       ...(input.retryPolicy === undefined ? {} : { retryPolicy: input.retryPolicy }),
+      ...(input.logger === undefined ? {} : { logger: input.logger }),
     }),
   );
   const tools = input.tools ?? new ToolRegistry({ isAllowed: async () => false });

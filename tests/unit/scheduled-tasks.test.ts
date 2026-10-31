@@ -129,6 +129,7 @@ describe("persistent scheduled task execution", () => {
         },
       };
       const clock = () => new Date(Date.parse(created.task.nextRunAt) + 1_000).toISOString();
+      const retryEvents: Array<{ event: string; fields: Readonly<Record<string, unknown>> | undefined }> = [];
       const runner = new ScheduledTaskRunner(
         repositories,
         repositories,
@@ -137,10 +138,16 @@ describe("persistent scheduled task execution", () => {
         notifier,
         scheduler,
         clock,
+        { maxAttempts: 4, backoffMs: 10, maxBackoffMs: 20 },
+        { warn: (event, fields) => retryEvents.push({ event, fields }) },
       );
       const job = db.query<{ id: string }, []>("SELECT id FROM jobs WHERE kind = 'scheduled_task'").get();
       if (!job) throw new Error("Initial scheduled job is missing.");
       expect(await runner.process(job.id as JobId, created.task.nextRunAt)).toBe("retrying");
+      expect(retryEvents).toContainEqual({
+        event: "dependency.retry",
+        fields: { service: "scheduled_task", attempt: 1, maxAttempts: 4, delayMs: 10 },
+      });
       expect(engineCalls).toBe(1);
       const retryAt = db
         .query<{ available_at: string }, [string]>("SELECT available_at FROM jobs WHERE id = ?")

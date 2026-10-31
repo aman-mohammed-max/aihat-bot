@@ -1,10 +1,14 @@
 import { AppError } from "./errors.js";
 import type { ModelRetryPolicy } from "./model.js";
+import type { ScheduledTaskRetryPolicy } from "./scheduled-tasks.js";
+import type { TelegramRetryPolicy } from "./telegram.js";
 
 export interface RuntimeConfig {
   readonly environment: "development" | "staging" | "production";
   readonly logLevel: "debug" | "info" | "warn" | "error";
   readonly modelRetryPolicy: ModelRetryPolicy;
+  readonly telegramRetryPolicy: TelegramRetryPolicy;
+  readonly scheduledTaskRetryPolicy: ScheduledTaskRetryPolicy;
 }
 
 /** Parse only non-secret common settings. Runtime adapters own their binding validation. */
@@ -21,6 +25,41 @@ export function parseRuntimeConfig(env: Readonly<Record<string, string | undefin
 
   const maxAttempts = parseIntegerSetting(env.MODEL_RETRY_MAX_ATTEMPTS, "MODEL_RETRY_MAX_ATTEMPTS", 2, 1, 3);
   const backoffMs = parseIntegerSetting(env.MODEL_RETRY_BACKOFF_MS, "MODEL_RETRY_BACKOFF_MS", 250, 0, 3_000);
+  const telegramMaxAttempts = parseIntegerSetting(
+    env.TELEGRAM_RETRY_MAX_ATTEMPTS,
+    "TELEGRAM_RETRY_MAX_ATTEMPTS",
+    2,
+    1,
+    3,
+  );
+  const telegramMaxRetryAfterSeconds = parseIntegerSetting(
+    env.TELEGRAM_RETRY_MAX_AFTER_SECONDS,
+    "TELEGRAM_RETRY_MAX_AFTER_SECONDS",
+    3,
+    0,
+    3,
+  );
+  const scheduledTaskMaxAttempts = parseIntegerSetting(
+    env.SCHEDULED_TASK_RETRY_MAX_ATTEMPTS,
+    "SCHEDULED_TASK_RETRY_MAX_ATTEMPTS",
+    5,
+    1,
+    10,
+  );
+  const scheduledTaskBackoffMs = parseIntegerSetting(
+    env.SCHEDULED_TASK_RETRY_BACKOFF_MS,
+    "SCHEDULED_TASK_RETRY_BACKOFF_MS",
+    30_000,
+    0,
+    3_600_000,
+  );
+  const scheduledTaskMaxBackoffMs = parseIntegerSetting(
+    env.SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS,
+    "SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS",
+    3_600_000,
+    0,
+    3_600_000,
+  );
 
   return {
     environment,
@@ -30,6 +69,15 @@ export function parseRuntimeConfig(env: Readonly<Record<string, string | undefin
       backoffMs,
       maxRetryAfterMs: 3_000,
       retryableStatusCodes: [408, 429, 500, 502, 503, 504],
+    },
+    telegramRetryPolicy: {
+      maxAttempts: telegramMaxAttempts,
+      maxRetryAfterSeconds: telegramMaxRetryAfterSeconds,
+    },
+    scheduledTaskRetryPolicy: {
+      maxAttempts: scheduledTaskMaxAttempts,
+      backoffMs: scheduledTaskBackoffMs,
+      maxBackoffMs: scheduledTaskMaxBackoffMs,
     },
   };
 }

@@ -262,6 +262,7 @@ describe("skill engine", () => {
       purgeExpired: async () => [],
     };
     let lookupCalls = 0;
+    const retryEvents: Array<{ event: string; fields: Readonly<Record<string, unknown>> | undefined }> = [];
     const idempotencyKeys: string[] = [];
     let detailCalls = 0;
     const engine = new SkillEngine({
@@ -271,6 +272,7 @@ describe("skill engine", () => {
       secretWriter,
       workflowExecutions,
       allowedHttpOrigins: new Set(["https://weather.example.test"]),
+      logger: { warn: (event, fields) => retryEvents.push({ event, fields }) },
       fetch: async (_input, init) => {
         lookupCalls += 1;
         idempotencyKeys.push(new Headers(init?.headers).get("x-idempotency-key") ?? "");
@@ -294,6 +296,10 @@ describe("skill engine", () => {
     const result = await engine.execute(replayContext, workflowTool.name, { city: "Oslo" });
     expect(result).toEqual({ forecast: "sunny", detail: "Clear skies" });
     expect(lookupCalls).toBe(2);
+    expect(retryEvents).toContainEqual({
+      event: "dependency.retry",
+      fields: { service: "workflow_step", attempt: 1, maxAttempts: 2, delayMs: 0, stepId: "lookup" },
+    });
     expect(new Set(idempotencyKeys).size).toBe(1);
     expect(detailCalls).toBe(1);
     expect(stored?.status).toBe("succeeded");
@@ -417,6 +423,39 @@ describe("skill engine", () => {
       fetch: async () => Response.json({ forecast: "sunny" }),
     });
     await expect(denied.execute(context, tool.name, { city: "Oslo" })).rejects.toMatchObject({ code: "RATE_LIMITED" });
+  });
+
+  test("emits a sanitized retry event for configured HTTP skill retries", async () => {
+    let calls = 0;
+    const retryEvents: Array<{ event: string; fields: Readonly<Record<string, unknown>> | undefined }> = [];
+    const retryableSkill = installation({
+      definition: {
+        ...definition,
+        retryPolicy: { maxAttempts: 2, backoffMs: 0, idempotent: true, retryableStatusCodes: [503] },
+      },
+    });
+    const engine = new SkillEngine({
+      skills: skillRepository([retryableSkill]),
+      rateLimiter: rateLimiter(),
+      secrets,
+      allowedHttpOrigins: new Set(["https://weather.example.test"]),
+      logger: { warn: (event, fields) => retryEvents.push({ event, fields }) },
+      fetch: async () => {
+        calls += 1;
+        return calls === 1
+          ? Response.json({ error: "temporary" }, { status: 503 })
+          : Response.json({ forecast: "sunny" });
+      },
+    });
+    const [tool] = await engine.available(context);
+    if (!tool) throw new Error("Expected an advertised retryable skill.");
+    await expect(engine.execute(context, tool.name, { city: "Oslo" })).resolves.toEqual({ forecast: "sunny" });
+    expect(retryEvents).toEqual([
+      {
+        event: "dependency.retry",
+        fields: { service: "http_skill", attempt: 1, maxAttempts: 2, delayMs: 0, statusCode: 503 },
+      },
+    ]);
   });
 
   test("times out native handlers that ignore their abort signal", async () => {

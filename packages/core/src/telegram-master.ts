@@ -1,9 +1,16 @@
 import { AppError } from "./errors.js";
 import { type BotFactory, CREATION_STEPS } from "./bot-factory.js";
 import { telegramAccountIds } from "./telegram-auth.js";
-import type { BotManagementRepository, MasterBotReply, MasterBotRepository, TelegramAuthRepository } from "./ports.js";
+import type {
+  BotManagementRepository,
+  Logger,
+  MasterBotReply,
+  MasterBotRepository,
+  TelegramAuthRepository,
+} from "./ports.js";
 import type { CreationSession, CreationStep, TenantId, UserId } from "./types.js";
 import { telegramApi } from "./telegram.js";
+import type { TelegramRetryPolicy } from "./telegram.js";
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -25,6 +32,8 @@ export class TelegramMasterBot {
   readonly #bots: BotManagementRepository;
   readonly #fetch: FetchLike;
   readonly #now: () => Date;
+  readonly #retryPolicy: TelegramRetryPolicy | undefined;
+  readonly #logger: Pick<Logger, "warn"> | undefined;
 
   constructor(input: {
     readonly token: string;
@@ -36,6 +45,8 @@ export class TelegramMasterBot {
     readonly bots: BotManagementRepository;
     readonly fetch?: FetchLike;
     readonly now?: () => Date;
+    readonly retryPolicy?: TelegramRetryPolicy;
+    readonly logger?: Pick<Logger, "warn">;
   }) {
     if (!input.token || input.token.length > 512 || /\s/.test(input.token)) {
       throw new AppError("UNSUPPORTED_CAPABILITY", "Master bot token is invalid.", 503);
@@ -67,6 +78,8 @@ export class TelegramMasterBot {
     this.#bots = input.bots;
     this.#fetch = input.fetch ?? globalThis.fetch.bind(globalThis);
     this.#now = input.now ?? (() => new Date());
+    this.#retryPolicy = input.retryPolicy;
+    this.#logger = input.logger;
   }
 
   async handleWebhook(request: Request): Promise<Response> {
@@ -105,7 +118,10 @@ export class TelegramMasterBot {
             now: this.#now().toISOString(),
           });
         }
-        await telegramApi<boolean>(this.#token, "sendMessage", reply, this.#fetch);
+        await telegramApi<boolean>(this.#token, "sendMessage", reply, this.#fetch, {
+          ...(this.#retryPolicy ? { retryPolicy: this.#retryPolicy } : {}),
+          ...(this.#logger ? { logger: this.#logger } : {}),
+        });
       } else if (reservation.state !== "ready") {
         await this.#sessions.saveUpdateReply({
           updateId: update.updateId,

@@ -99,6 +99,8 @@ const telegramMasterBot =
         sessions: repositories.masterBot,
         factory: botFactory,
         bots: repositories,
+        retryPolicy: config.telegramRetryPolicy,
+        logger,
       })
     : undefined;
 const telegramMasterWebhook = createTelegramMasterWebhookHandler(telegramMasterBot);
@@ -136,6 +138,7 @@ const baseAgentEngine = createOpenAICompatibleAgentEngine({
   conversations: repositories,
   secrets: secretStore,
   retryPolicy: config.modelRetryPolicy,
+  logger,
   tools: new DurableToolRegistry({
     registry: new CombinedToolRegistry([
       new ProviderCapabilityTools({ bots: repositories, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),
@@ -147,6 +150,7 @@ const baseAgentEngine = createOpenAICompatibleAgentEngine({
         secretWriter: secretStore,
         telegramGrants: repositories,
         authorizationAudit: repositories,
+        logger,
         allowedHttpOrigins: new Set(
           (process.env.HTTP_SKILL_ALLOWED_ORIGINS ?? "")
             .split(",")
@@ -189,9 +193,21 @@ const telegram = new TelegramManager({
   objects,
   ...(malwareScanner ? { malwareScanner } : {}),
   webhookBaseUrl: process.env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
+  retryPolicy: config.telegramRetryPolicy,
+  logger,
 });
 const scheduledTaskService = new ScheduledTaskService(repositories, repositories, telegram);
-const scheduledTaskRunner = new ScheduledTaskRunner(repositories, repositories, repositories, agentEngine, telegram);
+const scheduledTaskRunner = new ScheduledTaskRunner(
+  repositories,
+  repositories,
+  repositories,
+  agentEngine,
+  telegram,
+  undefined,
+  undefined,
+  config.scheduledTaskRetryPolicy,
+  logger,
+);
 const factoryAssistant =
   process.env.FACTORY_LLM_ENDPOINT?.trim() &&
   process.env.FACTORY_LLM_TOKEN?.trim() &&

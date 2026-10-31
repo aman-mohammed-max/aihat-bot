@@ -525,6 +525,54 @@ describe("Telegram media and API boundaries", () => {
     });
     expect(result).toBe(true);
     expect(attempts).toBe(2);
+
+    const retryEvents: Array<{ event: string; fields: Readonly<Record<string, unknown>> | undefined }> = [];
+    attempts = 0;
+    await telegramApi(
+      "not-for-logs",
+      "sendMessage",
+      { chat_id: 2, text: "private message" },
+      async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          return Response.json({ ok: false, parameters: { retry_after: 0 } }, { status: 429 });
+        }
+        return Response.json({ ok: true, result: true });
+      },
+      {
+        retryPolicy: { maxAttempts: 3, maxRetryAfterSeconds: 1 },
+        logger: { warn: (event, fields) => retryEvents.push({ event, fields }) },
+      },
+    );
+    expect(attempts).toBe(2);
+    expect(retryEvents).toEqual([
+      {
+        event: "dependency.retry",
+        fields: {
+          service: "telegram",
+          attempt: 1,
+          maxAttempts: 3,
+          delayMs: 0,
+          statusCode: 429,
+          method: "sendMessage",
+        },
+      },
+    ]);
+
+    attempts = 0;
+    await expect(
+      telegramApi(
+        "token",
+        "sendMessage",
+        { chat_id: 2, text: "hello" },
+        async () => {
+          attempts += 1;
+          return Response.json({ ok: false, parameters: { retry_after: 0 } }, { status: 429 });
+        },
+        { retryPolicy: { maxAttempts: 1, maxRetryAfterSeconds: 3 } },
+      ),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_UNAVAILABLE" });
+    expect(attempts).toBe(1);
   });
 });
 

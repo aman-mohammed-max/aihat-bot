@@ -8,7 +8,7 @@ import type {
   ConversationMessage,
   TenantId,
 } from "./types.js";
-import type { SecretStore } from "./ports.js";
+import type { Logger, SecretStore } from "./ports.js";
 
 export interface ProviderCapabilities {
   readonly toolCalling: boolean;
@@ -63,6 +63,7 @@ export interface OpenAICompatibleProviderOptions {
   readonly fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   readonly timeoutMs?: number;
   readonly retryPolicy?: ModelRetryPolicy;
+  readonly logger?: Pick<Logger, "warn">;
   /** Set only after the endpoint has been checked for this deployment/provider. */
   readonly toolCalling?: boolean;
   readonly imageInput?: boolean;
@@ -109,6 +110,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   readonly #fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   readonly #timeoutMs: number;
   readonly #retryPolicy: ModelRetryPolicy;
+  readonly #logger: Pick<Logger, "warn"> | undefined;
   readonly #capabilities: ProviderCapabilities;
 
   constructor(options: OpenAICompatibleProviderOptions) {
@@ -116,6 +118,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       throw new AppError("VALIDATION_ERROR", "Model request timeout must be a positive integer.", 400);
     }
     this.#retryPolicy = validateRetryPolicy(options.retryPolicy ?? DEFAULT_RETRY_POLICY);
+    this.#logger = options.logger;
     this.id = options.id;
     this.#defaultEndpoint = options.defaultEndpoint;
     this.#allowedOrigins = new Set([...options.allowedOrigins].map((origin) => new URL(origin).origin));
@@ -269,6 +272,17 @@ export class OpenAICompatibleProvider implements ModelProvider {
         ) {
           const waitMs = getModelRetryDelay(response.headers.get("retry-after"), attempt, this.#retryPolicy);
           if (waitMs !== undefined) {
+            try {
+              this.#logger?.warn("dependency.retry", {
+                service: "model",
+                attempt,
+                maxAttempts: this.#retryPolicy.maxAttempts,
+                delayMs: waitMs,
+                statusCode: response.status,
+              });
+            } catch {
+              // Observability must not change retry behavior.
+            }
             await cancelResponseBody(response);
             await waitForRetry(waitMs, controller.signal);
             continue;

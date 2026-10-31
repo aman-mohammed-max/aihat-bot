@@ -476,6 +476,7 @@ describe("Bun SQLite workflow executions", () => {
 describe("OpenAI-compatible provider boundary", () => {
   test("retries configured transient HTTP responses with a bounded Retry-After", async () => {
     let attempts = 0;
+    const retryEvents: Array<{ event: string; fields: Readonly<Record<string, unknown>> | undefined }> = [];
     const provider = new OpenAICompatibleProvider({
       id: "compatible",
       defaultEndpoint: "https://api.example.test/v1",
@@ -486,6 +487,7 @@ describe("OpenAI-compatible provider boundary", () => {
         maxRetryAfterMs: 100,
         retryableStatusCodes: [429, 503],
       },
+      logger: { warn: (event, fields) => retryEvents.push({ event, fields }) },
       secrets: { resolve: async () => "secret-value" },
       fetch: async () => {
         attempts += 1;
@@ -500,6 +502,18 @@ describe("OpenAI-compatible provider boundary", () => {
     });
     expect(attempts).toBe(2);
     expect(result.message.content).toBe("recovered");
+    expect(retryEvents).toEqual([
+      {
+        event: "dependency.retry",
+        fields: {
+          service: "model",
+          attempt: 1,
+          maxAttempts: 2,
+          delayMs: 0,
+          statusCode: 429,
+        },
+      },
+    ]);
   });
 
   test("does not retry a provider response whose Retry-After exceeds the configured cap", async () => {

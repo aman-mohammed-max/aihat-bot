@@ -107,6 +107,7 @@ export default {
     const miniAppResponse = await serveMiniApp(request, env.ASSETS);
     if (miniAppResponse) return miniAppResponse;
     const d1 = repositories(env);
+    const runtimeConfig = runtimeConfigFromEnv(env);
     const globalSkillCatalogResponse = await createGlobalSkillCatalogAdminHandler({
       skills: d1.skills,
       authorizationToken: env.SKILL_CATALOG_ADMIN_TOKEN ?? "",
@@ -228,13 +229,12 @@ export default {
       ...(factoryAssistant ? { assistant: factoryAssistant } : {}),
     })(request);
     if (factoryResponse) return factoryResponse;
+    const runtimeLogger = createRuntimeLogger();
     const baseAgentEngine = createOpenAICompatibleAgentEngine({
       conversations: d1,
       secrets: secretStore,
-      retryPolicy: parseRuntimeConfig({
-        MODEL_RETRY_MAX_ATTEMPTS: env.MODEL_RETRY_MAX_ATTEMPTS,
-        MODEL_RETRY_BACKOFF_MS: env.MODEL_RETRY_BACKOFF_MS,
-      }).modelRetryPolicy,
+      retryPolicy: runtimeConfig.modelRetryPolicy,
+      logger: runtimeLogger,
       tools: new DurableToolRegistry({
         registry: new CombinedToolRegistry([
           new ProviderCapabilityTools({ bots: d1, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),
@@ -246,6 +246,7 @@ export default {
             secretWriter: secretStore,
             telegramGrants: d1,
             authorizationAudit: d1,
+            logger: runtimeLogger,
             allowedHttpOrigins: new Set(
               env.HTTP_SKILL_ALLOWED_ORIGINS.split(",")
                 .map((origin) => origin.trim())
@@ -274,7 +275,6 @@ export default {
       ),
       allowedOrigins: modelAllowedOrigins,
     });
-    const runtimeLogger = createRuntimeLogger();
     const agentEngine = createUsageTrackingAgentEngine(
       createMemoryAwareAgentEngine(baseAgentEngine, memoryService, runtimeLogger),
       d1,
@@ -288,6 +288,8 @@ export default {
       objects: objectStore(env),
       ...(malwareScanner ? { malwareScanner } : {}),
       webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
+      retryPolicy: runtimeConfig.telegramRetryPolicy,
+      logger: runtimeLogger,
     });
     const scheduledTaskService = new ScheduledTaskService(d1, d1, telegram, scheduler(env));
     const masterBot =
@@ -300,6 +302,8 @@ export default {
             sessions: d1.masterBot,
             factory: botFactory,
             bots: d1,
+            retryPolicy: runtimeConfig.telegramRetryPolicy,
+            logger: runtimeLogger,
           })
         : undefined;
     const masterWebhookResponse = await createTelegramMasterWebhookHandler(masterBot)(request);
@@ -382,6 +386,8 @@ export default {
 
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     const d1 = repositories(env);
+    const runtimeConfig = runtimeConfigFromEnv(env);
+    const runtimeLogger = createRuntimeLogger();
     const secrets = new EncryptedSecretStore(
       d1.secretRecords,
       new EnvironmentSecretKeyring({
@@ -418,10 +424,8 @@ export default {
     const baseEngine = createOpenAICompatibleAgentEngine({
       conversations: d1,
       secrets: secretStore,
-      retryPolicy: parseRuntimeConfig({
-        MODEL_RETRY_MAX_ATTEMPTS: env.MODEL_RETRY_MAX_ATTEMPTS,
-        MODEL_RETRY_BACKOFF_MS: env.MODEL_RETRY_BACKOFF_MS,
-      }).modelRetryPolicy,
+      retryPolicy: runtimeConfig.modelRetryPolicy,
+      logger: runtimeLogger,
       tools: new DurableToolRegistry({
         registry: new CombinedToolRegistry([
           new ProviderCapabilityTools({ bots: d1, secrets: secretStore, allowedOrigins: modelAllowedOrigins }),
@@ -433,6 +437,7 @@ export default {
             secretWriter: secretStore,
             telegramGrants: d1,
             authorizationAudit: d1,
+            logger: runtimeLogger,
             allowedHttpOrigins: new Set(
               env.HTTP_SKILL_ALLOWED_ORIGINS.split(",")
                 .map((origin) => origin.trim())
@@ -455,7 +460,6 @@ export default {
       ),
       allowedOrigins: modelAllowedOrigins,
     });
-    const runtimeLogger = createRuntimeLogger();
     const engine = createUsageTrackingAgentEngine(
       createMemoryAwareAgentEngine(baseEngine, memoryService, runtimeLogger),
       d1,
@@ -468,8 +472,20 @@ export default {
       engine,
       objects: objectStore(env),
       webhookBaseUrl: env.TELEGRAM_WEBHOOK_BASE_URL ?? "",
+      retryPolicy: runtimeConfig.telegramRetryPolicy,
+      logger: runtimeLogger,
     });
-    const runner = new ScheduledTaskRunner(d1, d1, d1, engine, telegram, scheduler(env));
+    const runner = new ScheduledTaskRunner(
+      d1,
+      d1,
+      d1,
+      engine,
+      telegram,
+      scheduler(env),
+      undefined,
+      runtimeConfig.scheduledTaskRetryPolicy,
+      runtimeLogger,
+    );
     for (const message of batch.messages) {
       const body = message.body;
       if (
@@ -499,6 +515,19 @@ export default {
     await Promise.all(dueJobIds.map((jobId) => env.JOBS.send({ type: "scheduled_task", payloadRef: jobId })));
   },
 };
+
+function runtimeConfigFromEnv(env: Env) {
+  return parseRuntimeConfig({
+    APP_ENV: env.APP_ENV,
+    MODEL_RETRY_MAX_ATTEMPTS: env.MODEL_RETRY_MAX_ATTEMPTS,
+    MODEL_RETRY_BACKOFF_MS: env.MODEL_RETRY_BACKOFF_MS,
+    TELEGRAM_RETRY_MAX_ATTEMPTS: env.TELEGRAM_RETRY_MAX_ATTEMPTS,
+    TELEGRAM_RETRY_MAX_AFTER_SECONDS: env.TELEGRAM_RETRY_MAX_AFTER_SECONDS,
+    SCHEDULED_TASK_RETRY_MAX_ATTEMPTS: env.SCHEDULED_TASK_RETRY_MAX_ATTEMPTS,
+    SCHEDULED_TASK_RETRY_BACKOFF_MS: env.SCHEDULED_TASK_RETRY_BACKOFF_MS,
+    SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS: env.SCHEDULED_TASK_RETRY_MAX_BACKOFF_MS,
+  });
+}
 
 function createRuntimeLogger(): Logger {
   const write = (level: "info" | "warn" | "error", event: string, fields?: Readonly<Record<string, unknown>>) => {

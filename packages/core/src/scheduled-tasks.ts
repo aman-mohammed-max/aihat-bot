@@ -7,6 +7,7 @@ import type {
   ScheduledTaskRepository,
   ScheduledTaskScheduler,
 } from "./ports.js";
+import type { Logger } from "./ports.js";
 import type { BotId, JobId, ScheduledTask, ScheduledTaskId, TenantId, UserId } from "./types.js";
 
 export interface ScheduledTaskNotifier {
@@ -171,7 +172,22 @@ export class ScheduledTaskService {
 
 export type ScheduledTaskRunResult = "completed" | "retrying" | "failed" | "cancelled" | "not_claimed";
 
+export interface ScheduledTaskRetryPolicy {
+  readonly maxAttempts: number;
+  readonly backoffMs: number;
+  readonly maxBackoffMs: number;
+}
+
+const DEFAULT_SCHEDULED_TASK_RETRY_POLICY: ScheduledTaskRetryPolicy = {
+  maxAttempts: 5,
+  backoffMs: 30_000,
+  maxBackoffMs: 3_600_000,
+};
+
 export class ScheduledTaskRunner {
+  readonly #retryPolicy: ScheduledTaskRetryPolicy;
+  readonly #logger: Pick<Logger, "warn"> | undefined;
+
   constructor(
     private readonly tasks: ScheduledTaskRepository,
     private readonly bots: BotRepository,
@@ -180,7 +196,12 @@ export class ScheduledTaskRunner {
     private readonly notifier: ScheduledTaskNotifier,
     private readonly scheduler?: ScheduledTaskScheduler,
     private readonly clock: () => string = () => new Date().toISOString(),
-  ) {}
+    retryPolicy: ScheduledTaskRetryPolicy = DEFAULT_SCHEDULED_TASK_RETRY_POLICY,
+    logger?: Pick<Logger, "warn">,
+  ) {
+    this.#retryPolicy = validateScheduledTaskRetryPolicy(retryPolicy);
+    this.#logger = logger;
+  }
 
   async process(jobId: JobId, now = this.clock()): Promise<ScheduledTaskRunResult> {
     const job = await this.tasks.claimScheduledJob({
@@ -259,7 +280,7 @@ export class ScheduledTaskRunner {
       return "completed";
     } catch {
       const failedAt = laterTimestamp(now, this.clock());
-      if (job.attempts >= 5) {
+      if (job.attempts >= this.#retryPolicy.maxAttempts) {
         await this.tasks.failScheduledJob({ jobId: job.id, now: failedAt });
         await this.tasks.setScheduledTaskStatus({
           tenantId: task.tenantId,
@@ -268,12 +289,24 @@ export class ScheduledTaskRunner {
           status: "failed",
           now: failedAt,
         });
+        this.#observeRetry("scheduled_task.failed", {
+          service: "scheduled_task",
+          outcome: "failed",
+          attempt: job.attempts,
+          maxAttempts: this.#retryPolicy.maxAttempts,
+        });
         return "failed";
       }
-      const delay = Math.min(3_600_000, 30_000 * 2 ** (job.attempts - 1));
+      const delay = Math.min(this.#retryPolicy.maxBackoffMs, this.#retryPolicy.backoffMs * 2 ** (job.attempts - 1));
       const availableAt = new Date(Date.parse(failedAt) + delay).toISOString();
       await this.tasks.retryScheduledJob({ jobId: job.id, availableAt, now: failedAt });
       await this.#schedule(task, availableAt, job.id);
+      this.#observeRetry("dependency.retry", {
+        service: "scheduled_task",
+        attempt: job.attempts,
+        maxAttempts: this.#retryPolicy.maxAttempts,
+        delayMs: delay,
+      });
       return "retrying";
     }
   }
@@ -294,6 +327,31 @@ export class ScheduledTaskRunner {
       payloadRef: jobId,
     });
   }
+
+  #observeRetry(event: string, fields: Readonly<Record<string, unknown>>): void {
+    try {
+      this.#logger?.warn(event, fields);
+    } catch {
+      // Observability must not change job recovery behavior.
+    }
+  }
+}
+
+function validateScheduledTaskRetryPolicy(policy: ScheduledTaskRetryPolicy): ScheduledTaskRetryPolicy {
+  if (
+    !Number.isSafeInteger(policy.maxAttempts) ||
+    policy.maxAttempts < 1 ||
+    policy.maxAttempts > 10 ||
+    !Number.isSafeInteger(policy.backoffMs) ||
+    policy.backoffMs < 0 ||
+    policy.backoffMs > 3_600_000 ||
+    !Number.isSafeInteger(policy.maxBackoffMs) ||
+    policy.maxBackoffMs < 0 ||
+    policy.maxBackoffMs > 3_600_000
+  ) {
+    throw new AppError("VALIDATION_ERROR", "Scheduled task retry policy is invalid.", 400);
+  }
+  return { ...policy };
 }
 
 async function stableJobId(taskId: string, runKey: string): Promise<JobId> {

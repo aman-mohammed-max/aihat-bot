@@ -8,10 +8,23 @@ import type {
   SecretWriter,
   TelegramDeployment,
   TelegramRepository,
+  Logger,
 } from "./ports.js";
 import type { AgentImageAttachment, BotId, TelegramDeploymentId, UserId } from "./types.js";
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export interface TelegramRetryPolicy {
+  readonly maxAttempts: number;
+  readonly maxRetryAfterSeconds: number;
+}
+
+export interface TelegramApiOptions {
+  readonly retryPolicy?: TelegramRetryPolicy;
+  readonly logger?: Pick<Logger, "warn">;
+}
+
+const DEFAULT_TELEGRAM_RETRY_POLICY: TelegramRetryPolicy = { maxAttempts: 2, maxRetryAfterSeconds: 3 };
 
 interface TelegramAgentReply {
   readonly text: string;
@@ -28,6 +41,8 @@ export class TelegramManager {
   readonly #objects: ObjectStore | undefined;
   readonly #malwareScanner: MalwareScanner | undefined;
   readonly #fetch: FetchLike;
+  readonly #retryPolicy: TelegramRetryPolicy;
+  readonly #logger: Pick<Logger, "warn"> | undefined;
 
   constructor(input: {
     readonly repository: TelegramRepository;
@@ -38,6 +53,8 @@ export class TelegramManager {
     readonly objects?: ObjectStore;
     readonly malwareScanner?: MalwareScanner;
     readonly fetch?: FetchLike;
+    readonly retryPolicy?: TelegramRetryPolicy;
+    readonly logger?: Pick<Logger, "warn">;
   }) {
     this.#repository = input.repository;
     this.#bots = input.bots;
@@ -47,6 +64,8 @@ export class TelegramManager {
     this.#objects = input.objects;
     this.#malwareScanner = input.malwareScanner;
     this.#fetch = input.fetch ?? globalThis.fetch.bind(globalThis);
+    this.#retryPolicy = normalizeTelegramRetryPolicy(input.retryPolicy ?? DEFAULT_TELEGRAM_RETRY_POLICY);
+    this.#logger = input.logger;
   }
 
   async connect(input: {
@@ -69,7 +88,7 @@ export class TelegramManager {
     });
     if (existing) throw new AppError("CONFLICT", "This bot already has a Telegram deployment.", 409);
 
-    const identity = await telegramApi<{ id: number; is_bot: boolean }>(input.token, "getMe", undefined, this.#fetch);
+    const identity = await this.#api<{ id: number; is_bot: boolean }>(input.token, "getMe", undefined);
     if (!Number.isSafeInteger(identity.id) || identity.id <= 0 || identity.is_bot !== true) {
       throw new AppError("DEPENDENCY_UNAVAILABLE", "Telegram did not return a valid bot identity.", 502);
     }
@@ -92,18 +111,13 @@ export class TelegramManager {
       };
       await this.#repository.createTelegramDeployment(deployment);
       saved = true;
-      await telegramApi<boolean>(
-        input.token,
-        "setWebhook",
-        {
-          url: webhookUrl(base, id),
-          secret_token: webhookSecret,
-          allowed_updates: ["message"],
-          max_connections: 20,
-          drop_pending_updates: false,
-        },
-        this.#fetch,
-      );
+      await this.#api<boolean>(input.token, "setWebhook", {
+        url: webhookUrl(base, id),
+        secret_token: webhookSecret,
+        allowed_updates: ["message"],
+        max_connections: 20,
+        drop_pending_updates: false,
+      });
       await this.#repository.setTelegramDeploymentStatus({ tenantId: input.tenantId, id, status: "active" });
       return { ...deployment, status: "active" };
     } catch (cause) {
@@ -132,7 +146,7 @@ export class TelegramManager {
     const deployment = await this.#repository.getOwnedTelegramDeployment(input);
     if (!deployment) throw new AppError("NOT_FOUND", "Telegram deployment was not found.", 404);
     const token = await this.#secrets.resolve(input.tenantId, deployment.credentialRef);
-    await telegramApi<boolean>(token, "deleteWebhook", { drop_pending_updates: false }, this.#fetch);
+    await this.#api<boolean>(token, "deleteWebhook", { drop_pending_updates: false });
     await this.#repository.deleteTelegramDeployment({ tenantId: input.tenantId, id: deployment.id });
     await Promise.all([
       this.#secrets.delete(input.tenantId, deployment.credentialRef),
@@ -152,7 +166,7 @@ export class TelegramManager {
     if (!deployment) throw new AppError("DEPENDENCY_UNAVAILABLE", "Telegram deployment is unavailable.", 503);
     const token = await this.#secrets.resolve(input.tenantId, deployment.credentialRef);
     for (const chunk of splitTelegramText(input.text)) {
-      await telegramApi<boolean>(token, "sendMessage", { chat_id: input.telegramUserId, text: chunk }, this.#fetch);
+      await this.#api<boolean>(token, "sendMessage", { chat_id: input.telegramUserId, text: chunk });
     }
   }
 
@@ -265,23 +279,21 @@ export class TelegramManager {
           : undefined;
         for (const chunk of splitTelegramText(responseText)) {
           if (chunk) {
-            await telegramApi<boolean>(
-              token,
-              "sendMessage",
-              { chat_id: chatId, ...(threadId === undefined ? {} : { message_thread_id: threadId }), text: chunk },
-              this.#fetch,
-            );
+            await this.#api<boolean>(token, "sendMessage", {
+              chat_id: chatId,
+              ...(threadId === undefined ? {} : { message_thread_id: threadId }),
+              text: chunk,
+            });
           }
         }
         for (const attachment of attachmentRefs) {
           const photo = await this.#secrets.resolve(deployment.tenantId, attachment.secretRef);
           if (!isHttpsImageUrl(photo)) throw new AppError("INTERNAL_ERROR", "Stored image attachment is invalid.", 500);
-          await telegramApi<boolean>(
-            token,
-            "sendPhoto",
-            { chat_id: chatId, ...(threadId === undefined ? {} : { message_thread_id: threadId }), photo },
-            this.#fetch,
-          );
+          await this.#api<boolean>(token, "sendPhoto", {
+            chat_id: chatId,
+            ...(threadId === undefined ? {} : { message_thread_id: threadId }),
+            photo,
+          });
         }
       }
       await this.#repository.completeTelegramUpdate({
@@ -383,7 +395,10 @@ export class TelegramManager {
     if (!userContent && !images?.length) return { text: "" };
 
     const threadId = Number.isSafeInteger(message.message_thread_id) ? message.message_thread_id : undefined;
-    const stopTyping = startTelegramTyping(token, message.chat.id, this.#fetch, threadId);
+    const stopTyping = startTelegramTyping(token, message.chat.id, this.#fetch, threadId, {
+      retryPolicy: this.#retryPolicy,
+      ...(this.#logger ? { logger: this.#logger } : {}),
+    });
     try {
       try {
         const result = await this.#engine.respond({
@@ -449,12 +464,7 @@ export class TelegramManager {
       };
     }
 
-    const file = await telegramApi<{ readonly file_path?: unknown }>(
-      token,
-      "getFile",
-      { file_id: fileId },
-      this.#fetch,
-    );
+    const file = await this.#api<{ readonly file_path?: unknown }>(token, "getFile", { file_id: fileId });
     if (typeof file.file_path !== "string" || !isSafeTelegramFilePath(file.file_path)) {
       return { unsupported: "Telegram couldn't provide that attachment. Please send it again." };
     }
@@ -539,6 +549,13 @@ export class TelegramManager {
     if (deleted.every((result) => result.status === "fulfilled")) {
       await this.#repository.clearTelegramUpdateAttachments({ deploymentId, updateId });
     }
+  }
+
+  #api<T>(token: string, method: string, body: unknown): Promise<T> {
+    return telegramApi(token, method, body, this.#fetch, {
+      retryPolicy: this.#retryPolicy,
+      ...(this.#logger ? { logger: this.#logger } : {}),
+    });
   }
 }
 
@@ -664,8 +681,15 @@ function parseTelegramDocument(value: unknown): TelegramMessage["document"] {
   };
 }
 
-export async function telegramApi<T>(token: string, method: string, body: unknown, fetcher: FetchLike): Promise<T> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+export async function telegramApi<T>(
+  token: string,
+  method: string,
+  body: unknown,
+  fetcher: FetchLike,
+  options: TelegramApiOptions = {},
+): Promise<T> {
+  const retryPolicy = normalizeTelegramRetryPolicy(options.retryPolicy ?? DEFAULT_TELEGRAM_RETRY_POLICY);
+  for (let attempt = 1; attempt <= retryPolicy.maxAttempts; attempt += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
     let retryAfter: number | undefined;
@@ -690,7 +714,7 @@ export async function telegramApi<T>(token: string, method: string, body: unknow
         isRecord(value.parameters) &&
         Number.isSafeInteger(value.parameters.retry_after) &&
         (value.parameters.retry_after as number) >= 0 &&
-        (value.parameters.retry_after as number) <= 3
+        (value.parameters.retry_after as number) <= retryPolicy.maxRetryAfterSeconds
       ) {
         retryAfter = value.parameters.retry_after as number;
       }
@@ -699,12 +723,38 @@ export async function telegramApi<T>(token: string, method: string, body: unknow
     } finally {
       clearTimeout(timeout);
     }
-    if (retryAfter === undefined || attempt > 0) {
+    if (retryAfter === undefined || attempt >= retryPolicy.maxAttempts) {
       throw new AppError("DEPENDENCY_UNAVAILABLE", "Telegram Bot API request failed.", 502);
+    }
+    try {
+      options.logger?.warn("dependency.retry", {
+        service: "telegram",
+        attempt,
+        maxAttempts: retryPolicy.maxAttempts,
+        delayMs: retryAfter * 1000,
+        statusCode: 429,
+        method,
+      });
+    } catch {
+      // Observability must not change retry behavior.
     }
     if (retryAfter > 0) await new Promise((resolve) => setTimeout(resolve, retryAfter * 1000));
   }
   throw new AppError("DEPENDENCY_UNAVAILABLE", "Telegram Bot API request failed.", 502);
+}
+
+function normalizeTelegramRetryPolicy(policy: TelegramRetryPolicy): TelegramRetryPolicy {
+  if (
+    !Number.isSafeInteger(policy.maxAttempts) ||
+    policy.maxAttempts < 1 ||
+    policy.maxAttempts > 3 ||
+    !Number.isSafeInteger(policy.maxRetryAfterSeconds) ||
+    policy.maxRetryAfterSeconds < 0 ||
+    policy.maxRetryAfterSeconds > 3
+  ) {
+    throw new AppError("VALIDATION_ERROR", "Telegram retry policy is invalid.", 400);
+  }
+  return { ...policy };
 }
 
 async function readBoundedRequestText(request: Request, maxBytes: number): Promise<string> {
@@ -802,13 +852,20 @@ async function downloadTelegramFile(
   }
 }
 
-function startTelegramTyping(token: string, chatId: number, fetcher: FetchLike, threadId?: number): () => void {
+function startTelegramTyping(
+  token: string,
+  chatId: number,
+  fetcher: FetchLike,
+  threadId?: number,
+  options?: TelegramApiOptions,
+): () => void {
   const send = () =>
     telegramApi<boolean>(
       token,
       "sendChatAction",
       { chat_id: chatId, ...(threadId === undefined ? {} : { message_thread_id: threadId }), action: "typing" },
       fetcher,
+      options,
     );
   void send().catch(() => undefined);
   const timer = setInterval(() => void send().catch(() => undefined), 4_000);
